@@ -1,0 +1,23 @@
+{
+  "name": "otg-field-cost-app",
+  "version": "0.45.0",
+  "description": "Instacart Cart Tech Operations - Field Cost App (Technician persona, v0.1)",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env server.js",
+    "seed": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env seed.js",
+    "reset": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed.js",
+    "seed:demo": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed-demo.js",
+    "import-csv": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env import-csv.js"
+  },
+  "dependencies": {
+    "csv-parse": "^5.5.6",
+    "express": "^4.21.0",
+    "pdf-parse": "^1.1.1",
+    "pdfkit": "^0.15.1",
+    "xlsx": "^0.18.5"
+  }
+}
