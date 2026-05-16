@@ -1,0 +1,6 @@
+external_id,source_system,work_type,store_id,store_name,cart_count,scheduled_date,description,status,assigned_email
+MX-RTR-2406-200,maintainx,retrofit,WF-EDG,Whole Foods Edgewater,15,2026-05-10,Replace shelf brackets and recalibrate scanners on 15 carts.,open,aramiwale@example.com
+MX-DPL-2406-201,maintainx,deployment,SR-PAR,ShopRite Paramus,25,2026-05-12,Initial install of 25 new Caper Carts plus on-floor staff training.,open,aramiwale@example.com
+FD-RPR-2406-2050,freshdesk,repair,SS-HOB,Stop & Shop Hoboken,1,2026-05-08,Cart #14 reporting battery drain after charge.,open,aramiwale@example.com
+FD-SVC-2406-2051,freshdesk,service,WF-EDG,Whole Foods Edgewater,4,2026-05-09,Weekly service check on 4 carts.,open,carlos.m@example.com
+MX-DPL-2406-202,maintainx,deployment,SR-CLF,ShopRite Clifton,18,2026-05-15,Initial install of 18 new carts.,open,carlos.m@example.com

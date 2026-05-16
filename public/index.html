@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="theme-color" content="#003D29" />
+<title>Caper CostWise</title>
+
+<!-- Leaflet (OpenStreetMap) for the Map view -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+
+<!-- Login / user picker -->
+<div id="loginScreen" class="screen-fullscreen">
+  <div class="login-card">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="carrotGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%"  stop-color="#FF8A1E"/>
+              <stop offset="100%" stop-color="#E55A00"/>
+            </linearGradient>
+            <linearGradient id="leafGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%"  stop-color="#5BC83C"/>
+              <stop offset="100%" stop-color="#2F7D1E"/>
+            </linearGradient>
+          </defs>
+          <!-- Carrot body (rounded triangle, tapered tip) -->
+          <path d="M16 22
+                   C 18 22, 24 22, 32 22
+                   C 40 22, 46 22, 48 22
+                   L 36 60
+                   C 34 62, 30 62, 28 60 Z"
+                fill="url(#carrotGrad)" />
+          <!-- Subtle ridges -->
+          <path d="M22 28 L26 56" stroke="#C25500" stroke-width="0.7" stroke-linecap="round" opacity="0.5"/>
+          <path d="M32 28 L32 56" stroke="#C25500" stroke-width="0.7" stroke-linecap="round" opacity="0.4"/>
+          <path d="M42 28 L38 56" stroke="#C25500" stroke-width="0.7" stroke-linecap="round" opacity="0.5"/>
+          <!-- Highlight -->
+          <path d="M20 28 C 24 30, 28 30, 30 28" stroke="#FFD0A8" stroke-width="1.5" stroke-linecap="round" opacity="0.7" fill="none"/>
+          <!-- Leaves -->
+          <path d="M32 22 C 24 20, 16 16, 14 8 C 22 8, 28 12, 32 18 Z" fill="url(#leafGrad)"/>
+          <path d="M32 22 C 30 16, 30 8, 32 2 C 36 8, 36 16, 34 22 Z" fill="url(#leafGrad)"/>
+          <path d="M32 22 C 40 20, 48 16, 50 8 C 42 8, 36 12, 32 18 Z" fill="url(#leafGrad)"/>
+          <path d="M22 14 L 26 18" stroke="#1F5A12" stroke-width="0.5" opacity="0.6"/>
+          <path d="M32 8 L 32 16" stroke="#1F5A12" stroke-width="0.5" opacity="0.6"/>
+          <path d="M42 14 L 38 18" stroke="#1F5A12" stroke-width="0.5" opacity="0.6"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-title">Caper CostWise</div>
+        <div class="brand-sub">Field Cost &amp; Operations</div>
+      </div>
+    </div>
+    <p class="login-hint">Pick a technician to sign in:</p>
+    <div id="userList" class="user-list"></div>
+    <p class="login-foot">Stand-in for Okta SSO · v0.3 dev build</p>
+  </div>
+</div>
+
+<!-- App shell -->
+<div id="app" class="app bg-pattern hidden">
+
+  <!-- Header -->
+  <header class="app-header">
+    <button id="backBtn" class="hdr-btn hidden" data-act="back">‹</button>
+    <div class="hdr-title" id="hdrTitle">Today</div>
+    <div style="display:flex; gap:6px;">
+      <button class="hdr-btn hidden" id="hdrPwdBtn"      data-act="change-password" title="Change password">🔒</button>
+      <button class="hdr-btn hidden" id="hdrSettingsBtn" data-act="settings" title="Settings">⚙</button>
+      <button class="hdr-btn" data-act="logout" title="Sign out">⎋</button>
+    </div>
+  </header>
+
+  <!-- Tab views -->
+  <main id="view" class="view"></main>
+
+  <!-- Bottom tab bar (varies by role; populated by app.js after sign-in) -->
+  <nav class="tabbar" id="tabbar"></nav>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
