@@ -3,6 +3,7 @@ import Icon from '../../lib/icons.jsx'
 import { Logo } from '../../App.jsx'
 import { Avatar, IconButton, Badge, SearchInput, Segmented } from '../../components/ui.jsx'
 import { USERS, ROLE_LABEL } from '../../data/mock.js'
+import { useData } from '../../data/DataProvider.jsx'
 import Dashboard from './Dashboard.jsx'
 import Approvals from './Approvals.jsx'
 import ConsoleInvoiceDetail from './ConsoleInvoiceDetail.jsx'
@@ -35,16 +36,18 @@ const NAV = [
 ]
 const TITLES = { dashboard: 'Overview', approvals: 'Approvals', invoiceDetail: 'Invoice', invoices: 'Invoices', corpcard: 'Corporate card', forecast: 'Spend & forecast', team: 'Team', policy: 'Policy', admin: 'Users & roles', apexport: 'AP export', settings: 'Settings' }
 
-export default function Console({ screen = 'dashboard', role = 'pm', go }) {
-  const me = USERS[role === 'pm' ? 'sai' : role === 'sr_manager' ? 'reshmi' : 'maitland']
+export default function Console({ screen = 'dashboard', role = 'pm', go, onLogout }) {
+  const D = useData()
+  const me = D.me || USERS[role === 'pm' ? 'sai' : role === 'sr_manager' ? 'reshmi' : 'maitland']
   const [active, setActive] = useState(screen)
-  const nav = (s) => { setActive(s); go && go(s) }
+  const [params, setParams] = useState(null)
+  const nav = (s, p = null) => { setParams(p); setActive(s); go && go(s) }
   const can = (roles) => !roles || roles.includes(role)
 
   const pages = {
     dashboard: <Dashboard role={role} nav={nav} />,
     approvals: <Approvals role={role} nav={nav} />,
-    invoiceDetail: <ConsoleInvoiceDetail role={role} nav={nav} />,
+    invoiceDetail: <ConsoleInvoiceDetail role={role} nav={nav} params={params} />,
     invoices: <Invoices role={role} nav={nav} />,
     corpcard: <CorpCard role={role} nav={nav} />,
     forecast: <Forecast role={role} nav={nav} />,
@@ -76,7 +79,7 @@ export default function Console({ screen = 'dashboard', role = 'pm', go }) {
                     <button key={id} onClick={() => nav(id)}
                       className={`w-full flex items-center gap-2.5 rounded-md px-3 py-2 mb-0.5 text-left ${on ? 'bg-brand-50 text-brand-800 font-semibold' : 'text-ink-2 hover:bg-surface-2'}`}>
                       <Icon name={icon} size={18} />{label}
-                      {badge && <Badge tone="danger" className="ml-auto">7</Badge>}
+                      {badge && <Badge tone="danger" className="ml-auto">{(D.queue || []).length || ''}</Badge>}
                     </button>
                   )
                 })}
@@ -90,7 +93,7 @@ export default function Console({ screen = 'dashboard', role = 'pm', go }) {
             <div className="font-semibold truncate">{me.name}</div>
             <div className="text-2xs text-muted">{ROLE_LABEL[me.role]}</div>
           </div>
-          <IconButton icon="logout" label="Sign out" size={32} className="ml-auto" />
+          <IconButton icon="logout" label="Sign out" size={32} className="ml-auto" onClick={onLogout} />
         </div>
       </aside>
 

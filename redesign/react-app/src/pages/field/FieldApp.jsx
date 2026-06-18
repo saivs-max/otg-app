@@ -2,6 +2,7 @@ import { useState } from 'react'
 import Icon from '../../lib/icons.jsx'
 import { IconButton } from '../../components/ui.jsx'
 import { USERS } from '../../data/mock.js'
+import { useData } from '../../data/DataProvider.jsx'
 import Login from './Login.jsx'
 import Onboarding from './Onboarding.jsx'
 import Today from './Today.jsx'
@@ -22,10 +23,15 @@ const TITLES = { today: 'Today', timer: 'Time tracker', add: 'Add expense', invo
 // Which bottom tab is highlighted for sub-screens
 const TAB_OF = { today: 'today', timer: 'timer', add: 'add', invoice: 'mine', mine: 'mine', detail: 'mine', profile: null }
 
-export default function FieldApp({ screen = 'today', go }) {
-  const me = USERS.aramiwale
+export default function FieldApp({ screen = 'today', go, onLogout }) {
+  const D = useData()
+  const me = D.me || USERS.aramiwale
   const [active, setActive] = useState(screen)
-  const nav = (s) => { setActive(s); go && go(s) }
+  const [params, setParams] = useState(null)
+  const nav = (s, p = null) => {
+    if (s === 'login' && onLogout) return onLogout()   // product mode: real sign-out (clears session)
+    setParams(p); setActive(s); go && go(s)
+  }
 
   // Full-bleed screens (no chrome)
   if (active === 'login') return <Login onDone={() => nav('onboarding')} />
@@ -37,7 +43,7 @@ export default function FieldApp({ screen = 'today', go }) {
     add: <AddExpense me={me} nav={nav} />,
     invoice: <InvoiceReview me={me} nav={nav} />,
     mine: <MyInvoices me={me} nav={nav} />,
-    detail: <InvoiceDetail me={me} nav={nav} />,
+    detail: <InvoiceDetail me={me} nav={nav} params={params} />,
     profile: <Profile me={me} nav={nav} />,
   }
   const activeTab = TAB_OF[active]
