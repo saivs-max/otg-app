@@ -64,7 +64,7 @@ function LoginReal({ onLogin }) {
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center text-center mb-6">
           <div className="w-20 h-20 rounded-2xl bg-white grid place-items-center shadow-pop"><Logo size={56} /></div>
-          <h1 className="mt-5 text-3xl font-bold">Caper CostWise</h1>
+          <h1 className="mt-5 text-3xl font-bold">Bread</h1>
           <p className="mt-1 text-brand-100">Field Cost &amp; Operations</p>
         </div>
         <form onSubmit={submit} className="bg-surface text-ink rounded-2xl p-5 shadow-pop space-y-3">

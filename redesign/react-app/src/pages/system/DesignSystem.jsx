@@ -26,7 +26,7 @@ function Swatch({ hex, name, note, dark }) {
 }
 
 const TYPE = [
-  { sample: 'Caper CostWise', label: 'Display · 36 / Bold', cls: 'text-4xl font-bold' },
+  { sample: 'Bread', label: 'Display · 36 / Bold', cls: 'text-4xl font-bold' },
   { sample: 'Approvals queue', label: 'Title · 24 / Bold', cls: 'text-2xl font-bold' },
   { sample: 'Spend by category', label: 'Heading · 20 / Semibold', cls: 'text-xl font-semibold' },
   { sample: 'The quick brown technician logs time and expenses.', label: 'Body · 16 / Regular', cls: 'text-base' },

@@ -1,5 +1,6 @@
 // OTG Field Cost App — Express server (v0.1, technician persona)
 const path    = require('path');
+const fs      = require('fs');
 const express = require('express');
 const { open, ensureSchema } = require('./db');
 
@@ -83,22 +84,31 @@ app.use('/api', require('./routes/unplanned')(db));   // v0.63 — unplanned/was
 // Health check
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-// v0.66 — Redesigned React app ("CostWise v2"), served ALONGSIDE the existing
-// vanilla UI and backed by the same API. Lets the redesign be piloted behind a
-// flag without disturbing the current frontend. Built from redesign/react-app
-// via `npm run build:web` → web-dist/. The path-scoped SPA fallback only catches
-// /v2 routes, so / and /api are untouched.
-const V2_DIR = path.join(__dirname, 'web-dist');
-app.use('/v2', express.static(V2_DIR));
-app.get(/^\/v2(\/.*)?$/, (_req, res) => res.sendFile(path.join(V2_DIR, 'index.html')));
+// ── Frontend: the redesigned "Bread" app (React + Tailwind) is THE UI ──
+// It is what every persona sees at the site root and talks to this same /api.
+// Built from redesign/react-app via `npm run build:web` (locally) or by the
+// Docker multi-stage build (on deploy) → web-dist/. The previous vanilla UI is
+// preserved at /legacy as an escape hatch.
+const WEB_DIR    = path.join(__dirname, 'web-dist');
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const HAS_WEB    = fs.existsSync(path.join(WEB_DIR, 'index.html'));
 
-// v0.66 — Make the redesigned app the default: the site root redirects to /v2
-// so visitors land on CostWise v2. The legacy UI stays reachable at /legacy.
-app.get('/', (_req, res) => res.redirect(302, '/v2/'));
-app.get('/legacy', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-
-// Static frontend (legacy vanilla app assets: /app.js, /styles.css, …)
-app.use(express.static(path.join(__dirname, 'public')));
+if (HAS_WEB) {
+  app.use(express.static(WEB_DIR));                                 // Bread index.html + hashed /assets
+  app.use('/legacy', express.static(PUBLIC_DIR));                   // legacy UI (opt-in)
+  app.use(express.static(PUBLIC_DIR));                              // legacy assets so /legacy resolves
+  app.get(/^\/v2(\/.*)?$/, (_req, res) => res.redirect(301, '/')); // old /v2 bookmarks → root
+  // Single-page-app shell for any non-API, non-legacy GET.
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && !req.path.startsWith('/api/') && !req.path.startsWith('/legacy')) {
+      return res.sendFile(path.join(WEB_DIR, 'index.html'));
+    }
+    next();
+  });
+} else {
+  // No build present yet (e.g. local dev before `npm run build:web`) → legacy UI.
+  app.use(express.static(PUBLIC_DIR));
+}
 
 // Errors
 // v0.45 — BUG-008 fix: map body-parser errors to proper HTTP codes so the
@@ -119,8 +129,8 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('');
-  console.log('  Caper CostWise — v0.66.0 (redesigned React app at /v2, served alongside the existing UI)');
-  console.log(`  → http://localhost:${PORT}        (existing UI)`);
-  console.log(`  → http://localhost:${PORT}/v2     (redesigned app — React + Tailwind, WCAG AA)`);
+  console.log('  Bread — v0.66.0 · Field Cost & Operations (redesigned React UI)');
+  console.log(`  → http://localhost:${PORT}         Bread (the app)`);
+  console.log(`  → http://localhost:${PORT}/legacy  legacy UI`);
   console.log('');
 });

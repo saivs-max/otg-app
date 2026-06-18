@@ -10,3 +10,4 @@ dist/
 /otg-app/
 err.txt
 COMMIT_*.txt
+web-dist/

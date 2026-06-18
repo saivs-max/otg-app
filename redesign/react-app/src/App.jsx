@@ -40,7 +40,7 @@ export default function App() {
         <div className="p-4 flex items-center gap-2.5 border-b border-line">
           <Logo />
           <div>
-            <div className="font-bold text-ink leading-tight">Caper CostWise</div>
+            <div className="font-bold text-ink leading-tight">Bread</div>
             <div className="text-xs text-muted">Redesign · v1.0</div>
           </div>
         </div>
@@ -94,16 +94,15 @@ export default function App() {
 
 export function Logo({ size = 34 }) {
   return (
-    <span style={{ width: size, height: size }} className="grid place-items-center rounded-lg bg-brand-50 shrink-0">
-      <svg viewBox="0 0 64 64" width={size * 0.7} height={size * 0.7} aria-hidden="true">
+    <span style={{ width: size, height: size }} className="grid place-items-center rounded-lg bg-carrot-50 shrink-0">
+      <svg viewBox="0 0 64 64" width={size * 0.72} height={size * 0.72} aria-hidden="true">
         <defs>
-          <linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#F36D00" /><stop offset="1" stopColor="#C2410C" /></linearGradient>
-          <linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#43B02A" /><stop offset="1" stopColor="#0B6E4F" /></linearGradient>
+          <linearGradient id="loaf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#F4C06A" /><stop offset="1" stopColor="#B4530A" /></linearGradient>
         </defs>
-        <path d="M16 22C18 22 24 22 32 22C40 22 46 22 48 22L36 60C34 62 30 62 28 60Z" fill="url(#cg)" />
-        <path d="M32 22C24 20 16 16 14 8C22 8 28 12 32 18Z" fill="url(#lg)" />
-        <path d="M32 22C30 16 30 8 32 2C36 8 36 16 34 22Z" fill="url(#lg)" />
-        <path d="M32 22C40 20 48 16 50 8C42 8 36 12 32 18Z" fill="url(#lg)" />
+        {/* loaf of bread */}
+        <path d="M8 41C8 27 19 20 32 20C45 20 56 27 56 41C56 46 52 49 47 49L17 49C12 49 8 46 8 41Z" fill="url(#loaf)" />
+        <path d="M14 31C20 25 44 25 50 31" fill="none" stroke="#FFE3B0" strokeWidth="2" strokeLinecap="round" opacity="0.7" />
+        <path d="M24 30L20 39M33 29L29 38M42 30L38 39" stroke="#8A3D06" strokeWidth="2.4" strokeLinecap="round" opacity="0.85" />
       </svg>
     </span>
   )

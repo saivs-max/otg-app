@@ -7,7 +7,7 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  base: '/v2/',
+  base: '/',
   define: { 'import.meta.env.VITE_APP_MODE': JSON.stringify('product') },
   build: { outDir: '../../web-dist', emptyOutDir: true },
 })

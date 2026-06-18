@@ -60,7 +60,7 @@ export default function Console({ screen = 'dashboard', role = 'pm', go }) {
       {/* Sidebar */}
       <aside className="w-60 shrink-0 bg-surface border-r border-line flex flex-col">
         <div className="h-14 flex items-center gap-2 px-4 border-b border-line">
-          <Logo size={30} /><span className="font-bold">CostWise</span>
+          <Logo size={30} /><span className="font-bold">Bread</span>
           <span className="ml-auto text-2xs text-muted">Console</span>
         </div>
         <nav className="flex-1 overflow-y-auto p-2 no-scrollbar">

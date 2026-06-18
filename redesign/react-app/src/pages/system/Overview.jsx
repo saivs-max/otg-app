@@ -56,7 +56,7 @@ export default function Overview({ go, setRole }) {
         <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 text-brand-700 text-xs font-semibold px-3 py-1 ring-1 ring-brand-700/20">
           <Icon name="sparkles" size={13} /> Redesign · v1.0
         </span>
-        <h1 className="text-4xl font-bold text-ink tracking-tight max-w-3xl leading-tight">Caper CostWise, redesigned</h1>
+        <h1 className="text-4xl font-bold text-ink tracking-tight max-w-3xl leading-tight">Bread, redesigned</h1>
         <p className="text-lg text-ink-2 max-w-2xl">
           A single system of record for Instacart Cart Tech field costs — from clock-in to AP payment.
           Rebuilt mobile-first for technicians and desktop-first for managers, accessible by default.

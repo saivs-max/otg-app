@@ -16,7 +16,7 @@ const AFTER_ADMIN = [
   { label: 'Settings', gate: null },
 ]
 
-const SITEMAP = `Caper CostWise
+const SITEMAP = `Bread
 │
 ├─ Field App  ·  Technician (mobile)
 │   ├─ Today            (home: clock-in, this week, flags)

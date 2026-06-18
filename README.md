@@ -1,4 +1,4 @@
-# Caper CostWise — v0.66.0
+# Bread — v0.66.0
 
 Local dev build of the **OTG Cost Tracking Modernization** project. Field techs clock in/out against Freshdesk or MaintainX work orders, log mileage and other expenses, and submit weekly invoices. Ops Managers, Sr Managers, and PMs review approvals, run the dashboard, manage policy, and (new in v0.60) file corporate-card spend on behalf of techs.
 

@@ -29,7 +29,7 @@ export default function Profile({ me, nav }) {
       </Card>
 
       <Button variant="subtle" size="block" icon="logout" onClick={() => nav('login')}>Sign out</Button>
-      <p className="text-center text-2xs text-muted">Caper CostWise · v1.0 · Field Cost &amp; Operations</p>
+      <p className="text-center text-2xs text-muted">Bread · v1.0 · Field Cost &amp; Operations</p>
     </div>
   )
 }

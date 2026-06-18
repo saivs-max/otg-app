@@ -8,7 +8,7 @@ export default function Login({ onDone }) {
     <div className="h-full flex flex-col bg-brand-900 text-white p-6">
       <div className="flex-1 flex flex-col items-center justify-center text-center">
         <div className="w-20 h-20 rounded-2xl bg-white grid place-items-center shadow-pop"><Logo size={56} /></div>
-        <h1 className="mt-5 text-3xl font-bold">Caper CostWise</h1>
+        <h1 className="mt-5 text-3xl font-bold">Bread</h1>
         <p className="mt-1 text-brand-100">Track time, log expenses, get paid faster.</p>
       </div>
       <div className="space-y-3">
