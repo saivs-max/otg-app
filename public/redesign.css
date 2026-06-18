@@ -156,3 +156,56 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
 .proxybar { background: var(--warn-bg); color: var(--warn-fg); border-bottom: 1px solid rgba(154,91,0,.25); font-weight: 600; }
 .email-preview { border-radius: var(--radius-md); border: 1px solid var(--line); }
 .section-title, h1, h2, h3 { letter-spacing: -0.2px; }
+
+/* ── 17. Desktop shell (≥900px) — match the redesign Console: warm background,
+      LIGHT sticky sidebar, white top bar. Also fixes the bug where the side nav
+      scrolled to the bottom on long pages. ──────────────────────────────────── */
+@media (min-width: 900px) {
+  .app { background: var(--bg); }                       /* warm, not the cool gray */
+
+  /* Top bar → clean white header (like the Console mockup) */
+  .app .app-header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    box-shadow: none;
+  }
+  .app .app-header .hdr-title { color: var(--ink); font-weight: 700; }
+  .app .app-header .hdr-btn { background: var(--surface-2); color: var(--ink-2); }
+  .app .app-header .hdr-btn:hover { background: var(--line); }
+
+  /* Sidebar → light, PINNED full-height, scrolls inside itself (never with page) */
+  .app .tabbar {
+    position: sticky; top: 0; align-self: start;
+    height: 100vh; max-height: 100vh; overflow-y: auto;
+    background: var(--surface);
+    border-top: 0; border-right: 1px solid var(--line);
+    box-shadow: none; padding: 6px 0 16px;
+  }
+  .app .tabbar::before {
+    content: "Bread";
+    text-transform: none; letter-spacing: -0.3px;
+    font-size: 18px; font-weight: 800; color: var(--ic-green-deep);
+    padding: 16px 18px 14px; margin-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+  }
+  .app .tab-btn {
+    flex-direction: row; justify-content: flex-start;
+    color: var(--ink-2); margin: 2px 8px; border-radius: 10px;
+    padding: 10px 12px; min-height: 42px; font-size: 14px; font-weight: 500;
+  }
+  .app .tab-btn:hover { background: var(--surface-2); color: var(--ink); }
+  .app .tab-btn.active {
+    background: var(--ok-bg); color: var(--ic-green-deep); font-weight: 700;
+    border-left: 0; padding-left: 12px;
+  }
+  .app .tab-btn.active::before { display: none; }
+  .app .tab-ico-svg { width: 20px; height: 20px; }
+
+  /* Content column: warm bg, scrolls under the pinned header + sidebar */
+  .app .view { background: var(--bg); }
+}
+
+/* Tighten the wide-desktop sidebar width override too */
+@media (min-width: 1200px) {
+  .app .tabbar { width: 240px; }
+}
