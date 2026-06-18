@@ -92,7 +92,12 @@ const V2_DIR = path.join(__dirname, 'web-dist');
 app.use('/v2', express.static(V2_DIR));
 app.get(/^\/v2(\/.*)?$/, (_req, res) => res.sendFile(path.join(V2_DIR, 'index.html')));
 
-// Static frontend (existing vanilla app at /)
+// v0.66 — Make the redesigned app the default: the site root redirects to /v2
+// so visitors land on CostWise v2. The legacy UI stays reachable at /legacy.
+app.get('/', (_req, res) => res.redirect(302, '/v2/'));
+app.get('/legacy', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+// Static frontend (legacy vanilla app assets: /app.js, /styles.css, …)
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Errors
