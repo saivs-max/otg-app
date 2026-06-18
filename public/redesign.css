@@ -317,3 +317,15 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
 .btn-icon { min-width: 40px; min-height: 40px; border-radius: 10px; }
 .inv-table td.r, .amt-total, .amt-grand, .amt-pos { font-variant-numeric: tabular-nums; }
 #submitDraftBtn.btn-primary.btn-block { min-height: 52px; font-size: 16px; font-weight: 700; box-shadow: 0 4px 14px rgba(11,110,79,.28); }
+
+/* ===== Invoice approve — sticky decision (CSS only; preserves the legacy
+   compare-based approve layout). Keeps approve/reject/escalate reachable while
+   scrolling the document on desktop. :has() degrades gracefully if unsupported. */
+@media (min-width: 1000px) {
+  .app .view .card:has(#approveBtn),
+  .app .view .card:has(#rejectBtn) {
+    position: sticky; bottom: 14px; z-index: 6;
+    border: 1px solid var(--line);
+    box-shadow: 0 8px 26px rgba(16,40,32,.14);
+  }
+}
