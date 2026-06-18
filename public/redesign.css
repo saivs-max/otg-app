@@ -161,7 +161,9 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
       LIGHT sticky sidebar, white top bar. Also fixes the bug where the side nav
       scrolled to the bottom on long pages. ──────────────────────────────────── */
 @media (min-width: 900px) {
-  .app { background: var(--bg); }                       /* warm, not the cool gray */
+  /* App-shell: lock the layout to the viewport so ONLY the content scrolls.
+     The sidebar + header are grid cells that can never scroll away. */
+  .app { background: var(--bg); height: 100vh; min-height: 100vh; overflow: hidden; }
 
   /* Top bar → clean white header (like the Console mockup) */
   .app .app-header {
@@ -175,8 +177,7 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
 
   /* Sidebar → light, PINNED full-height, scrolls inside itself (never with page) */
   .app .tabbar {
-    position: sticky; top: 0; align-self: start;
-    height: 100vh; max-height: 100vh; overflow-y: auto;
+    height: 100%; min-height: 0; overflow-y: auto;   /* fills its column; scrolls inside itself, never with the page */
     background: var(--surface);
     border-top: 0; border-right: 1px solid var(--line);
     box-shadow: none; padding: 6px 0 16px;
@@ -201,8 +202,8 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
   .app .tab-btn.active::before { display: none; }
   .app .tab-ico-svg { width: 20px; height: 20px; }
 
-  /* Content column: warm bg, scrolls under the pinned header + sidebar */
-  .app .view { background: var(--bg); }
+  /* Content column is the ONLY scroller */
+  .app .view { background: var(--bg); height: 100%; min-height: 0; overflow-y: auto; }
 }
 
 /* Tighten the wide-desktop sidebar width override too */
