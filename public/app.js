@@ -8543,7 +8543,7 @@ async function renderInvoiceDetail(root, invoiceId) {
           <strong style="color: #4B2E94;">💜 Expensify — employee approval flow</strong>
           <p class="help" style="margin: 6px 0 12px;">
             You're an FTE, so this invoice can also be routed through Expensify for your manager to approve in the standard Instacart expense-approval workflow.
-            Sending creates a new Expensify report from your line items + mileage and emails your approver. It doesn't affect the Caper CostWise approval path.
+            Sending creates a new Expensify report from your line items + mileage and emails your approver. It doesn't affect the Bread approval path.
           </p>
           <div class="actions">
             <button class="btn btn-ghost" id="sendToExpensifyBtn">📤 Send to Expensify</button>

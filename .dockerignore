@@ -1,21 +1,15 @@
 # Keep the build context small and let the Fly volume own runtime data.
 
-# Deps are reinstalled inside the image (root + the UI builder stage).
-# Use ** so nested ones (redesign/react-app/node_modules) are excluded too.
+# Deps are reinstalled inside the image
+node_modules
 **/node_modules
 
 # Runtime data — lives on the persistent volume, never bake it into the image
 data
 
-# The UI is built INSIDE the image (multi-stage). Don't ship a local/stale copy;
-# the builder stage produces a fresh web-dist and copies it into the runtime.
+# Build artifacts / design reference (not needed at runtime; the UI is public/)
 web-dist
-redesign/react-app/dist
-
-# Redesign extras not needed to BUILD the UI (the react-app source IS needed and
-# is intentionally included so the builder stage can compile it).
-redesign/CaperCostWise_Redesign_Prototype.html
-redesign/adopt
+redesign/
 
 # Secrets — set these with `fly secrets set` instead
 .env
@@ -28,7 +22,7 @@ redesign/adopt
 *.log
 err.txt
 
-# Release archives and the stale nested copy (not needed at runtime)
+# Release archives and the stale nested copy
 *.tar.gz
 otg-app/
 

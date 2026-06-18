@@ -1,0 +1,158 @@
+/* ============================================================================
+   Bread — new design system, applied to the existing app.
+   Loaded AFTER styles.css, so these rules re-skin every screen WITHOUT touching
+   any markup or JS. All functionality is unchanged; only the look updates.
+   Every colour pair below was verified ≥ WCAG 2.1 AA.
+   ============================================================================ */
+
+/* ── 1. Design tokens — re-theme the whole app by overriding the variables the
+      legacy stylesheet already uses everywhere. ───────────────────────────── */
+:root {
+  /* Brand green (Instacart/Caper, AA-tuned) */
+  --ic-green: #0E7A56;          /* AA as text AND as a fill with white text (5.3:1) */
+  --ic-green-dark: #0B6E4F;
+  --ic-green-deep: #04372A;     /* chrome / headlines (13:1 on white) */
+  --primary: #0B6E4F;           /* primary buttons (white text = 6.25:1) */
+  --primary-strong: #0B6E4F;
+
+  /* Carrot accent — accessible for text/badges; vivid art stays in inline SVG */
+  --ic-orange: #B4530A;         /* 5.0:1 */
+  --ic-orange-deep: #9A4A00;
+  --ic-cream: #FBF8F3;
+  --ic-tan-light: #FBF8F3;
+
+  /* Text */
+  --ink: #13231D;  --ink-1: #13231D;  --ink-2: #3A4843;
+  --muted: #5B6B64;  --secondary-text: #5B6B64;
+
+  /* Surfaces */
+  --bg: #FBF8F3;  --surface: #ffffff;  --surface-2: #F4F1EA;
+  --line: #E4E0D8;  --border: #E4E0D8;
+
+  /* Status (fg verified AA on tint) */
+  --warn-bg:#FFF4E0; --warn-fg:#9A5B00;
+  --ok-bg:#E6F4EC;   --ok-fg:#0E7A56;
+  --err-bg:#FDE7E6;  --err-fg:#B42318;  --danger:#B42318;
+  --info-bg:#EAF1FE; --info-fg:#175CD3;
+
+  /* Shape */
+  --radius-md: 14px; --radius-lg: 18px; --tap-min: 48px;
+}
+
+/* ── 2. Base & typography ─────────────────────────────────────────────────── */
+html, body { background: var(--bg); color: var(--ink); }
+body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
+/* Money / numeric figures line up */
+.kpi-value, .inv-amount, .amount, .card-row, .dash-table td, .cc-table td,
+.cc-exp-table td, .inv-table td, .mileage-table td, .timer-time, .total,
+.r, .meta { font-variant-numeric: tabular-nums; }
+
+/* Visible keyboard focus everywhere (a11y) */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 8px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration:.001ms !important; transition-duration:.001ms !important; }
+}
+
+/* ── 3. App header (deep-green chrome) ───────────────────────────────────── */
+.app-header {
+  background: var(--ic-green-deep);
+  box-shadow: 0 1px 0 rgba(0,0,0,.04), 0 2px 10px rgba(4,55,42,.16);
+}
+.hdr-title { font-weight: 700; letter-spacing: -0.2px; }
+.hdr-btn { background: rgba(255,255,255,.12); border-radius: 10px; }
+.hdr-btn:hover { background: rgba(255,255,255,.2); }
+
+/* ── 4. Bottom tab bar ───────────────────────────────────────────────────── */
+.tabbar { background: var(--surface); border-top: 1px solid var(--line); box-shadow: 0 -2px 12px rgba(16,40,32,.05); }
+.tab-btn { color: var(--muted); }
+.tab-btn.active { color: var(--ic-green-deep); font-weight: 600; }
+.tab-btn.active::before { background: var(--primary); height: 3px; border-radius: 0 0 4px 4px; }
+
+/* ── 5. Cards ────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md);
+  box-shadow: 0 1px 2px rgba(16,40,32,.04), 0 2px 10px rgba(16,40,32,.05);
+}
+.card.tap:hover { box-shadow: 0 4px 18px rgba(16,40,32,.10); transform: translateY(-1px); }
+.section-title { color: var(--ink); font-weight: 700; letter-spacing: -0.2px; }
+.card-row { border-bottom-color: #F1EEE8; }
+
+/* ── 6. Buttons ──────────────────────────────────────────────────────────── */
+.btn {
+  border-radius: 12px; font-weight: 600; letter-spacing: -0.1px;
+  min-height: var(--tap-min); transition: background .15s ease, box-shadow .15s ease, transform .05s ease;
+}
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--primary); color: #fff; box-shadow: 0 1px 2px rgba(16,40,32,.12); }
+.btn-primary:hover { background: var(--ic-green-dark); }
+.btn-secondary, .btn-ghost {
+  background: var(--surface); color: var(--primary); border: 1.5px solid rgba(11,110,79,.30);
+}
+.btn-secondary:hover, .btn-ghost:hover { background: var(--ok-bg); }
+.btn-danger { background: var(--err-fg); color: #fff; }
+.btn-block { width: 100%; }
+
+/* ── 7. Inputs / fields ──────────────────────────────────────────────────── */
+.field, input, select, textarea {
+  border-radius: 12px; border-color: var(--line);
+}
+.field:focus, input:focus, select:focus, textarea:focus {
+  border-color: var(--ic-green-dark);
+  box-shadow: 0 0 0 3px rgba(14,122,86,.18);
+  outline: none;
+}
+
+/* ── 8. Badges / pills / alerts / chips ──────────────────────────────────── */
+.badge, .role-tag, .chip, .legend-pill, .mode-badge {
+  border-radius: 999px; font-weight: 600; letter-spacing: .2px;
+}
+.alert { border-radius: 12px; border: 1px solid rgba(0,0,0,.04); }
+.gps-chip { border-radius: 999px; }
+/* Restore vivid-green-on-text spots to AA where the legacy used raw values */
+.extracted-panel .chip-ok { color: var(--ok-fg); }
+.inv-table .inv-drive-row .inv-meta, .kpi-tile.kpi-forecast .kpi-value { color: var(--ic-orange); }
+
+/* ── 9. Bottom sheets / modals ───────────────────────────────────────────── */
+.sheet { border-radius: 22px 22px 0 0; box-shadow: 0 -10px 44px rgba(16,40,32,.22); }
+.sheet-handle { background: var(--line); }
+
+/* ── 10. Toast ───────────────────────────────────────────────────────────── */
+.toast { border-radius: 999px; box-shadow: 0 10px 34px rgba(16,40,32,.20); font-weight: 600; }
+.toast.ok { background: var(--ic-green-dark); color: #fff; }
+
+/* ── 11. Timer big block ─────────────────────────────────────────────────── */
+.timer { border: 2px solid rgba(67,176,42,.35); border-radius: var(--radius-lg); background: var(--surface); }
+.timer-time { font-weight: 800; letter-spacing: -1px; color: var(--ink); }
+
+/* ── 12. Approval trail ──────────────────────────────────────────────────── */
+.trail-step.done .dot, .trail-step.done::before { background: var(--primary); }
+.trail-step .dot { box-shadow: 0 0 0 2px var(--surface); }
+
+/* ── 13. Login ───────────────────────────────────────────────────────────── */
+.screen-fullscreen { background: radial-gradient(ellipse at top, #0E7A56 0%, #04372A 72%); }
+.login-card { border-radius: 22px; box-shadow: 0 24px 70px rgba(0,30,20,.30); }
+.brand-title { color: var(--ic-green-deep); font-weight: 800; letter-spacing: -0.3px; }
+.brand-mark { background: var(--ic-cream); border-radius: 16px; box-shadow: 0 6px 18px rgba(180,83,10,.16); }
+.user-pill { border-radius: 14px; border: 1.5px solid var(--line); }
+.user-pill:hover { border-color: var(--ic-green-dark); background: var(--ok-bg); }
+
+/* ── 14. Dashboard (manager) ─────────────────────────────────────────────── */
+.kpi-tile { border-radius: var(--radius-md); border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(16,40,32,.04), 0 2px 10px rgba(16,40,32,.05); }
+.kpi-value { font-weight: 800; letter-spacing: -0.5px; color: var(--ink); }
+.kpi-help { color: var(--muted); }
+.dash-table th, .cc-exp-table th, .cc-table th {
+  text-transform: uppercase; font-size: 11px; letter-spacing: .4px; color: var(--muted); font-weight: 700;
+}
+.dash-table tr:hover td { background: var(--surface-2); }
+.dash-select, .ctrl { border-radius: 10px; border-color: var(--line); }
+
+/* ── 15. Invoice document ────────────────────────────────────────────────── */
+.invoice-doc { border-radius: var(--radius-md); border: 1px solid var(--line); }
+.inv-table th { color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .4px; }
+
+/* ── 16. Misc ────────────────────────────────────────────────────────────── */
+.proxybar { background: var(--warn-bg); color: var(--warn-fg); border-bottom: 1px solid rgba(154,91,0,.25); font-weight: 600; }
+.email-preview { border-radius: var(--radius-md); border: 1px solid var(--line); }
+.section-title, h1, h2, h3 { letter-spacing: -0.2px; }

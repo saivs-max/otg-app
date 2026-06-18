@@ -84,31 +84,10 @@ app.use('/api', require('./routes/unplanned')(db));   // v0.63 — unplanned/was
 // Health check
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-// ── Frontend: the redesigned "Bread" app (React + Tailwind) is THE UI ──
-// It is what every persona sees at the site root and talks to this same /api.
-// Built from redesign/react-app via `npm run build:web` (locally) or by the
-// Docker multi-stage build (on deploy) → web-dist/. The previous vanilla UI is
-// preserved at /legacy as an escape hatch.
-const WEB_DIR    = path.join(__dirname, 'web-dist');
-const PUBLIC_DIR = path.join(__dirname, 'public');
-const HAS_WEB    = fs.existsSync(path.join(WEB_DIR, 'index.html'));
-
-if (HAS_WEB) {
-  app.use(express.static(WEB_DIR));                                 // Bread index.html + hashed /assets
-  app.use('/legacy', express.static(PUBLIC_DIR));                   // legacy UI (opt-in)
-  app.use(express.static(PUBLIC_DIR));                              // legacy assets so /legacy resolves
-  app.get(/^\/v2(\/.*)?$/, (_req, res) => res.redirect(301, '/')); // old /v2 bookmarks → root
-  // Single-page-app shell for any non-API, non-legacy GET.
-  app.use((req, res, next) => {
-    if (req.method === 'GET' && !req.path.startsWith('/api/') && !req.path.startsWith('/legacy')) {
-      return res.sendFile(path.join(WEB_DIR, 'index.html'));
-    }
-    next();
-  });
-} else {
-  // No build present yet (e.g. local dev before `npm run build:web`) → legacy UI.
-  app.use(express.static(PUBLIC_DIR));
-}
+// ── Frontend: the app itself (all v0.65 features) restyled with the new "Bread"
+// design system. Same markup + JS as before; the new look lives in
+// public/redesign.css (loaded after styles.css). No functional change.
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Errors
 // v0.45 — BUG-008 fix: map body-parser errors to proper HTTP codes so the
@@ -129,8 +108,7 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('');
-  console.log('  Bread — v0.66.0 · Field Cost & Operations (redesigned React UI)');
-  console.log(`  → http://localhost:${PORT}         Bread (the app)`);
-  console.log(`  → http://localhost:${PORT}/legacy  legacy UI`);
+  console.log('  Bread — v0.66.0 · Field Cost & Operations (new design)');
+  console.log(`  → http://localhost:${PORT}`);
   console.log('');
 });
