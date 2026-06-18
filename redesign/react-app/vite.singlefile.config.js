@@ -7,5 +7,7 @@ import { viteSingleFile } from 'vite-plugin-singlefile'
 
 export default defineConfig({
   plugins: [react(), viteSingleFile()],
+  // The standalone prototype is the design-review explorer (mock data, no backend).
+  define: { 'import.meta.env.VITE_APP_MODE': JSON.stringify('explorer') },
   build: { cssCodeSplit: false, assetsInlineLimit: 100000000, reportCompressedSize: false },
 })
