@@ -1,4 +1,4 @@
-# Caper CostWise — v0.60
+# Caper CostWise — v0.66.0
 
 Local dev build of the **OTG Cost Tracking Modernization** project. Field techs clock in/out against Freshdesk or MaintainX work orders, log mileage and other expenses, and submit weekly invoices. Ops Managers, Sr Managers, and PMs review approvals, run the dashboard, manage policy, and (new in v0.60) file corporate-card spend on behalf of techs.
 
@@ -7,6 +7,11 @@ This is the working software side of the [PRD](../OTG_FieldCost_App_PRD.docx) an
 ---
 
 ## Changelog
+
+### v0.66.0 — 2026-06-18 · Redesigned, accessible app at /v2
+
+**Added**
+- **Caper CostWise v2** — a ground-up redesign (React + Tailwind, WCAG 2.1 AA) served at `/v2` alongside the existing UI and backed by the same API. Two purpose-built surfaces: a mobile **Field app** for technicians and a desktop **Console** for Ops / Sr / PM. One shared status vocabulary, accessible dialogs & forms, integer-cents money, and a single design system. Build with `npm run build:web`; full details in `redesign/README.md`.
 
 ### v0.60 — 2026-05-15 · Corporate-card ledger
 
