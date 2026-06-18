@@ -6,7 +6,7 @@
 // Expected columns (case-insensitive, in any order):
 //   external_id      e.g. MX-RTR-2406-127  (required, unique)
 //   source_system    'maintainx' or 'freshdesk'  (required)
-//   work_type        'deployment' | 'retrofit' | 'service' | 'repair'  (required)
+//   work_type        'deployment' | 'retrofit' | 'maintenance' | 'repair'  (required)
 //   store_id         e.g. WF-EDG  (optional)
 //   store_name       e.g. Whole Foods Edgewater  (recommended)
 //   cart_count       integer (default 0)
@@ -47,7 +47,7 @@ const rows = parse(raw, {
 
 const REQUIRED = ['external_id', 'source_system', 'work_type'];
 const VALID_SOURCES = new Set(['maintainx','freshdesk']);
-const VALID_TYPES   = new Set(['deployment','retrofit','service','repair']);
+const VALID_TYPES   = new Set(['deployment','retrofit','maintenance','repair']);
 const VALID_STATUS  = new Set(['open','in_progress','completed','cancelled']);
 
 const upsert = db.prepare(`

@@ -1,0 +1,58 @@
+# Caper CostWise — Fly.io configuration
+#
+# NOTE: `app` must be globally unique across all of Fly. If "otg-fieldcost" is
+# taken, change it (e.g. add your initials) OR just run `fly launch` and let it
+# pick a name — it will rewrite this line for you.
+app = "otg-fieldcost"
+
+# Pick a region close to your users. `fly platform regions` lists all of them.
+# iad = Ashburn, Virginia (US East). sjc = San Jose (US West).
+primary_region = "iad"
+
+[build]
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+  # Fly terminates TLS at the edge and forwards over http with
+  # x-forwarded-proto. This makes Express trust that header so req.secure is
+  # correct and the app sends HSTS (see server.js).
+  TRUST_PROXY = "1"
+
+# Persistent disk. Everything the app must keep — the SQLite database
+# (data/otg.db) AND uploaded receipts/PDFs (data/receipts/) — lives here and
+# survives deploys, restarts, and machine sleep.
+# Create it once with:  fly volume create otg_data --size 1 --region iad
+[mounts]
+  source = "otg_data"
+  destination = "/app/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # Scale to zero when idle to keep the bill near $0; the next request wakes it
+  # (a few seconds cold start). Set min_machines_running = 1 for always-on.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/api/health"
+
+# This app keeps state in a single SQLite file on one volume and holds sessions
+# + the login throttle in memory, so it must run as exactly ONE machine.
+# Don't scale the count above 1. (`fly scale count 1`)
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpus = 1
+
+# With a single volume-backed machine, replace the machine in place on deploy
+# rather than trying to spin up a second one (which can't attach the volume).
+[deploy]
+  strategy = "immediate"

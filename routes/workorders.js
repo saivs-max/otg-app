@@ -5,12 +5,13 @@
 // once MAINTAINX_API_KEY / FRESHDESK_API_KEY are set).
 const express = require('express');
 const router  = express.Router();
-const { logAudit } = require('../db');
+const { logAudit, activeWorkTypes } = require('../db');
 const settings = require('./settings');
 const { parseCaperDescription, parseCartRangeFromTitle, countSubWOsFromProgress, classifyMxWorkType } = require('../lib/maintainxExtract');
 
 const VALID_SOURCES = new Set(['maintainx','freshdesk']);
-const VALID_TYPES   = new Set(['deployment','retrofit','service','repair']);
+// v0.62 — VALID_TYPES is now dynamic; resolved from the work_types table at
+// validation time so admin-added types pass.
 
 // Default MaintainX Organization ID for the Instacart/Caper tenant.
 // Used when nothing is configured in Settings or env. Override per-deploy by
@@ -60,23 +61,34 @@ module.exports = (db) => {
     const userId = Number(req.header('x-user-id'));
     const wo = db.prepare("SELECT * FROM work_orders WHERE id = ?").get(Number(req.params.id));
     if (!wo) return res.status(404).json({ error: 'not found' });
+
+    // v0.64 — managers (ops_mgr / sr_mgr / pm) review the WHOLE work order:
+    // every assigned tech's labor + expenses, so they can review, edit, and tag
+    // individual line items. Technicians still see only their own entries.
+    const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+    const isManager = me && ['ops_manager','sr_manager','pm'].includes(me.role);
+
     const time_entries = db.prepare(`
-      SELECT * FROM time_entries WHERE work_order_id = ? AND user_id = ?
-      ORDER BY clock_in DESC
-    `).all(wo.id, userId || 0);
+      SELECT t.*, u.name AS tech_name
+      FROM time_entries t JOIN users u ON u.id = t.user_id
+      WHERE t.work_order_id = ? ${isManager ? '' : 'AND t.user_id = ?'}
+      ORDER BY t.clock_in DESC
+    `).all(...(isManager ? [wo.id] : [wo.id, userId || 0]));
     const expenses = db.prepare(`
-      SELECT * FROM expenses WHERE work_order_id = ? AND user_id = ?
-      ORDER BY expense_date DESC, id DESC
-    `).all(wo.id, userId || 0);
+      SELECT e.*, u.name AS tech_name
+      FROM expenses e JOIN users u ON u.id = e.user_id
+      WHERE e.work_order_id = ? ${isManager ? '' : 'AND e.user_id = ?'}
+      ORDER BY e.expense_date DESC, e.id DESC
+    `).all(...(isManager ? [wo.id] : [wo.id, userId || 0]));
     const attachments = db.prepare(`
       SELECT a.*, e.category AS expense_category
       FROM attachments a LEFT JOIN expenses e ON e.id = a.expense_id
-      WHERE a.user_id = ?
-        AND (a.work_order_id = ?
+      WHERE (a.work_order_id = ?
              OR a.expense_id IN (SELECT id FROM expenses WHERE work_order_id = ?)
              OR a.time_entry_id IN (SELECT id FROM time_entries WHERE work_order_id = ?))
+        ${isManager ? '' : 'AND a.user_id = ?'}
       ORDER BY a.uploaded_at DESC
-    `).all(userId || 0, wo.id, wo.id, wo.id);
+    `).all(...(isManager ? [wo.id, wo.id, wo.id] : [wo.id, wo.id, wo.id, userId || 0]));
 
     // Compute drive vs work hour split + total distance from GPS points
     const summary = summarizeWoTime(time_entries);
@@ -135,10 +147,10 @@ module.exports = (db) => {
 
       // Compose the canonical external_id we'd store this under so we can
       // detect if a record already exists and flag any value mismatches.
-      const PREFIX_RX = /^(MX|FD)-(DPL|RTR|SVC|RPR)-/i;
+      const PREFIX_RX = /^(MX|FD)-(DPL|RTR|SVC|MNT|RPR)-/i;
       const externalIdGuess = (() => {
         const src = source_system === 'maintainx' ? 'MX' : 'FD';
-        const typ = ({ deployment:'DPL', retrofit:'RTR', service:'SVC', repair:'RPR' })[result.data.work_type || 'service'];
+        const typ = ({ deployment:'DPL', retrofit:'RTR', maintenance:'MNT', repair:'RPR' })[result.data.work_type || 'maintenance'];
         return `${src}-${typ}-${ticket_id}`;
       })();
       // Existing might be under any of: the canonical guess OR a record where
@@ -186,15 +198,18 @@ module.exports = (db) => {
       return res.status(400).json({ error: 'source_system, work_type, ticket_id and store_name are required' });
     }
     if (!VALID_SOURCES.has(source_system)) return res.status(400).json({ error: `source_system must be one of ${[...VALID_SOURCES].join(', ')}` });
+    const VALID_TYPES = activeWorkTypes(db);
     if (!VALID_TYPES.has(work_type))       return res.status(400).json({ error: `work_type must be one of ${[...VALID_TYPES].join(', ')}` });
 
-    const PREFIX_RX = /^(MX|FD)-(DPL|RTR|SVC|RPR)-/i;
+    const PREFIX_RX = /^(MX|FD)-(DPL|RTR|SVC|RPR|WO)-/i;
     let external_id;
     if (PREFIX_RX.test(ticket_id)) {
       external_id = ticket_id.toUpperCase();
     } else {
       const src = source_system === 'maintainx' ? 'MX' : 'FD';
-      const typ = ({ deployment:'DPL', retrofit:'RTR', service:'SVC', repair:'RPR' })[work_type];
+      // For known types, use their 3-letter shorthand; for admin-added types,
+      // fall back to a neutral 'WO' prefix so the external_id stays parseable.
+      const typ = ({ deployment:'DPL', retrofit:'RTR', maintenance:'MNT', repair:'RPR' })[work_type] || 'WO';
       const clean = ticket_id.replace(/^[a-z]{2}-[a-z]{3}-/i, '').replace(/[^a-zA-Z0-9-]/g, '');
       external_id = `${src}-${typ}-${clean}`;
     }
@@ -783,17 +798,17 @@ function inferWorkType(text) {
   if (/(retrofit|upgrade|replace)/.test(s))      return 'retrofit';
   if (/(deploy|install|new install)/.test(s))    return 'deployment';
   if (/(repair|broken|fault|error|fix)/.test(s)) return 'repair';
-  return 'service';
+  return 'maintenance';
 }
 
 // v0.30 — Strict, deterministic work_type resolution from integration data.
 // Returns { work_type, source }:
-//   - work_type:  one of 'deployment' | 'retrofit' | 'service' | 'repair', or null
+//   - work_type:  one of 'deployment' | 'retrofit' | 'maintenance' | 'repair', or null
 //   - source:     'freshdesk:<field>' | 'maintainx:<field>' | null
 // Returns null work_type when no configured field matched. The UI then
 // REQUIRES the user to pick manually — we never guess.
 function resolveWorkType({ source_system, tenant, ticket, extras, settings }) {
-  const VALID = new Set(['deployment','retrofit','service','repair']);
+  const VALID = new Set(['deployment','retrofit','maintenance','repair']);
   const norm = (v) => String(v || '').trim();
   const matchInMap = (val, map) => {
     if (!val || !map) return null;
@@ -865,7 +880,7 @@ const FRESHDESK_TENANT_OVERRIDES = {
     // If the field is absent OR maps to nothing, work_type stays null and
     // the UI forces the user to pick manually (no keyword guessing).
     work_type_field:      null,                       // e.g. 'cf_request_type' once configured
-    work_type_map:        null,                       // e.g. { 'Deployment': 'deployment', 'Service Call': 'service' }
+    work_type_map:        null,                       // e.g. { 'Deployment': 'deployment', 'Service Call': 'maintenance' }
   },
   // Add new tenants here as you confirm their field names.
 };
@@ -1026,7 +1041,7 @@ function stubFetchTicket(source, ticketId) {
   }
   const isRepair = seed % 3 === 0;
   return {
-    work_type: isRepair ? 'repair' : 'service',
+    work_type: isRepair ? 'repair' : 'maintenance',
     store_id: store.id,
     store_name: store.name,
     cart_count: isRepair ? 1 : 4,

@@ -80,9 +80,9 @@ const woA = insWO.run("MX-DPL-2406-901", "maintainx", "901",
   "TEST FIXTURE — over-billed deployment used to exercise multiple policy rules.",
   "in_progress", tech1).lastInsertRowid;
 
-const woB = insWO.run("FD-SVC-2406-902", "freshdesk", "902",
+const woB = insWO.run("FD-MNT-2406-902", "freshdesk", "902",
   "TEST · ShopRite Hoboken — Service Visit",
-  "service", "SR-HOB", "ShopRite Hoboken", 1, periodStart,
+  "maintenance", "SR-HOB", "ShopRite Hoboken", 1, periodStart,
   "TEST FIXTURE — meal expense scenarios (cap + receipt rule).",
   "completed", tech1).lastInsertRowid;
 

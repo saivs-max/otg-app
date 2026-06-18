@@ -80,6 +80,9 @@ module.exports = (db) => {
       if (isNaN(ci) || isNaN(co)) return res.status(400).json({ error: 'invalid clock_in or clock_out' });
       if (co <= ci)               return res.status(400).json({ error: 'clock_out must be after clock_in' });
       if (ci > new Date())        return res.status(400).json({ error: 'clock_in cannot be in the future' });
+      // v0.65.1 (F-H4) — reject future clock-outs and absurd shift lengths.
+      if (co.getTime() > Date.now() + 5*60*1000) return res.status(400).json({ error: 'clock_out cannot be in the future' });
+      if (co.getTime() - ci.getTime() > 24*60*60*1000) return res.status(400).json({ error: 'a single time entry cannot exceed 24 hours — split it into multiple entries' });
 
       const r = db.prepare(`
         INSERT INTO time_entries (user_id, work_order_id, clock_in, clock_out, break_minutes, notes, mode)
@@ -237,8 +240,15 @@ module.exports = (db) => {
     const breaks = req.body.break_minutes != null ? Number(req.body.break_minutes) : e.break_minutes;
     const notes  = req.body.notes ?? e.notes;
 
-    // Branch A: still running → this is a clock-out
+    // Branch A: still running.
     if (!e.clock_out) {
+      // v0.65.1 (F-M8) — a break-only update keeps the timer running so accrued
+      // break minutes persist across navigation; otherwise this is a clock-out.
+      if (req.body.break_only) {
+        db.prepare("UPDATE time_entries SET break_minutes = ? WHERE id = ?").run(breaks || 0, id);
+        logAudit(db, { entity_type: 'time_entries', entity_id: id, user_id: userId, action: 'update_break', details: { break_minutes: breaks } });
+        return res.json(db.prepare("SELECT * FROM time_entries WHERE id = ?").get(id));
+      }
       const now = new Date().toISOString();
       const gps = req.body.gps;
       db.prepare(`
@@ -254,11 +264,23 @@ module.exports = (db) => {
         details: { break_minutes: breaks, gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null },
       });
     } else {
-      // Branch B: already clocked out → editing while draft
+      // Branch B: already clocked out → editing a logged entry.
+      // v0.64 — Ops managers (sr/pm, or ops_mgr on the tech's team) can correct
+      // logged hours until the invoice is approved (draft/submitted/in_review).
+      // The owning tech can still only edit while it's a draft. Approved / queued
+      // / sent / rejected invoices lock their line items.
       if (e.invoice_id) {
         const inv = db.prepare("SELECT status FROM invoices WHERE id = ?").get(e.invoice_id);
-        if (inv && inv.status !== 'draft') {
-          return res.status(409).json({ error: `Cannot edit — invoice is ${inv.status}, not draft.` });
+        if (inv) {
+          const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+          const isManagerActor = me && (
+            me.role === 'sr_manager' || me.role === 'pm' ||
+            (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
+          );
+          const editable = isManagerActor ? ['draft','submitted','in_review'] : ['draft'];
+          if (!editable.includes(inv.status)) {
+            return res.status(409).json({ error: `Cannot edit — invoice is ${inv.status}.` });
+          }
         }
       }
       // Allow editing clock_in / clock_out / mode on a draft entry. Used by
@@ -286,6 +308,13 @@ module.exports = (db) => {
       if (new Date(clockOut) <= new Date(clockIn)) {
         return res.status(400).json({ error: 'clock_out must be after clock_in' });
       }
+      // v0.65.1 (F-H4) — same magnitude/future guards as the create path.
+      if (new Date(clockOut).getTime() > Date.now() + 5*60*1000) {
+        return res.status(400).json({ error: 'clock_out cannot be in the future' });
+      }
+      if (new Date(clockOut).getTime() - new Date(clockIn).getTime() > 24*60*60*1000) {
+        return res.status(400).json({ error: 'a single time entry cannot exceed 24 hours — split it into multiple entries' });
+      }
       db.prepare(`
         UPDATE time_entries
         SET break_minutes = ?, notes = ?, clock_in = ?, clock_out = ?, mode = ?
@@ -293,6 +322,24 @@ module.exports = (db) => {
       `).run(breaks || 0, notes, clockIn, clockOut, mode, id);
       logAudit(db, { entity_type: 'time_entries', entity_id: id, user_id: userId, action: 'edit',
                      details: { break_minutes: breaks, clock_in: clockIn, clock_out: clockOut, mode } });
+    }
+
+    // v0.64 — refresh the invoice total after editing logged hours.
+    if (e.invoice_id && typeof db.__computeInvoice === 'function') {
+      try { db.__computeInvoice(e.invoice_id); } catch (_) {}
+    }
+
+    // v0.64.3 — informational notice to the tech when a manager edits their time.
+    if (e.user_id !== userId && e.invoice_id) {
+      try {
+        const tech = db.prepare("SELECT email FROM users WHERE id = ?").get(e.user_id);
+        const mgr  = db.prepare("SELECT name FROM users WHERE id = ?").get(userId);
+        db.prepare(`INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, status)
+                    VALUES ('line_item_edited', ?, ?, ?, ?, ?, 'logged')`)
+          .run(e.invoice_id, userId, tech?.email || null,
+               `${mgr?.name || 'A manager'} edited a time entry on your invoice`,
+               `${mgr?.name || 'A manager'} adjusted logged hours on this invoice. Informational — no action needed unless the invoice is rejected and returned for resubmission.`);
+      } catch (_) {}
     }
 
     const updated = db.prepare("SELECT * FROM time_entries WHERE id = ?").get(id);

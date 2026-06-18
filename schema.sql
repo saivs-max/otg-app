@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS work_orders (
   source_system     TEXT    NOT NULL CHECK (source_system IN ('maintainx','freshdesk')),
   source_ticket_id  TEXT,                                     -- raw ticket # in source system ("97461873", "13173")
   title             TEXT,                                     -- original ticket title from source ("Queens 4 - Cart #5 Not Powering On")
-  work_type         TEXT    NOT NULL CHECK (work_type IN ('deployment','retrofit','service','repair')),
+  work_type         TEXT    NOT NULL CHECK (work_type IN ('deployment','retrofit','maintenance','repair')),
   store_id          TEXT,
   store_name        TEXT,
   store_address     TEXT,
@@ -139,7 +139,7 @@ CREATE TABLE IF NOT EXISTS custom_rules (
                       'max_hours_per_10_carts'   -- v0.23: labor hrs / (cart_count/10) > threshold
                     )),
   -- Optional work-type filter; NULL = applies to all work types.
-  work_type_filter  TEXT    CHECK (work_type_filter IS NULL OR work_type_filter IN ('deployment','retrofit','service','repair')),
+  work_type_filter  TEXT    CHECK (work_type_filter IS NULL OR work_type_filter IN ('deployment','retrofit','maintenance','repair')),
   -- Optional expense category filter (only meaningful for expense-related rules)
   category_filter   TEXT,
   -- Optional minimum cart count: rule fires only when WO has >= this many carts.
@@ -363,4 +363,62 @@ CREATE INDEX IF NOT EXISTS idx_cc_exp_cat      ON corp_card_expenses(category_id
 CREATE INDEX IF NOT EXISTS idx_cc_exp_creator  ON corp_card_expenses(created_by_user_id);
 CREATE INDEX IF NOT EXISTS idx_cc_exp_tech     ON corp_card_expenses(on_behalf_of_user_id);
 CREATE INDEX IF NOT EXISTS idx_cc_exp_wo       ON corp_card_expenses(work_order_id);
+
+-- v0.61 — Per-category rules + per-work-order budgets.
+--
+-- category_rules: every category (corp-card OR tech-expense subcategory)
+-- gets exactly three editable rule rows auto-seeded at creation time:
+--   • per_wo_cap                 — $ cap that applies per work order
+--   • global_cap                 — single $ cap across the whole org
+--   • receipt_required_above     — receipt required when an item is over $X
+-- amount is NULL until the admin sets it; a NULL amount means the rule is
+-- defined but inactive.
+--
+-- category_key is intentionally TEXT so a single table can address both
+-- managed corp_card_categories (stringified id) and the hard-coded
+-- tech-expense subcategory enum ('Meal','Tools','Hotel','Supplies','Misc').
+CREATE TABLE IF NOT EXISTS category_rules (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_source TEXT NOT NULL CHECK (category_source IN ('corp_card','tech_expense')),
+  category_key    TEXT NOT NULL,
+  rule_kind       TEXT NOT NULL CHECK (rule_kind IN ('per_wo_cap','global_cap','receipt_required_above')),
+  amount          REAL,
+  updated_by      INTEGER REFERENCES users(id),
+  updated_at      TEXT,
+  UNIQUE (category_source, category_key, rule_kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cat_rules_lookup ON category_rules(category_source, category_key);
+
+-- wo_category_budgets: a $ cap on spend for a specific (work_order, category)
+-- pair. Overspend is flagged at the policy-engine layer (see lib/rules.js /
+-- routes/invoices.js follow-up integration).
+CREATE TABLE IF NOT EXISTS wo_category_budgets (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_order_id   INTEGER NOT NULL REFERENCES work_orders(id),
+  category_source TEXT NOT NULL CHECK (category_source IN ('corp_card','tech_expense')),
+  category_key    TEXT NOT NULL,
+  amount_cap      REAL NOT NULL,
+  updated_by      INTEGER REFERENCES users(id),
+  updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (work_order_id, category_source, category_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wo_cat_budget_wo  ON wo_category_budgets(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_wo_cat_budget_cat ON wo_category_budgets(category_source, category_key);
+
+-- v0.62 — Managed work types. Replaces the hard-coded
+-- deployment/retrofit/service/repair enum that lived on work_orders.work_type
+-- and custom_rules.work_type_filter. Both CHECK constraints are dropped by
+-- migrateWorkTypeChecks() in db.js (table rebuild) so admin-added types
+-- become valid values. Soft-archive matches the corp_card_categories pattern.
+CREATE TABLE IF NOT EXISTS work_types (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT NOT NULL UNIQUE,
+  created_by   INTEGER REFERENCES users(id),
+  created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+  archived_at  TEXT,
+  archived_by  INTEGER REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_work_types_active ON work_types(archived_at);
 

@@ -18,7 +18,7 @@
 //
 const express = require('express');
 const router  = express.Router();
-const { logAudit } = require('../db');
+const { logAudit, CATEGORY_RULE_KINDS } = require('../db');
 
 const MGR_ROLES = new Set(['ops_manager', 'sr_manager', 'pm']);
 
@@ -66,6 +66,14 @@ module.exports = (db) => {
       const r = db.prepare(
         "INSERT INTO corp_card_categories (name, created_by) VALUES (?, ?)"
       ).run(name, me.id);
+      // v0.61 — every new category gets three editable rule rows auto-created
+      // (per_wo_cap, global_cap, receipt_required_above). amount is NULL until
+      // an admin sets it on the Policy page.
+      const seedRule = db.prepare(`
+        INSERT OR IGNORE INTO category_rules (category_source, category_key, rule_kind, amount)
+        VALUES ('corp_card', ?, ?, NULL)
+      `);
+      for (const k of CATEGORY_RULE_KINDS) seedRule.run(String(r.lastInsertRowid), k);
       logAudit(db, { entity_type: 'corp_card_categories', entity_id: r.lastInsertRowid, user_id: me.id, action: 'create', details: { name } });
       const row = db.prepare("SELECT * FROM corp_card_categories WHERE id = ?").get(r.lastInsertRowid);
       res.status(201).json(row);
@@ -135,6 +143,7 @@ module.exports = (db) => {
            x.created_at, x.updated_at,
            x.created_by_user_id, x.on_behalf_of_user_id,
            x.work_order_id, x.store_name,
+           x.unplanned_tag, x.unplanned_note, x.unplanned_wasted,
            x.category_id, c.name AS category_name,
            cu.name AS created_by_name, cu.role AS created_by_role,
            tu.name AS on_behalf_of_name,

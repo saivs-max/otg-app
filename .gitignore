@@ -3,3 +3,11 @@ data/
 .env
 *.log
 .DS_Store
+
+# redesign / v2 build + packaging artifacts (added with the CostWise v2 merge)
+*.tar.gz
+web-dist/
+dist/
+/otg-app/
+err.txt
+COMMIT_*.txt

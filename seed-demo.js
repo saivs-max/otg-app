@@ -106,21 +106,21 @@ const insWO = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
-const WORK_TYPES = ['deployment', 'retrofit', 'service', 'repair'];
+const WORK_TYPES = ['deployment', 'retrofit', 'maintenance', 'repair'];
 let woTicketCounter = 12000;
 let externalSeq     = 100;
 
 function makeWO(techId, weekStartDate) {
-  const wt = (() => { const r = rand(); return r < 0.18 ? 'deployment' : r < 0.42 ? 'retrofit' : r < 0.78 ? 'service' : 'repair'; })();
+  const wt = (() => { const r = rand(); return r < 0.18 ? 'deployment' : r < 0.42 ? 'retrofit' : r < 0.78 ? 'maintenance' : 'repair'; })();
   const store = pick(STORES);
   // Cart count distribution by work type
   const carts = wt === 'deployment' ? pick([10, 12, 15, 20, 20, 25])
               : wt === 'retrofit'   ? pick([6, 8, 10, 12, 15, 18])
-              : wt === 'service'    ? pick([1, 2, 3, 4, 5, 6, 8])
+              : wt === 'maintenance' ? pick([1, 2, 3, 4, 5, 6, 8])
               :                       pick([1, 1, 2, 2, 3]);
   const source = chance(0.55) ? 'maintainx' : 'freshdesk';
   const prefix = source === 'maintainx' ? 'MX' : 'FD';
-  const tCode  = wt === 'deployment' ? 'DPL' : wt === 'retrofit' ? 'RTR' : wt === 'service' ? 'SVC' : 'RPR';
+  const tCode  = wt === 'deployment' ? 'DPL' : wt === 'retrofit' ? 'RTR' : wt === 'maintenance' ? 'MNT' : 'RPR';
   const ticketId = String(++woTicketCounter);
   const ext = `${prefix}-${tCode}-${ticketId}`;
   // schedule somewhere within the week
@@ -128,7 +128,7 @@ function makeWO(techId, weekStartDate) {
   const titleVerbs = {
     deployment: ['Initial cart deploy', 'New rollout', 'Site go-live deploy', 'Carts delivery + setup'],
     retrofit:   ['Firmware + hardware retrofit', 'Bracket replacement', 'Display panel swap', 'Charger retrofit'],
-    service:    ['Weekly service check', 'Calibration tune-up', 'Cart inspection visit', 'Health check'],
+    maintenance: ['Weekly service check', 'Calibration tune-up', 'Cart inspection visit', 'Health check'],
     repair:     ['Cart down — repair', 'Battery swap', 'Frozen screen repair', 'Bumper replacement'],
   }[wt];
   const title = `${store.name} — ${pick(titleVerbs)}`;
@@ -147,7 +147,7 @@ const insTime = db.prepare(`
 function makeTimeEntries(wo, techId, invoiceId, hourlyRate) {
   // Hours scaled by work type and cart count, with some scatter so the
   // hours-per-cart rule has occasional flags.
-  const baseHrsPerCart = ({ deployment: 0.7, retrofit: 0.7, service: 2.4, repair: 1.5 })[wo.work_type];
+  const baseHrsPerCart = ({ deployment: 0.7, retrofit: 0.7, maintenance: 2.4, repair: 1.5 })[wo.work_type];
   const expectedHrs = baseHrsPerCart * wo.carts * (0.85 + rand() * 0.4);   // ±20% noise
   const days = wo.work_type === 'deployment' && wo.carts >= 15 ? 2
              : wo.work_type === 'retrofit' && wo.carts >= 12 ? 2 : 1;

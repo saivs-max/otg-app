@@ -1,0 +1,62 @@
+/* ============================================================================
+   Caper CostWise — Accessibility token patch  (TIER-0 MERGE, no rewrite needed)
+   ----------------------------------------------------------------------------
+   Drop-in fix for the WCAG 2.1 AA contrast failures called out in the QA review
+   (primary button, money amounts, secondary text, orange badges).
+
+   HOW TO USE:
+     Append the contents of this file to the END of public/styles.css
+     (after the existing :root block, so these win the cascade).
+     No markup or JS changes required.
+
+   WHAT IT DOES:
+     • Re-points button / green-fill color to an AA-safe deep green.
+     • Keeps the vivid Instacart green (#43B02A) for DECORATIVE fills only
+       (markers, hover borders) where no text sits on top.
+     • Fixes the specific places the app uses bright green / orange as TEXT.
+   Every value below was contrast-verified ≥ 4.5:1 on white (≥3:1 for UI).
+   ============================================================================ */
+
+:root {
+  /* Primary CTA: was #43B02A (white text = 2.8:1, FAIL) → 6.25:1 */
+  --primary: #0B6E4F;
+
+  /* Green used as TEXT on light surfaces → AA-safe, still clearly Instacart */
+  --ic-green-text: #0B6E4F;      /* 6.25:1 */
+  /* Orange used as TEXT / links / badges: was #F36D00 (3.0:1) → 5.0:1 */
+  --ic-orange-text: #B4530A;
+
+  /* Vivid brand colors preserved for NON-TEXT decorative use */
+  --ic-green-bright: #43B02A;
+  --ic-orange-bright: #F36D00;
+
+  /* Secondary text → 5.6:1 on white, 5.3:1 on warm bg */
+  --muted: #5B6B64;
+  --secondary-text: #5B6B64;
+}
+
+/* ── Targeted fixes for the exact spots that render bright color as TEXT ── */
+.inv-table .inv-drive-row .inv-meta { color: var(--ic-orange-text); }
+.kpi-tile.kpi-forecast .kpi-value   { color: var(--ic-orange-text); }
+.extracted-panel .chip-ok           { color: var(--ic-green-text); }
+
+/* Any element that put white text on the vivid green now uses the AA green.
+   (Buttons already pick this up via --primary; this covers toasts/badges/fills.) */
+.toast.ok,
+.btn-success,
+.badge-green { background: var(--primary); color: #fff; }
+
+/* Money amounts — if your amount cells use the green text token, this makes
+   them pass. Adjust the selector to match your markup if different. */
+.amount, .inv-amount, .total-amount { color: var(--ic-green-text); }
+
+/* Visible keyboard focus everywhere (QA review: focus states missing) */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* Respect users who asked the OS to reduce motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}

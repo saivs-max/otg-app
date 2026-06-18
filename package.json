@@ -1,6 +1,6 @@
 {
   "name": "otg-field-cost-app",
-  "version": "0.60.0",
+  "version": "0.66.0",
   "description": "Instacart Cart Tech Operations - Field Cost App (Technician persona, v0.1)",
   "main": "server.js",
   "engines": {
@@ -12,7 +12,10 @@
     "reset": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed.js",
     "seed:demo": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed-demo.js",
     "seed:policy": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed-policy-test.js",
-    "import-csv": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env import-csv.js"
+    "seed:director": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed-director-demo.js",
+    "seed:unplanned": "npm run seed:demo && node --experimental-sqlite --no-warnings=ExperimentalWarning tag-unplanned-demo.js",
+    "import-csv": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env import-csv.js",
+    "build:web": "cd redesign/react-app && npm install --no-audit --no-fund && npm run build:web"
   },
   "dependencies": {
     "csv-parse": "^5.5.6",

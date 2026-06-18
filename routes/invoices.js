@@ -11,6 +11,18 @@ const { generateInvoicePdf } = require('../lib/invoicePdf');
 module.exports = (db) => {
 
   // Helper: can `userId` edit/extract/import on `invoiceId`?
+  // v0.65.2 — Policy flags are surfaced to MANAGERS ONLY (at the Ops Mgr
+  // approval queue + manager invoice views). Field techs no longer see policy
+  // flags on their own invoices, so strip them from any computed payload we
+  // return to a non-manager viewer. No-op for managers — flags pass through.
+  function stripFlagsForTech(computed, userId) {
+    const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+    if (me && (me.role === 'ops_manager' || me.role === 'sr_manager' || me.role === 'pm')) return computed;
+    if (computed && Array.isArray(computed.lines)) for (const l of computed.lines) l.flags = [];
+    if (computed && computed.summary) computed.summary.flag_count = 0;
+    return computed;
+  }
+
   // Yes if: they own it, OR they're sr_mgr/pm, OR they're an ops_mgr with the
   // invoice's owner on their team. Returns { ok: bool, error?: string, inv? }.
   function canActOnInvoice(invoiceId, userId) {
@@ -90,18 +102,25 @@ module.exports = (db) => {
     return db.prepare("SELECT * FROM invoices WHERE id = ?").get(r.lastInsertRowid);
   }
 
+  // v0.64 — share computeInvoice with sibling route modules (expenses,
+  // timeentries) so a line-item edit there can refresh the persisted invoice
+  // total. computeInvoice is hoisted, so this reference resolves at call time.
+  db.__computeInvoice = (invoiceId, hourlyRate) => computeInvoice(invoiceId, hourlyRate);
+
   function computeInvoice(invoiceId, hourlyRate) {
     const inv  = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoiceId);
     const user = db.prepare("SELECT hourly_rate FROM users WHERE id = ?").get(inv.user_id);
     const POL  = getPolicy(db);
     const rate = hourlyRate || user.hourly_rate || POL.HOURLY_RATE_DEFAULT;
 
-    // Mode='work' entries are billable labor. Mode='drive' is reported separately
-    // for ops visibility but not paid as labor by default.
+    // Mode='work' entries are billable labor; mode='drive' is billable too
+    // (v0.55) and tracked separately for reporting. Only CLOSED entries count —
+    // an open timer (clock_out IS NULL) must never contribute to invoice money,
+    // since sumHours() would otherwise extrapolate its hours to the current time.
     const allTimes = db.prepare(`
-      SELECT t.*, w.external_id, w.source_system, w.work_type, w.store_name, w.cart_count, w.description AS wo_description
+      SELECT t.*, w.id AS work_order_id, w.external_id, w.source_system, w.work_type, w.store_name, w.cart_count, w.description AS wo_description
       FROM time_entries t JOIN work_orders w ON w.id = t.work_order_id
-      WHERE t.invoice_id = ?
+      WHERE t.invoice_id = ? AND t.clock_out IS NOT NULL
       ORDER BY t.clock_in
     `).all(invoiceId);
     const times      = allTimes.filter(t => (t.mode || 'work') === 'work');
@@ -117,6 +136,9 @@ module.exports = (db) => {
     const byWO = {};
     const ensureWO = (key, src) => byWO[key] ||= {
       external_id: key,
+      // v0.61 — capture the DB id so the per-WO budget evaluator can look up
+      // wo_category_budgets without a second lookup by external_id.
+      work_order_id: src.work_order_id,
       source_system: src.source_system,
       work_type: src.work_type,
       store_name: src.store_name,
@@ -193,6 +215,12 @@ module.exports = (db) => {
         })))
       );
       w.flags.push(...customFlags);
+      // v0.61 — Per-WO category budget overruns + category receipt thresholds.
+      // Evaluates wo_category_budgets (explicit per-WO caps) and category_rules
+      // (org-wide per-category caps + receipt thresholds). Corp-card spend is
+      // pulled live from corp_card_expenses, since it never lives on invoices.
+      const budgetFlags = rulesEvaluator.evaluateBudgets(db, w, w.expenses);
+      w.flags.push(...budgetFlags);
     }
 
     // ===== By-date breakdown (AP requirement) =====
@@ -219,6 +247,8 @@ module.exports = (db) => {
         id: t.id, external_id: t.external_id, store_name: t.store_name, work_type: t.work_type,
         clock_in: t.clock_in, clock_out: t.clock_out, hours: +hrs.toFixed(2), notes: t.notes,
         mode: 'work',
+        // v0.64 — surfaced for the review UI only; never rendered on the AP PDF.
+        unplanned_tag: t.unplanned_tag, unplanned_note: t.unplanned_note, unplanned_wasted: t.unplanned_wasted,
       });
     }
     for (const t of driveTimes) {
@@ -231,6 +261,7 @@ module.exports = (db) => {
         id: t.id, external_id: t.external_id, store_name: t.store_name, work_type: t.work_type,
         clock_in: t.clock_in, clock_out: t.clock_out, hours: +hrs.toFixed(2), notes: t.notes,
         mode: 'drive',
+        unplanned_tag: t.unplanned_tag, unplanned_note: t.unplanned_note, unplanned_wasted: t.unplanned_wasted,
       });
     }
     for (const e of expenses) {
@@ -239,8 +270,14 @@ module.exports = (db) => {
       day.categories[e.category] = (day.categories[e.category] || 0) + e.amount;
       day.expense_entries.push({
         id: e.id, external_id: e.external_id, store_name: e.store_name,
+        // v0.62.2 — expose work_type + work_order_id so the contractor
+        // invoice table can render labor/drive logged as expenses as
+        // proper rows (with the right work-type tag).
+        work_type: e.work_type, work_order_id: e.work_order_id,
         category: e.category, subcategory: e.subcategory, amount: e.amount,
         quantity: e.quantity, rate: e.rate, description: e.description,
+        expense_date: e.expense_date, receipt_path: e.receipt_path,
+        unplanned_tag: e.unplanned_tag, unplanned_note: e.unplanned_note, unplanned_wasted: e.unplanned_wasted,
       });
       // v0.55 — labor and drive expenses fold into their respective day buckets
       // (matches the by-WO logic above). Other categories go to general expenses.
@@ -335,9 +372,9 @@ module.exports = (db) => {
         drive_amount: +Object.values(byWO).reduce((a,w) => a + w.drive_amount, 0).toFixed(2),
         mileage: +expenses.filter(e => e.category==='mileage').reduce((a,e) => a + e.amount, 0).toFixed(2),
         tolls_parking: +expenses.filter(e => ['tolls','parking'].includes(e.category)).reduce((a,e) => a + e.amount, 0).toFixed(2),
-        meals: +expenses.filter(e => e.category==='meals').reduce((a,e) => a + e.amount, 0).toFixed(2),
-        tools: +expenses.filter(e => e.category==='tools').reduce((a,e) => a + e.amount, 0).toFixed(2),
-        other: +expenses.filter(e => ['vendor','other'].includes(e.category)).reduce((a,e) => a + e.amount, 0).toFixed(2),
+        meals: +expenses.filter(e => e.category==='other' && e.subcategory==='Meal').reduce((a,e) => a + e.amount, 0).toFixed(2),
+        tools: +expenses.filter(e => e.category==='other' && e.subcategory==='Tools').reduce((a,e) => a + e.amount, 0).toFixed(2),
+        other: +expenses.filter(e => e.category==='vendor' || (e.category==='other' && !['Meal','Tools'].includes(e.subcategory))).reduce((a,e) => a + e.amount, 0).toFixed(2),
         total: +total.toFixed(2),
         flag_count: Object.values(byWO).reduce((a,w) => a + w.flags.length, 0),
         days_worked: byDateArr.length,
@@ -350,7 +387,7 @@ module.exports = (db) => {
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
     const inv = ensureCurrentDraft(userId);
-    res.json(computeInvoice(inv.id));
+    res.json(stripFlagsForTech(computeInvoice(inv.id), userId));
   });
 
   // POST /api/invoices/:id/extract-wos  (manager-only)
@@ -443,8 +480,8 @@ module.exports = (db) => {
     const r = db.prepare(`
       INSERT INTO work_orders
         (external_id, source_system, source_ticket_id, work_type, store_name, cart_count, status, assigned_user_id)
-      VALUES (?, ?, ?, 'service', '(pulled from invoice — refine details)', 1, 'in_progress', ?)
-    `).run(`${src}-SVC-${ticket_id}`, source_system, ticket_id, inv.user_id);
+      VALUES (?, ?, ?, 'maintenance', '(pulled from invoice — refine details)', 1, 'in_progress', ?)
+    `).run(`${src}-MNT-${ticket_id}`, source_system, ticket_id, inv.user_id);
     const wo = db.prepare("SELECT * FROM work_orders WHERE id = ?").get(r.lastInsertRowid);
     logAudit(db, { entity_type: 'work_orders', entity_id: wo.id, user_id: userId,
                    action: 'created_from_invoice', details: { invoice_id: id, source_system, ticket_id } });
@@ -580,7 +617,7 @@ module.exports = (db) => {
       computed.extracted = extractionResult.summary;
       computed.import    = extractionResult.import;
     }
-    res.json(computed);
+    res.json(stripFlagsForTech(computed, userId));
   });
 
   // POST /api/invoices/:id/import-pdf  (manager-only)
@@ -679,8 +716,14 @@ module.exports = (db) => {
     const perm = canActOnInvoice(id, userId);
     if (!perm.ok) return res.status(perm.status || 403).json({ error: perm.error });
     const inv = perm.inv;
-    if (inv.status !== 'draft') {
-      return res.status(409).json({ error: `only draft invoices can be edited (status=${inv.status})` });
+    // v0.64 — managers (canActOnInvoice already verified team access) can edit
+    // header fields right up until approval: draft / submitted / in_review. The
+    // owning tech can still only edit while it's a draft.
+    const meRow = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+    const isMgr = meRow && ['ops_manager','sr_manager','pm'].includes(meRow.role) && inv.user_id !== userId;
+    const editableStatuses = isMgr ? ['draft','submitted','in_review'] : ['draft'];
+    if (!editableStatuses.includes(inv.status)) {
+      return res.status(409).json({ error: `invoice cannot be edited at status=${inv.status}` });
     }
 
     const updates = [];
@@ -785,7 +828,7 @@ module.exports = (db) => {
 
     const computed = computeInvoice(invId);
     computed.attached = { time_entries: teRes.changes, expenses: expRes.changes, days };
-    res.json(computed);
+    res.json(stripFlagsForTech(computed, userId));
   });
 
   // POST /api/invoices/for-week { week_of: "YYYY-MM-DD" }
@@ -800,7 +843,7 @@ module.exports = (db) => {
     if (isNaN(d)) return res.status(400).json({ error: 'invalid date' });
     if (d > new Date()) return res.status(400).json({ error: 'cannot create an invoice for a future week' });
     const inv = ensureDraftForWeek(userId, d);
-    res.json(computeInvoice(inv.id));
+    res.json(stripFlagsForTech(computeInvoice(inv.id), userId));
   });
 
   // GET /api/invoices  → all my invoices (list view)
@@ -814,6 +857,64 @@ module.exports = (db) => {
       ORDER BY period_start DESC
     `).all(userId);
     res.json(rows);
+  });
+
+  // ── 3rd-party (vendor) invoices — dedicated org-wide list + summary for the
+  //    3rd Party tab. Manager-only. v0.64.6. ─────────────────────────────────
+  function vendMgr(req, res) {
+    const uid = Number(req.header('x-user-id'));
+    const me = uid ? db.prepare("SELECT role FROM users WHERE id = ?").get(uid) : null;
+    if (!me || !['ops_manager','sr_manager','pm'].includes(me.role)) {
+      res.status(403).json({ error: 'manager role required' }); return null;
+    }
+    return me;
+  }
+  // Date basis: the vendor's invoice date when present, else the upload date.
+  const VEND_D = "COALESCE(vendor_invoice_date, substr(created_at,1,10))";
+
+  router.get('/vendor-invoices', (req, res) => {
+    if (!vendMgr(req, res)) return;
+    const where = ["i.invoice_type = 'vendor'"]; const params = [];
+    if (req.query.from)   { where.push(`COALESCE(i.vendor_invoice_date, substr(i.created_at,1,10)) >= ?`); params.push(req.query.from); }
+    if (req.query.to)     { where.push(`COALESCE(i.vendor_invoice_date, substr(i.created_at,1,10)) <= ?`); params.push(req.query.to); }
+    if (req.query.status) { where.push('i.status = ?'); params.push(req.query.status); }
+    if (req.query.vendor) { where.push('i.vendor_name LIKE ?'); params.push('%' + req.query.vendor + '%'); }
+    const rows = db.prepare(`
+      SELECT i.id, i.invoice_number, i.vendor_name, i.vendor_invoice_number, i.vendor_invoice_date,
+             i.vendor_category, i.status, i.total, i.notes, i.created_at, i.submitted_at,
+             i.approved_ops_at, i.approved_sr_at, i.sent_to_ap_at,
+             cu.name AS created_by_name,
+             (SELECT COUNT(*) FROM attachments a WHERE a.invoice_id = i.id) AS attachment_count
+      FROM invoices i LEFT JOIN users cu ON cu.id = i.created_by
+      WHERE ${where.join(' AND ')}
+      ORDER BY COALESCE(i.vendor_invoice_date, substr(i.created_at,1,10)) DESC, i.id DESC
+    `).all(...params);
+    res.json(rows);
+  });
+
+  router.get('/vendor-invoices/summary', (req, res) => {
+    if (!vendMgr(req, res)) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const y = today.slice(0, 4);
+    const mtdStart = `${today.slice(0, 7)}-01`, ytdStart = `${y}-01-01`;
+    const from = req.query.from || '1970-01-01', to = req.query.to || today;
+    const between = (a, b) => db.prepare(`SELECT COALESCE(SUM(total),0) AS total, COUNT(*) AS n FROM invoices WHERE invoice_type='vendor' AND ${VEND_D} BETWEEN ? AND ?`).get(a, b);
+    const inP = between(from, to), all = between('1970-01-01', today);
+    const totals = {
+      in_period: +inP.total.toFixed(2), count_in_period: inP.n,
+      mtd: +between(mtdStart, today).total.toFixed(2),
+      ytd: +between(ytdStart, today).total.toFixed(2),
+      all_time: +all.total.toFixed(2), all_time_count: all.n,
+    };
+    const by_vendor = db.prepare(`
+      SELECT COALESCE(vendor_name, '— unnamed —') AS vendor_name, COUNT(*) AS count, COALESCE(SUM(total),0) AS total
+      FROM invoices WHERE invoice_type='vendor' AND ${VEND_D} BETWEEN ? AND ?
+      GROUP BY vendor_name ORDER BY total DESC`).all(from, to).map(r => ({ ...r, total: +r.total.toFixed(2) }));
+    const by_status = db.prepare(`
+      SELECT status, COUNT(*) AS count, COALESCE(SUM(total),0) AS total
+      FROM invoices WHERE invoice_type='vendor' AND ${VEND_D} BETWEEN ? AND ?
+      GROUP BY status ORDER BY total DESC`).all(from, to).map(r => ({ ...r, total: +r.total.toFixed(2) }));
+    res.json({ totals, by_vendor, by_status });
   });
 
   // GET /api/invoices/:id
@@ -848,7 +949,29 @@ module.exports = (db) => {
         computed.extracted_at = ext.extracted_at;
       } catch (_) {}
     }
-    res.json(computed);
+    res.json(stripFlagsForTech(computed, userId));
+  });
+
+  // GET /api/invoices/:id/notices — informational "manager edited a line item"
+  // notices for this invoice. Visible to the owning tech and to managers on the
+  // team. v0.64.3.
+  router.get('/invoices/:id/notices', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    const id = Number(req.params.id);
+    const inv = db.prepare("SELECT user_id FROM invoices WHERE id = ?").get(id);
+    if (!inv) return res.status(404).json({ error: 'not found' });
+    if (inv.user_id !== userId) {
+      const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+      const ok = me && (me.role === 'sr_manager' || me.role === 'pm' ||
+        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, inv.user_id)));
+      if (!ok) return res.status(403).json({ error: 'not yours' });
+    }
+    const rows = db.prepare(`
+      SELECT n.id, n.subject, n.body, n.created_at, u.name AS by_name
+      FROM notifications n LEFT JOIN users u ON u.id = n.triggered_by
+      WHERE n.invoice_id = ? AND n.kind = 'line_item_edited'
+      ORDER BY n.created_at DESC LIMIT 50`).all(id);
+    res.json(rows);
   });
 
   // POST /api/invoices/:id/submit  { notes? }  → moves to 'submitted' if no flags w/o justification
@@ -870,11 +993,27 @@ module.exports = (db) => {
     if (inv.status !== 'draft') return res.status(409).json({ error: `invoice is ${inv.status}, not draft` });
 
     const computed = computeInvoice(id);
-    if (computed.summary.flag_count > 0 && !req.body.notes) {
-      return res.status(400).json({
-        error: 'This invoice has flagged lines. Please provide a justification note.',
-        flagged_lines: computed.lines.filter(l => l.flags.length).map(l => ({ external_id: l.external_id, flags: l.flags })),
-      });
+    // v0.65.2 — Policy flags are surfaced to managers only, at the Ops Mgr
+    // approval queue. Field techs submit freely and never see flags, so the
+    // block-severity hard stop and the justification-note gate apply ONLY when
+    // a manager submits on a tech's behalf. All flags are still computed and
+    // shown to managers at approval, where they're reviewed and enforced.
+    const submitter = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+    const submitterIsManager = !!submitter && ['ops_manager','sr_manager','pm'].includes(submitter.role);
+    if (submitterIsManager) {
+      const blockingLines = computed.lines.filter(l => (l.flags || []).some(f => f.severity === 'block'));
+      if (blockingLines.length) {
+        return res.status(400).json({
+          error: 'This invoice violates a hard ("block") policy rule and cannot be submitted. Resolve the flagged lines first.',
+          blocked_lines: blockingLines.map(l => ({ external_id: l.external_id, flags: l.flags.filter(f => f.severity === 'block') })),
+        });
+      }
+      if (computed.summary.flag_count > 0 && !req.body.notes) {
+        return res.status(400).json({
+          error: 'This invoice has flagged lines. Please provide a justification note.',
+          flagged_lines: computed.lines.filter(l => l.flags.length).map(l => ({ external_id: l.external_id, flags: l.flags })),
+        });
+      }
     }
     // v0.44 — BUG-006 fix: race-safe transition. WHERE status = 'draft'
     // gates the update; changes() === 0 means another caller flipped it.
@@ -890,7 +1029,7 @@ module.exports = (db) => {
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: 'submit',
                    details: { total: inv.total, flag_count: computed.summary.flag_count } });
 
-    res.json({ ...computed, invoice: { ...computed.invoice, status: 'submitted', submitted_at: now }});
+    res.json(stripFlagsForTech({ ...computed, invoice: { ...computed.invoice, status: 'submitted', submitted_at: now }}, userId));
   });
 
   // ============================================================
@@ -907,14 +1046,12 @@ module.exports = (db) => {
     const perm = canActOnInvoice(id, userId);
     if (!perm.ok) return res.status(perm.status || 403).json({ error: perm.error });
     const inv = perm.inv;
-    // v0.28 — Sr Mgr review is optional. AP can be reached directly from
-    // approved_ops or, after a Sr Mgr countersign, from approved_sr.
-    if (!['approved_ops','approved_sr'].includes(inv.status)) {
-      return res.status(409).json({ error: `invoice must be approved (Ops or Sr) to send to AP (current: ${inv.status})` });
-    }
-    // v0.32 — Escalated invoices REQUIRE Sr Mgr countersign before AP.
-    if (inv.escalated_at && !inv.approved_sr_at) {
-      return res.status(409).json({ error: 'this invoice was escalated to Sr Mgr — Sr Mgr must approve before it can be sent to AP' });
+    // v0.65.2 — Sr Mgr approval is OPTIONAL at all levels. An invoice can be
+    // sent to AP after Ops approval alone (approved_ops) or after a Sr Mgr
+    // countersign (approved_sr). Escalation no longer forces a Sr Mgr gate — it
+    // simply surfaces the invoice in the Sr Mgr queue as an optional review.
+    if (inv.status !== 'approved_ops' && inv.status !== 'approved_sr') {
+      return res.status(409).json({ error: `invoice must be approved before it can be sent to AP (current: ${inv.status})` });
     }
 
     const me = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(userId);
@@ -1008,7 +1145,7 @@ module.exports = (db) => {
       pdf_url: `/api/invoices/${id}/pdf`,
       already_sent: !!inv.sent_to_ap_at,
       // Tell the UI whether this invoice is in a state that allows sending
-      can_send: inv.status === 'approved_sr',
+      can_send: inv.status === 'approved_ops' || inv.status === 'approved_sr',
       current_status: inv.status,
     });
   });
@@ -1305,11 +1442,22 @@ module.exports = (db) => {
     const path = require('path');
     const RECEIPT_DIR = path.join(__dirname, '..', 'data', 'receipts');
     const atts = db.prepare("SELECT storage_name FROM attachments WHERE invoice_id = ?").all(id);
+    // v0.65.1 (F-M5) — delete atomically and clear referencing rows
+    // (notifications) BEFORE the invoice, then unlink files only AFTER the DB
+    // commit, so a failed delete can't leave disk and DB disagreeing.
+    db.exec('BEGIN;');
+    try {
+      try { db.prepare("DELETE FROM notifications WHERE invoice_id = ? OR attachment_id IN (SELECT id FROM attachments WHERE invoice_id = ?)").run(id, id); } catch (_) {}
+      db.prepare("DELETE FROM attachments WHERE invoice_id = ?").run(id);
+      db.prepare("DELETE FROM invoices WHERE id = ?").run(id);
+      db.exec('COMMIT;');
+    } catch (e) {
+      db.exec('ROLLBACK;');
+      return res.status(409).json({ error: 'could not delete invoice — it may still be referenced elsewhere' });
+    }
     for (const a of atts) {
       try { fs.unlinkSync(path.join(RECEIPT_DIR, a.storage_name)); } catch (_) {}
     }
-    db.prepare("DELETE FROM attachments WHERE invoice_id = ?").run(id);
-    db.prepare("DELETE FROM invoices WHERE id = ?").run(id);
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId,
                    action: 'vendor_discard',
                    details: { vendor_name: inv.vendor_name, total: inv.total } });
@@ -1441,7 +1589,7 @@ module.exports = (db) => {
     const transactions = buildTransactions({
       time_entries, expenses,
       hourly_rate:  owner.hourly_rate || 40,
-      mileage_rate: 0.7,
+      mileage_rate: getPolicy(db).MILEAGE_RATE,
     });
 
     let reportInfo;

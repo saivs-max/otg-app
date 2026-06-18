@@ -10,7 +10,7 @@
 
 const express = require('express');
 const router  = express.Router();
-const { logAudit } = require('../db');
+const { logAudit, activeWorkTypes } = require('../db');
 
 const VALID_TYPES = new Set([
   'max_hours_per_shift','max_hours_per_day','max_drive_hours_per_day','max_miles_per_day',
@@ -47,7 +47,7 @@ module.exports = (db) => {
     if (!VALID_TYPES.has(rule_type)) return res.status(400).json({ error: `rule_type must be one of: ${[...VALID_TYPES].join(', ')}` });
     const t = Number(threshold);
     if (!isFinite(t) || t <= 0) return res.status(400).json({ error: 'threshold must be a positive number' });
-    if (work_type_filter && !['deployment','retrofit','service','repair'].includes(work_type_filter)) {
+    if (work_type_filter && !activeWorkTypes(db).has(work_type_filter)) {
       return res.status(400).json({ error: 'work_type_filter invalid' });
     }
     let cm = null;
@@ -86,7 +86,7 @@ module.exports = (db) => {
     }
     if (work_type_filter !== undefined) {
       const wt = (work_type_filter === '' || work_type_filter === null) ? null : work_type_filter;
-      if (wt && !['deployment','retrofit','service','repair'].includes(wt)) return res.status(400).json({ error: 'work_type_filter invalid' });
+      if (wt && !activeWorkTypes(db).has(wt)) return res.status(400).json({ error: 'work_type_filter invalid' });
       db.prepare("UPDATE custom_rules SET work_type_filter = ? WHERE id = ?").run(wt, id);
     }
     logAudit(db, { entity_type: 'custom_rules', entity_id: id, user_id: userId, action: 'update', details: req.body });
@@ -200,5 +200,111 @@ module.exports.evaluate = (db, line, expenses, timeEntries) => {
       }
     }
   }
+  return flags;
+};
+
+// v0.61 — Per-WO category budget overruns + category receipt thresholds.
+//
+// Three flag sources, all keyed off the line's work_order_id:
+//
+//   1. wo_category_budgets — explicit per-WO $ cap. Wins over the org default.
+//   2. category_rules.per_wo_cap — org default cap, used only when no explicit
+//      wo_category_budgets row exists for that (WO, category).
+//   3. category_rules.receipt_required_above (tech_expense only) — any single
+//      expense above the threshold without a receipt flags.
+//
+// Corp-card spend is pulled live from corp_card_expenses since it never lives
+// on a reimbursable invoice. Tech-expense subcategory spend is summed from
+// the invoice's expenses arg, matching `subcategory` against `category_key`.
+module.exports.evaluateBudgets = (db, line, expenses) => {
+  const flags = [];
+  if (!line || !line.work_order_id) return flags;
+  const woId = line.work_order_id;
+
+  // --- helpers ---------------------------------------------------------
+  const ccCatName = (key) => {
+    const row = db.prepare("SELECT name FROM corp_card_categories WHERE id = ?").get(Number(key));
+    return row ? row.name : `Corp card #${key}`;
+  };
+
+  function spendForCategory(source, key) {
+    if (source === 'corp_card') {
+      const row = db.prepare(`
+        SELECT COALESCE(SUM(amount), 0) AS t
+        FROM corp_card_expenses
+        WHERE work_order_id = ? AND category_id = ?
+      `).get(woId, Number(key));
+      return row.t || 0;
+    }
+    // tech_expense — sum from the invoice's expenses for this WO + subcategory.
+    let sum = 0;
+    for (const e of expenses) {
+      if (e.work_order_id !== woId) continue;
+      if ((e.subcategory || '') !== key) continue;
+      sum += e.amount || 0;
+    }
+    return sum;
+  }
+
+  // --- 1. Explicit per-WO budgets --------------------------------------
+  const budgets = db.prepare(`
+    SELECT * FROM wo_category_budgets WHERE work_order_id = ?
+  `).all(woId);
+  const explicit = new Set();
+  for (const b of budgets) {
+    explicit.add(`${b.category_source}|${b.category_key}`);
+    const spent = spendForCategory(b.category_source, b.category_key);
+    if (spent > b.amount_cap) {
+      const label = b.category_source === 'corp_card' ? ccCatName(b.category_key) : b.category_key;
+      flags.push({
+        rule: 'wo_category_budget',
+        severity: 'flag',
+        message: `${label} spend $${spent.toFixed(2)} on ${line.external_id} exceeds per-WO budget $${b.amount_cap.toFixed(2)} (over by $${(spent - b.amount_cap).toFixed(2)})`,
+      });
+    }
+  }
+
+  // --- 2. Org-default per_wo_cap from category_rules -------------------
+  const defaultCaps = db.prepare(`
+    SELECT * FROM category_rules
+    WHERE rule_kind = 'per_wo_cap' AND amount IS NOT NULL
+  `).all();
+  for (const r of defaultCaps) {
+    const k = `${r.category_source}|${r.category_key}`;
+    if (explicit.has(k)) continue; // explicit budget already evaluated above
+    const spent = spendForCategory(r.category_source, r.category_key);
+    if (spent > r.amount) {
+      const label = r.category_source === 'corp_card' ? ccCatName(r.category_key) : r.category_key;
+      flags.push({
+        rule: 'category_per_wo_cap',
+        severity: 'flag',
+        message: `${label} spend $${spent.toFixed(2)} on ${line.external_id} exceeds org per-WO cap $${r.amount.toFixed(2)}`,
+      });
+    }
+  }
+
+  // --- 3. receipt_required_above (tech_expense only) -------------------
+  // Corp-card charges don't carry receipt_path on expenses, so this rule
+  // only applies to tech-expense subcategories on the invoice.
+  const receiptRules = db.prepare(`
+    SELECT * FROM category_rules
+    WHERE rule_kind = 'receipt_required_above'
+      AND amount IS NOT NULL
+      AND category_source = 'tech_expense'
+  `).all();
+  for (const r of receiptRules) {
+    for (const e of expenses) {
+      if (e.work_order_id !== woId) continue;
+      if ((e.subcategory || '') !== r.category_key) continue;
+      if ((e.amount || 0) > r.amount && !e.receipt_path) {
+        flags.push({
+          rule: 'category_receipt_required',
+          severity: 'flag',
+          message: `${r.category_key} $${(e.amount || 0).toFixed(2)} on ${e.expense_date} requires a receipt (over $${r.amount.toFixed(2)})`,
+        });
+      }
+    }
+  }
+
   return flags;
 };

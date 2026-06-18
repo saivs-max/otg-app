@@ -140,7 +140,11 @@ module.exports = (db) => {
     res.set('Content-Type', att.mime_type || 'application/octet-stream');
     res.set('X-Content-Type-Options', 'nosniff');
     res.set('Cache-Control', 'private, no-store');
-    res.set('Content-Disposition', `inline; filename="${att.original_name.replace(/"/g, '')}"`);
+    // v0.65.1 (F-M4) — strip CR/LF/quote/control chars to prevent header
+    // injection, and add an RFC 5987 filename* for the real (UTF-8) name.
+    const safeName = String(att.original_name || 'file').replace(/[\r\n"\\\x00-\x1f]/g, '').slice(0, 200) || 'file';
+    res.set('Content-Disposition',
+      `inline; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(att.original_name || 'file')}`);
     logAudit(db, { entity_type: 'attachments', entity_id: att.id, user_id: userId, action: 'download' });
     fs.createReadStream(fullPath).pipe(res);
   });

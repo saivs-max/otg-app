@@ -17,6 +17,14 @@ const express = require('express');
 const { hashPassword, verifyPassword, createSession, deleteSession } = require('../lib/auth');
 const { logAudit } = require('../db');
 
+// v0.65.1 (F-L3) — simple in-memory login throttle (single-process app). Locks a
+// username or IP after repeated failures so credentials can't be brute-forced.
+const _loginFails = new Map();   // key -> { fails, first, lockedUntil }
+const LOGIN_MAX_FAILS = 8, LOGIN_WINDOW_MS = 15 * 60 * 1000, LOGIN_LOCK_MS = 15 * 60 * 1000;
+function loginLockSeconds(key) { const r = _loginFails.get(key); return (r && r.lockedUntil && r.lockedUntil > Date.now()) ? Math.ceil((r.lockedUntil - Date.now()) / 1000) : 0; }
+function recordLoginFail(key) { const now = Date.now(); let r = _loginFails.get(key); if (!r || now - r.first > LOGIN_WINDOW_MS) r = { fails: 0, first: now }; r.fails++; if (r.fails >= LOGIN_MAX_FAILS) r.lockedUntil = now + LOGIN_LOCK_MS; _loginFails.set(key, r); }
+function clearLoginFails(key) { _loginFails.delete(key); }
+
 module.exports = (db) => {
   const router = express.Router();
 
@@ -27,7 +35,7 @@ module.exports = (db) => {
   }
 
   // ---------- LOGIN / LOGOUT ----------
-  router.post('/login', (req, res) => {
+  router.post('/login', async (req, res) => {
     const { username, password } = req.body || {};
     if (!username || !password) return res.status(400).json({ error: 'username and password required' });
     const lookup = String(username).trim();
@@ -35,12 +43,18 @@ module.exports = (db) => {
     // rather than 401 (silent invalid creds).
     if (!lookup)   return res.status(400).json({ error: 'username cannot be blank' });
     if (!String(password).length) return res.status(400).json({ error: 'password cannot be blank' });
+    // v0.65.1 (F-L3) — throttle brute-force / credential-stuffing per username + IP.
+    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+    const lockKeys = [`u:${lookup.toLowerCase()}`, `ip:${ip}`];
+    const lockedFor = lockKeys.map(loginLockSeconds).reduce((a, b) => Math.max(a, b), 0);
+    if (lockedFor > 0) { res.set('Retry-After', String(lockedFor)); return res.status(429).json({ error: `too many attempts — try again in ${Math.ceil(lockedFor / 60)} min` }); }
     const u = db.prepare(`SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE`)
                 .get(lookup, lookup);
-    if (!u) return res.status(401).json({ error: 'invalid username or password' });
+    if (!u) { lockKeys.forEach(recordLoginFail); return res.status(401).json({ error: 'invalid username or password' }); }
     if (u.status === 'disabled') return res.status(403).json({ error: 'account disabled — contact your administrator' });
     if (!u.password_hash) return res.status(401).json({ error: 'no password set on this account — ask an administrator to issue one' });
-    if (!verifyPassword(password, u.password_hash)) return res.status(401).json({ error: 'invalid username or password' });
+    if (!(await verifyPassword(password, u.password_hash))) { lockKeys.forEach(recordLoginFail); return res.status(401).json({ error: 'invalid username or password' }); }
+    lockKeys.forEach(clearLoginFails);
 
     const session = createSession(db, u.id, req.header('user-agent'));
     db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(new Date().toISOString(), u.id);
@@ -71,7 +85,16 @@ module.exports = (db) => {
   // ---------- LEGACY PICKER ----------
   // After v0.35 this is mostly cosmetic — only password-less users appear,
   // which means a fresh DB still lets you "pick" a user for first-time setup.
-  router.get('/users', (_req, res) => {
+  router.get('/users', (req, res) => {
+    // v0.65.1 (F-M2) — was unauthenticated and leaked every user's name / email /
+    // role / username (a ready-made target list). The login screen uses
+    // username+password, so this legacy picker is no longer needed by the UI;
+    // restrict it to authenticated managers.
+    const userId = Number(req.header('x-user-id'));
+    const me = userId ? db.prepare("SELECT role FROM users WHERE id = ?").get(userId) : null;
+    if (!me || !['ops_manager','sr_manager','pm'].includes(me.role)) {
+      return res.status(403).json({ error: 'manager role required' });
+    }
     const rows = db.prepare(`
       SELECT id, name, email, role, worker_type, username,
              CASE WHEN password_hash IS NULL OR password_hash = '' THEN 0 ELSE 1 END AS has_password
@@ -188,7 +211,7 @@ module.exports = (db) => {
   });
 
   // POST /api/me/password — change own password
-  router.post('/me/password', (req, res) => {
+  router.post('/me/password', async (req, res) => {
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
     const u = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
@@ -198,7 +221,7 @@ module.exports = (db) => {
     // Skip current_password check on temp-password first-login
     if (!u.must_change_password) {
       if (!current_password) return res.status(400).json({ error: 'current_password required' });
-      if (!u.password_hash || !verifyPassword(current_password, u.password_hash)) {
+      if (!u.password_hash || !(await verifyPassword(current_password, u.password_hash))) {
         return res.status(401).json({ error: 'current password is wrong' });
       }
     }

@@ -256,7 +256,7 @@ module.exports = (db) => {
     // Clean up legacy override retired in v0.20.
     db.prepare("DELETE FROM settings WHERE key = 'policy_hours_flag_multiplier'").run();
     // Auto-migrate legacy per-cart override keys into per-10-carts (×10).
-    for (const wt of ['deployment','retrofit','service','repair']) {
+    for (const wt of ['deployment','retrofit','maintenance','repair']) {
       const oldKey = `policy_hours_per_cart_${wt}`;
       const newKey = `policy_hours_per_10_carts_${wt}`;
       const old = db.prepare("SELECT value FROM settings WHERE key = ?").get(oldKey);
@@ -335,7 +335,7 @@ module.exports = (db) => {
     if (!me || !['ops_manager','sr_manager','pm'].includes(me.role)) {
       return res.status(403).json({ error: 'manager role required' });
     }
-    const VALID = new Set(['deployment','retrofit','service','repair']);
+    const VALID = new Set(['deployment','retrofit','maintenance','repair']);
     const body = req.body || {};
 
     function validateMap(label, raw) {

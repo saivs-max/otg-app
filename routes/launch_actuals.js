@@ -138,12 +138,12 @@ module.exports = (db) => {
     const totalHours = hours.reduce((a, h) => a + h.hours, 0);
     // Most-common work_type → "what are you supporting" suggestion.
     const wtCounts = {};
-    for (const h of hours) wtCounts[h.work_type || 'service'] = (wtCounts[h.work_type || 'service'] || 0) + h.hours;
+    for (const h of hours) wtCounts[h.work_type || 'maintenance'] = (wtCounts[h.work_type || 'maintenance'] || 0) + h.hours;
     const topWt = Object.entries(wtCounts).sort((a,b) => b[1]-a[1])[0]?.[0];
     const supportingSuggestion = ({
       deployment: 'New Store Launch',
       retrofit:   'Retrofit',
-      service:    'Service & Support',
+      maintenance: 'Service & Support',
       repair:     'Repair / Break-fix',
     })[topWt] || 'New Store Launch';
 

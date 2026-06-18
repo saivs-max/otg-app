@@ -8,7 +8,17 @@
   --ic-cream: #FAF1E5;        /* soft warm bg */
   --ink: #003D29;             /* deep green-black */
   --ink-2: #4a4a4a;
-  --muted: #8a8a8a;
+  --muted: #6b6b6b;                 /* v0.65.1 — darkened to pass WCAG AA (was #8a8a8a, 3.4:1) */
+  /* v0.65.1 — tokens referenced across app.js/styles.css that were previously
+     undefined (borders vanished; "secondary" text fell back to dark ink). */
+  --border: var(--line);
+  --secondary-text: #6b6b6b;
+  --ink-1: var(--ink);
+  --primary: var(--ic-green);
+  --danger: var(--err-fg);
+  --surface-2: #f7f5f1;
+  --ic-orange-deep: #c45a00;
+  --ic-tan-light: var(--ic-cream);
   --line: #e8e6e1;
   --bg: #FAF7F2;              /* warm off-white */
   --surface: #ffffff;
@@ -295,8 +305,8 @@ button, input, select, textarea { font-size: inherit; }
 .inv-totals-row td { border-top: 2px solid #1a1a1a; padding-top: 6px !important; font-weight: 700; }
 .inv-totals-label { text-align: left; font-size: 13px; padding-left: 4px !important; }
 .inv-subtotal-cell { background: #f0f0f0; font-weight: 700; font-size: 10px; }
-.amt-pos { color: #b58900; font-weight: 600; }
-.amt-total { background: #f8f8f8; color: #b58900; font-weight: 700; font-size: 12px; }
+.amt-pos { color: #7a5c00; font-weight: 600; }   /* v0.65.1 — darkened to pass AA (was #b58900, 3.2:1) */
+.amt-total { background: #f8f8f8; color: #7a5c00; font-weight: 700; font-size: 12px; }
 .inv-grand-row td { background: #1a1a1a; color: #fff; font-size: 12px; }
 .amt-grand { color: #fff; font-weight: 800; font-size: 13px; }
 
@@ -483,10 +493,10 @@ button, input, select, textarea { font-size: inherit; }
 }
 .btn:active { transform: translateY(1px) scale(0.99); }
 .btn-primary {
-  background: var(--ic-green); color: #fff;
+  background: var(--ic-green-dark); color: #fff;  /* v0.65.1 — darker green so white label meets AA (was 2.8:1) */
   box-shadow: 0 2px 8px rgba(67,176,42,0.25);
 }
-.btn-primary:hover { background: var(--ic-green-dark); }
+.btn-primary:hover { background: var(--ic-green-deep); }
 .btn-ghost { background: #f0eee9; color: var(--ink); }
 .btn-warn  { background: var(--ic-orange); color: #fff; box-shadow: 0 2px 8px rgba(243,109,0,0.25); }
 .btn-danger { background: var(--err-fg); color: #fff; }
@@ -592,6 +602,25 @@ button, input, select, textarea { font-size: inherit; }
 }
 .toast.err { background: var(--err-fg); }
 .toast.ok  { background: var(--ic-green); }
+/* Sticky (error) toasts stay until tapped — show a clear dismiss affordance. */
+.toast.sticky { cursor: pointer; padding-right: 20px; }
+.toast.sticky::after { content: " ✕  tap to dismiss"; font-size: 11px; opacity: 0.8; white-space: nowrap; }
+
+/* Global manager proxy-mode banner */
+.proxybar {
+  position: sticky; top: 0; z-index: 60;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--warn-bg); color: var(--warn-fg);
+  border-bottom: 2px solid var(--warn-fg);
+  padding: 8px 14px; font-size: 13px; line-height: 1.3;
+}
+.proxybar.hidden { display: none; }
+.proxybar .pb-text { flex: 1; font-weight: 600; }
+.proxybar .pb-exit {
+  flex: none; border: 1px solid var(--warn-fg); background: #fff; color: var(--warn-fg);
+  font-weight: 700; padding: 6px 16px; border-radius: 8px; cursor: pointer; min-height: 36px;
+}
+.proxybar .pb-exit:hover { background: var(--warn-fg); color: #fff; }
 
 /* ==== Desktop niceties (scale up but stay phone-shaped) ==== */
 @media (min-width: 700px) {

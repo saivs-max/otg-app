@@ -1,0 +1,35 @@
+# Keep the build context small and let the Fly volume own runtime data.
+
+# Deps are reinstalled inside the image
+node_modules
+
+# Runtime data — lives on the persistent volume, never bake it into the image
+data
+
+# Secrets — set these with `fly secrets set` instead
+.env
+.env.*
+
+# Git + OS cruft
+.git
+.gitignore
+.DS_Store
+*.log
+err.txt
+
+# Release archives and old/working copies (not needed at runtime)
+*.tar.gz
+otg-app/
+redesign/
+
+# Docs / scratch files
+*.md
+*.docx
+*.pptx
+*.xlsx
+*.csv
+COMMIT_*.txt
+
+# Fly's own files
+fly.toml
+.fly

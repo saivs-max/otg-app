@@ -90,7 +90,7 @@ insWO.run("MX-DPL-2406-126", "maintainx", "126",  "Whole Foods Englewood - 20 Ca
 
 // Carlos's queue
 insWO.run("MX-DPL-2406-130", "maintainx", "130",  "ShopRite Clifton - 15 Cart Deployment",                  "deployment", "SR-CLF", "ShopRite Clifton",           15, days(2),  "Initial install of 15 carts.",                                           "open",        tech2);
-insWO.run("FD-SVC-2406-1062","freshdesk", "1062", "Whole Foods Edgewater - Weekly Service Check",           "service",    "WF-EDG", "Whole Foods Edgewater",       3, days(-1), "Weekly service check on 3 carts (battery health + sanitizer refill).",   "completed",   tech2);
+insWO.run("FD-MNT-2406-1062","freshdesk", "1062", "Whole Foods Edgewater - Weekly Service Check",           "maintenance","WF-EDG", "Whole Foods Edgewater",       3, days(-1), "Weekly service check on 3 carts (battery health + sanitizer refill).",   "completed",   tech2);
 
 // Priya's queue
 insWO.run("MX-RTR-2406-131", "maintainx", "131",  "Whole Foods Paramus - Firmware + Display Panel",         "retrofit",   "WF-PRA", "Whole Foods Paramus",        18, days(1),  "Firmware upgrade + display panel replacement on 18 carts.",              "open",        tech3);

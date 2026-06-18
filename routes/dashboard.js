@@ -19,6 +19,7 @@ const express = require('express');
 const router  = express.Router();
 const XLSX    = require('xlsx');
 const gsheets = require('../lib/google_sheets');
+const { activeWorkTypes } = require('../db');
 
 module.exports = (db) => {
 
@@ -50,8 +51,11 @@ module.exports = (db) => {
     }
     const storeFilter = (req.query.store || '').trim() || null;
     const wtFilter    = (req.query.work_type || '').trim() || null;
-    if (wtFilter && !['deployment','retrofit','service','repair'].includes(wtFilter)) {
-      return { ok: false, status: 400, error: `work_type must be one of deployment / retrofit / service / repair` };
+    if (wtFilter) {
+      const validTypes = activeWorkTypes(db);
+      if (!validTypes.has(wtFilter)) {
+        return { ok: false, status: 400, error: `work_type must be one of ${[...validTypes].join(' / ')}` };
+      }
     }
 
     // ---- Build SQL helpers for scope + period + filters ----
@@ -305,7 +309,7 @@ module.exports = (db) => {
     const techMatrix = {};
     for (const r of matrixRows) {
       const k = r.user_id;
-      if (!techMatrix[k]) techMatrix[k] = { user_id: k, name: r.tech_name, totals: { deployment:0, retrofit:0, service:0, repair:0 }, total: 0 };
+      if (!techMatrix[k]) techMatrix[k] = { user_id: k, name: r.tech_name, totals: { deployment:0, retrofit:0, maintenance:0, repair:0 }, total: 0 };
       if (techMatrix[k].totals[r.work_type] !== undefined) techMatrix[k].totals[r.work_type] += r.total;
       techMatrix[k].total += r.total;
     }
@@ -555,7 +559,7 @@ module.exports = (db) => {
         work_type_filter: wtFilter,
         available_techs:       availableTechs,
         available_stores:      availableStores.map(s => s.name),
-        available_work_types:  ['deployment','retrofit','service','repair'],
+        available_work_types:  [...activeWorkTypes(db)],
         generated_at: new Date().toISOString(),
       },
       summary: {
@@ -1023,7 +1027,7 @@ function buildSubmittedApprovedInvoicesByStore(db, req) {
                   "i.invoice_type = 'tech_labor'"];
   if (periodStart) { where.push('i.period_end >= ?'); params.push(periodStart); }
   if (storeFilter) { where.push('w.store_name = ?'); params.push(storeFilter); }
-  if (wtFilter && ['deployment','retrofit','service','repair'].includes(wtFilter)) {
+  if (wtFilter && activeWorkTypes(db).has(wtFilter)) {
     where.push('w.work_type = ?'); params.push(wtFilter);
   }
 
@@ -1158,10 +1162,29 @@ function buildCostTrackerRows(db, req) {
 
   const params  = [];
   const where   = [];
-  if (periodStart)  { where.push('w.scheduled_date >= ?'); params.push(periodStart); }
-  if (techFilter)   { where.push(`EXISTS (SELECT 1 FROM time_entries t2 WHERE t2.work_order_id = w.id AND t2.user_id = ?)`); params.push(techFilter); }
+  // v0.62.3 — period filter still primarily based on scheduled_date, but a
+  // completed WO with no scheduled date should still appear (the tech may
+  // have marked it done off-schedule). Same for WOs whose only signal is a
+  // time entry inside the period.
+  if (periodStart)  {
+    where.push(`(
+      w.scheduled_date >= ?
+      OR EXISTS (SELECT 1 FROM time_entries t3 WHERE t3.work_order_id = w.id AND date(t3.clock_in) >= ?)
+      OR w.status = 'completed'
+    )`);
+    params.push(periodStart, periodStart);
+  }
+  // Tech filter now matches either a clocked-in tech OR the assigned tech,
+  // so completed-but-unclocked WOs show up under the right name.
+  if (techFilter)   {
+    where.push(`(
+      EXISTS (SELECT 1 FROM time_entries t2 WHERE t2.work_order_id = w.id AND t2.user_id = ?)
+      OR w.assigned_user_id = ?
+    )`);
+    params.push(techFilter, techFilter);
+  }
   if (storeFilter)  { where.push('w.store_name = ?'); params.push(storeFilter); }
-  if (wtFilter && ['deployment','retrofit','service','repair'].includes(wtFilter)) {
+  if (wtFilter && activeWorkTypes(db).has(wtFilter)) {
     where.push('w.work_type = ?'); params.push(wtFilter);
   }
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -1171,7 +1194,9 @@ function buildCostTrackerRows(db, req) {
       w.id            AS wo_id,
       w.external_id   AS wo_ext,
       w.store_id, w.store_name, w.work_type, w.cart_count, w.scheduled_date,
-      w.title,
+      w.title, w.status,
+      w.assigned_user_id,
+      au.name         AS assigned_user_name,
       COUNT(DISTINCT t.user_id) AS num_techs,
       COALESCE(GROUP_CONCAT(DISTINCT u.name), '') AS tech_names,
       COALESCE(SUM(
@@ -1195,10 +1220,16 @@ function buildCostTrackerRows(db, req) {
     FROM work_orders w
     LEFT JOIN time_entries t ON t.work_order_id = w.id
     LEFT JOIN users u ON u.id = t.user_id
+    LEFT JOIN users au ON au.id = w.assigned_user_id
     LEFT JOIN cost_tracker_overrides o ON o.work_order_id = w.id
     ${whereSql}
     GROUP BY w.id
-    HAVING (actual_labor > 0) OR (w.scheduled_date IS NOT NULL)
+    -- v0.62.3 — also surface completed WOs even if they have no scheduled
+    -- date AND no clocked-in time. That covers the "tech marked complete
+    -- without clocking in" path that used to disappear from the tracker.
+    HAVING (actual_labor > 0)
+        OR (w.scheduled_date IS NOT NULL)
+        OR (w.status = 'completed')
     ORDER BY w.scheduled_date, w.id
   `).all(...params);
 
@@ -1230,8 +1261,13 @@ function buildCostTrackerRows(db, req) {
 
     const actualLabor  = w.o_actual_labor  != null ? +(+w.o_actual_labor).toFixed(2)  : computedLabor;
     const actualTravel = w.o_actual_travel != null ? +(+w.o_actual_travel).toFixed(2) : computedTravel;
-    const numTechs     = w.o_num_techs != null ? +w.o_num_techs : (w.num_techs || 0);
-    const techNames    = ov(w.o_tech_names, w.tech_names || '');
+    // v0.62.3 — fall back to work_orders.assigned_user_id (and its name) when
+    // no time entries exist. Without this, a tech who marks a WO completed
+    // without ever clocking in disappears from the Technicians column.
+    const computedTechNames = w.tech_names || w.assigned_user_name || '';
+    const computedNumTechs  = (w.num_techs || 0) || (w.assigned_user_id ? 1 : 0);
+    const numTechs     = w.o_num_techs != null ? +w.o_num_techs : computedNumTechs;
+    const techNames    = ov(w.o_tech_names, computedTechNames);
     const has3p        = w.o_has_3p != null ? !!w.o_has_3p : false;
     const tpCost       = w.o_3p_cost != null ? +(+w.o_3p_cost).toFixed(2) : 0;
     const reconciled   = ov(w.o_reconciled, actualLabor > 0 ? 'Yes' : 'No');
@@ -1239,6 +1275,12 @@ function buildCostTrackerRows(db, req) {
 
     return {
       wo_id:            w.wo_id,
+      // v0.62.3 — expose work-order status + external id so the tracker can
+      // render a Status badge and link out to the WO. external_id is also
+      // useful for users who think in terms of "MX-DPL-…" rather than wo_id.
+      status:           w.status || 'open',
+      external_id:      w.wo_ext || '',
+      assigned_user_id: w.assigned_user_id || null,
       cost_reconciled:  reconciled,
       store_name:       w.store_name || '',
       pm_dri:           ov(w.o_pm_dri, ''),

@@ -82,6 +82,263 @@ function ensureSchema(db) {
   migrateInvoicesStatusCheck(db);
   // v0.54 — let field techs log 'labor' as an expense category (hours × rate).
   migrateExpensesCategoryCheck(db);
+  // v0.61 — make sure every existing category has its three rule rows.
+  seedCategoryRules(db);
+  // v0.62 — drop the hard-coded work_type CHECK constraints on work_orders +
+  // custom_rules so admin-added work types are accepted. Seed the four
+  // originals so the dropdowns + existing rules keep working.
+  migrateWorkTypeChecks(db);
+  seedDefaultWorkTypes(db);
+  // v0.65.2 — the 'service' work type was renamed to 'maintenance'. Migrate any
+  // existing data so nothing still references the old name.
+  migrateServiceToMaintenance(db);
+  // v0.63 — Unplanned / wasted-labour tagging. Adds tag + note columns to the
+  // four line-item tables so ops managers can mark individual items as
+  // wasted_labour, ad_hoc, or unexpected without changing any existing rows.
+  migrateUnplannedColumns(db);
+}
+
+// v0.63 — Unplanned tagging. Tags are stored as a JSON array so one item can
+// carry multiple reasons simultaneously (e.g. ["wasted_labour","ad_hoc"]).
+// The column type is plain TEXT — no CHECK constraint — because SQLite CHECK
+// can't validate JSON contents without generated columns. Application-layer
+// validation in routes/unplanned.js enforces the allowed values.
+//
+// If the column was previously added with the old single-value CHECK constraint
+// we probe and rebuild the affected table to shed it.
+function migrateUnplannedColumns(db) {
+  const tables = ['work_orders','time_entries','expenses','corp_card_expenses'];
+  for (const t of tables) {
+    // Add columns as plain TEXT if they don't exist yet.
+    migrateAddColumn(db, t, 'unplanned_tag',       'TEXT');
+    migrateAddColumn(db, t, 'unplanned_note',      'TEXT');
+    migrateAddColumn(db, t, 'unplanned_tagged_by', 'INTEGER');
+    migrateAddColumn(db, t, 'unplanned_tagged_at', 'TEXT');
+    // v0.64.4 — wasted portion ($) of the item; NULL = the whole item is wasted.
+    // wasted + actual always totals the item's original reported amount.
+    migrateAddColumn(db, t, 'unplanned_wasted',    'REAL');
+
+    // Probe: if the old single-value CHECK is still in place it will reject a
+    // JSON array. Rebuild the table to drop the constraint.
+    try {
+      db.exec(`SAVEPOINT chk_up_${t};`);
+      db.prepare(`UPDATE ${t} SET unplanned_tag = '["wasted_labour","ad_hoc"]' WHERE 1=0`).run();
+      // INSERT probe — a fake value to trigger the CHECK on real rows path
+      db.prepare(`UPDATE ${t} SET unplanned_tag = unplanned_tag WHERE unplanned_tag = '["probe"]'`).run();
+      db.exec(`RELEASE chk_up_${t};`);
+    } catch (e) {
+      db.exec(`ROLLBACK TO chk_up_${t}; RELEASE chk_up_${t};`);
+      if (String(e.message).includes('CHECK')) {
+        console.log(`[migrate] Rebuilding ${t} to drop unplanned_tag CHECK constraint…`);
+        rebuildUnplannedCheck(db, t);
+      }
+    }
+  }
+}
+
+// Rebuild a table to shed the old unplanned_tag CHECK constraint.
+// We preserve all existing columns and data; only the column definition changes.
+function rebuildUnplannedCheck(db, table) {
+  // v0.65.1 (F-H7) — rebuild from the table's ORIGINAL DDL so PRIMARY KEY,
+  // AUTOINCREMENT, FOREIGN KEYs, UNIQUE and defaults are all preserved; we strip
+  // ONLY the legacy CHECK(...) on unplanned_tag. The previous implementation
+  // reconstructed from PRAGMA table_info and silently dropped keys/FKs on the
+  // core financial tables.
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?").get(table);
+  if (!row || !row.sql) return;
+  const stripped = row.sql.replace(/(unplanned_tag\s+[A-Za-z]+)\s+CHECK\s*\([^)]*\)/i, '$1');
+  if (stripped === row.sql) return;            // no CHECK in the DDL → don't risk a lossy rebuild
+  const tmp    = `${table}__rebuild`;
+  const tmpDdl = stripped.replace(new RegExp(`CREATE\\s+TABLE\\s+("?)${table}\\1`, 'i'), `CREATE TABLE ${tmp}`);
+  if (tmpDdl === stripped) return;             // couldn't safely rename in the DDL → abort
+  const colList = db.prepare(`PRAGMA table_info(${table})`).all().map(c => `"${c.name}"`).join(', ');
+  const indexes = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name = ? AND sql IS NOT NULL").all(table);
+  db.exec('PRAGMA foreign_keys=OFF;');
+  db.exec('BEGIN;');
+  try {
+    db.exec(tmpDdl);
+    db.exec(`INSERT INTO ${tmp} (${colList}) SELECT ${colList} FROM ${table};`);
+    db.exec(`DROP TABLE ${table};`);
+    db.exec(`ALTER TABLE ${tmp} RENAME TO ${table};`);
+    db.exec('COMMIT;');
+  } catch (e) {
+    db.exec('ROLLBACK;');
+    db.exec('PRAGMA foreign_keys=ON;');
+    throw e;
+  }
+  for (const i of indexes) { try { db.exec(i.sql); } catch (_) {} }
+  db.exec('PRAGMA foreign_keys=ON;');
+}
+
+const DEFAULT_WORK_TYPES = ['deployment','retrofit','maintenance','repair'];
+
+function seedDefaultWorkTypes(db) {
+  const ins = db.prepare("INSERT OR IGNORE INTO work_types (name) VALUES (?)");
+  for (const wt of DEFAULT_WORK_TYPES) ins.run(wt);
+}
+
+// v0.65.2 — 'service' was renamed to 'maintenance'. Repoint every reference to
+// the old name: the work_types row, every work_order, custom-rule work_type
+// filters, and the per-type productivity policy setting key. Idempotent — safe
+// to run on every boot (no-op once nothing references 'service' anymore).
+function migrateServiceToMaintenance(db) {
+  try {
+    const hasService     = db.prepare("SELECT 1 FROM work_types WHERE name = 'service'").get();
+    const hasMaintenance = db.prepare("SELECT 1 FROM work_types WHERE name = 'maintenance'").get();
+    if (hasService && !hasMaintenance) {
+      db.prepare("UPDATE work_types SET name = 'maintenance' WHERE name = 'service'").run();
+    } else if (hasService && hasMaintenance) {
+      // Both rows exist (defaults were reseeded with the new name) — drop the
+      // stale 'service' row; the rows that used it are repointed below.
+      db.prepare("DELETE FROM work_types WHERE name = 'service'").run();
+    }
+    // Repoint historical data regardless of work_types state.
+    db.prepare("UPDATE work_orders  SET work_type        = 'maintenance' WHERE work_type        = 'service'").run();
+    db.prepare("UPDATE custom_rules SET work_type_filter = 'maintenance' WHERE work_type_filter = 'service'").run();
+    // Carry over any saved per-type productivity override to the new key name.
+    const srv = db.prepare("SELECT value FROM settings WHERE key = 'policy_hours_per_10_carts_service'").get();
+    if (srv) {
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('policy_hours_per_10_carts_maintenance', ?)").run(srv.value);
+      db.prepare("DELETE FROM settings WHERE key = 'policy_hours_per_10_carts_service'").run();
+    }
+  } catch (e) {
+    console.error('[migrate] service→maintenance failed:', e.message);
+  }
+}
+
+// Returns the set of currently-active work-type names. Always includes the
+// four defaults as a fallback so validators don't reject pre-existing rows
+// even if the work_types table is wiped or unreadable.
+function activeWorkTypes(db) {
+  const set = new Set(DEFAULT_WORK_TYPES);
+  try {
+    const rows = db.prepare("SELECT name FROM work_types WHERE archived_at IS NULL").all();
+    for (const r of rows) set.add(r.name);
+  } catch (_) { /* table not yet migrated — fall back to defaults */ }
+  return set;
+}
+
+// SQLite can't ALTER TABLE ... DROP CONSTRAINT, so we rebuild both tables to
+// shed their work_type CHECK constraints. Probe by trying to insert a sentinel
+// value inside a savepoint — if the constraint rejects it, rebuild.
+function migrateWorkTypeChecks(db) {
+  // ---- work_orders ----
+  try {
+    db.exec('SAVEPOINT chk_wo;');
+    db.prepare(`INSERT INTO work_orders (external_id, source_system, source_ticket_id, title, work_type, store_id, store_name, cart_count, scheduled_date, description, status)
+                VALUES ('__chk_wo__', 'maintainx', '__chk__', 'probe', '__custom_wt__', 'CHK', 'chk', 1, '2000-01-01', 'probe', 'in_progress')`).run();
+    db.exec('ROLLBACK TO chk_wo; RELEASE chk_wo;');
+  } catch (e) {
+    db.exec('ROLLBACK TO chk_wo; RELEASE chk_wo;');
+    if (String(e.message).includes('CHECK')) {
+      console.log('[migrate] Rebuilding work_orders to drop work_type CHECK…');
+      // Match the original schema.sql definition column-for-column (store_address
+      // and the 'open' status enum value were missing from the v0.62.0 attempt
+      // and broke INSERT … SELECT on every fresh boot). The only difference
+      // versus the original is the work_type CHECK, which is removed.
+      const cols = db.prepare(`PRAGMA table_info(work_orders)`).all().map(c => c.name).join(', ');
+      db.exec(`
+        BEGIN;
+        CREATE TABLE work_orders_new (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          external_id       TEXT    UNIQUE NOT NULL,
+          source_system     TEXT    NOT NULL CHECK (source_system IN ('maintainx','freshdesk')),
+          source_ticket_id  TEXT,
+          title             TEXT,
+          work_type         TEXT    NOT NULL,
+          store_id          TEXT,
+          store_name        TEXT,
+          store_address     TEXT,
+          cart_count        INTEGER DEFAULT 0,
+          scheduled_date    TEXT,
+          description       TEXT,
+          status            TEXT    DEFAULT 'open' CHECK (status IN ('open','in_progress','completed','cancelled')),
+          assigned_user_id  INTEGER REFERENCES users(id),
+          wo_number         INTEGER,
+          sub_wo_count      INTEGER,
+          priority          TEXT,
+          created_at        TEXT    DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO work_orders_new (${cols}) SELECT ${cols} FROM work_orders;
+        DROP TABLE work_orders;
+        ALTER TABLE work_orders_new RENAME TO work_orders;
+        CREATE INDEX IF NOT EXISTS idx_wo_assigned ON work_orders(assigned_user_id);
+        CREATE INDEX IF NOT EXISTS idx_wo_status   ON work_orders(status);
+        COMMIT;
+      `);
+    }
+  }
+
+  // ---- custom_rules ----
+  try {
+    db.exec('SAVEPOINT chk_cr;');
+    db.prepare(`INSERT INTO custom_rules (rule_type, work_type_filter, threshold) VALUES ('max_hours_per_shift', '__custom_wt__', 1)`).run();
+    db.exec('ROLLBACK TO chk_cr; RELEASE chk_cr;');
+  } catch (e) {
+    db.exec('ROLLBACK TO chk_cr; RELEASE chk_cr;');
+    if (String(e.message).includes('CHECK')) {
+      console.log('[migrate] Rebuilding custom_rules to drop work_type_filter CHECK…');
+      db.exec(`
+        BEGIN;
+        CREATE TABLE custom_rules_new (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          rule_type         TEXT    NOT NULL CHECK (rule_type IN (
+                              'max_hours_per_shift','max_hours_per_day','max_drive_hours_per_day',
+                              'max_miles_per_day','max_expense_amount','require_receipt_above',
+                              'max_hours_per_wo','max_hours_per_cart','max_hours_per_10_carts'
+                            )),
+          work_type_filter  TEXT,
+          category_filter   TEXT,
+          cart_count_min    INTEGER,
+          threshold         REAL    NOT NULL,
+          description       TEXT,
+          severity          TEXT    DEFAULT 'flag' CHECK (severity IN ('warn','flag','block')),
+          active            INTEGER DEFAULT 1,
+          created_by        INTEGER REFERENCES users(id),
+          created_at        TEXT    DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO custom_rules_new
+          SELECT id, rule_type, work_type_filter, category_filter, cart_count_min,
+                 threshold, description, severity, active, created_by, created_at
+          FROM custom_rules;
+        DROP TABLE custom_rules;
+        ALTER TABLE custom_rules_new RENAME TO custom_rules;
+        CREATE INDEX IF NOT EXISTS idx_rules_active ON custom_rules(active);
+        COMMIT;
+      `);
+    }
+  }
+}
+
+// Each managed category (corp-card row or tech-expense subcategory) gets three
+// editable rule rows: per_wo_cap, global_cap, receipt_required_above. INSERT
+// OR IGNORE keeps this idempotent on every boot.
+//
+// Tech-expense subcategories are hard-coded by the CHECK constraint on the
+// expenses table ('Meal','Tools','Hotel','Supplies','Misc' — used when the
+// main category is 'other'); we seed those keys here so admins can attach
+// rules to them on the Policy page without further schema work.
+const TECH_EXPENSE_SUBCATS = ['Meal','Tools','Hotel','Supplies','Misc'];
+const CATEGORY_RULE_KINDS  = ['per_wo_cap','global_cap','receipt_required_above'];
+
+function seedCategoryRules(db) {
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO category_rules (category_source, category_key, rule_kind, amount)
+    VALUES (?, ?, ?, NULL)
+  `);
+
+  // Corp-card categories — seed for every row (including archived; rules stick
+  // around even if the category is later archived, mirroring soft-delete
+  // semantics on the category itself).
+  const ccCats = db.prepare("SELECT id FROM corp_card_categories").all();
+  for (const c of ccCats) {
+    for (const k of CATEGORY_RULE_KINDS) insert.run('corp_card', String(c.id), k);
+  }
+
+  // Tech-expense subcategories.
+  for (const sub of TECH_EXPENSE_SUBCATS) {
+    for (const k of CATEGORY_RULE_KINDS) insert.run('tech_expense', sub, k);
+  }
 }
 
 function migrateExpensesCategoryCheck(db) {
@@ -215,7 +472,7 @@ function migrateRulesCheckConstraint(db) {
                           'max_miles_per_day','max_expense_amount','require_receipt_above',
                           'max_hours_per_wo','max_hours_per_cart','max_hours_per_10_carts'
                         )),
-      work_type_filter  TEXT    CHECK (work_type_filter IS NULL OR work_type_filter IN ('deployment','retrofit','service','repair')),
+      work_type_filter  TEXT    CHECK (work_type_filter IS NULL OR work_type_filter IN ('deployment','retrofit','maintenance','repair')),
       category_filter   TEXT,
       cart_count_min    INTEGER,
       threshold         REAL    NOT NULL,
@@ -261,7 +518,7 @@ const POLICY = {
   HOURLY_RATE_DEFAULT: 40.0,
   MILEAGE_RATE: 0.725,
   // hours per 10 carts (was hours per cart × 10)
-  HOURS_PER_10_CARTS: { deployment: 7, retrofit: 7, service: 24, repair: 15 },
+  HOURS_PER_10_CARTS: { deployment: 7, retrofit: 7, maintenance: 24, repair: 15 },
   MEAL_DAILY_CAP: 100.0,
   MEAL_TRIP_MIN_HOURS: 3,
   // v0.25.1 — AP recipient for /invoices/:id/send-to-ap. Defaults to a test
@@ -293,7 +550,7 @@ function getPolicy(db) {
       // (policy_hours_per_cart_*) are auto-migrated on save (×10).
       case 'policy_hours_per_10_carts_deployment': out.HOURS_PER_10_CARTS.deployment = parseFloat(v); break;
       case 'policy_hours_per_10_carts_retrofit':   out.HOURS_PER_10_CARTS.retrofit   = parseFloat(v); break;
-      case 'policy_hours_per_10_carts_service':    out.HOURS_PER_10_CARTS.service    = parseFloat(v); break;
+      case 'policy_hours_per_10_carts_maintenance': out.HOURS_PER_10_CARTS.maintenance = parseFloat(v); break;
       case 'policy_hours_per_10_carts_repair':     out.HOURS_PER_10_CARTS.repair     = parseFloat(v); break;
       case 'policy_ap_email':              out.AP_EMAIL              = v; break;
     }
@@ -302,14 +559,17 @@ function getPolicy(db) {
 }
 
 function weekBounds(d = new Date()) {
+  // v0.65.1 (F-M10) — compute Mon–Sun bounds entirely in UTC so the bucket is
+  // stable regardless of server timezone. (Previously mixed local getters with
+  // a UTC toISOString() slice, which could shift the week near midnight off-UTC.)
   const date = new Date(d);
-  const day  = date.getDay();
+  const day  = date.getUTCDay();
   const offsetToMon = day === 0 ? -6 : 1 - day;
   const monday = new Date(date);
-  monday.setDate(date.getDate() + offsetToMon);
-  monday.setHours(0,0,0,0);
+  monday.setUTCDate(date.getUTCDate() + offsetToMon);
+  monday.setUTCHours(0,0,0,0);
   const sunday = new Date(monday);
-  sunday.setDate(monday.getDate() + 6);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
   return {
     start: monday.toISOString().slice(0,10),
     end:   sunday.toISOString().slice(0,10),
@@ -317,10 +577,11 @@ function weekBounds(d = new Date()) {
 }
 
 function invoiceNumber(userId, periodEnd) {
-  const d = new Date(periodEnd);
-  const yyyy = d.getFullYear();
-  const mmdd = String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
-  return `INV-${yyyy}-${mmdd}-U${String(userId).padStart(2,'0')}`;
+  // v0.65.1 (F-M10) — derive Y/M/D straight from the ISO date string to avoid a
+  // timezone off-by-one (new Date('YYYY-MM-DD') is UTC midnight, and the local
+  // getters could roll back a day for servers west of UTC).
+  const [yyyy, mm, dd] = String(periodEnd).slice(0, 10).split('-');
+  return `INV-${yyyy}-${mm}${dd}-U${String(userId).padStart(2,'0')}`;
 }
 
 function sumHours(entries) {
@@ -344,4 +605,8 @@ module.exports = {
   open, ensureSchema,
   POLICY, getPolicy, weekBounds, invoiceNumber, sumHours, logAudit,
   DB_PATH, SCHEMA_PATH,
+  // v0.61 — exported so routes/corpcard.js can seed rules at category-create time
+  // without duplicating the kinds list.
+  CATEGORY_RULE_KINDS, TECH_EXPENSE_SUBCATS,
+  DEFAULT_WORK_TYPES, activeWorkTypes,
 };

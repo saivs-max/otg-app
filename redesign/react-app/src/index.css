@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Mirror of tailwind tokens for raw-CSS / chart usage */
+  --bg: #FBF8F3; --surface: #fff; --surface-2: #F4F1EA;
+  --line: #E4E0D8; --ink: #13231D; --ink-2: #3A4843; --muted: #5B6B64;
+  --brand-700: #0B6E4F; --brand-600: #0E7A56; --brand-900: #04372A; --brand-400: #43B02A;
+  --carrot: #F36D00; --carrot-600: #B4530A;
+  --success: #0E7A56; --warning: #9A5B00; --danger: #B42318; --info: #175CD3; --ap: #6941C6;
+}
+
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* tabular figures everywhere money/metrics appear */
+.tnum { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1; }
+
+/* Visible focus for keyboard users (QA review: focus states missing) */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--brand-600);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Respect reduced-motion (QA review: none honored) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+/* Screen-reader-only utility */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+}
+
+/* Phone-frame scroll niceties */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Subtle brand background pattern (decorative, low-contrast) */
+.bg-grocery {
+  background-image:
+    radial-gradient(circle at 16px 16px, rgba(11,110,79,.035) 1.5px, transparent 1.5px),
+    radial-gradient(circle at 48px 48px, rgba(243,109,0,.03) 1px, transparent 1px);
+  background-size: 64px 64px;
+}

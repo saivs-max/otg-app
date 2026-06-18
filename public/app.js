@@ -55,9 +55,19 @@ function toast(msg, kind='') {
   const t = $('#toast');
   t.textContent = msg;
   t.className = 'toast ' + kind;
-  // tap to dismiss
-  t.onclick = () => t.classList.add('hidden');
-  _toastTimer = setTimeout(() => t.classList.add('hidden'), 2800);
+  // tap to dismiss (also cancels any pending auto-hide)
+  t.onclick = () => { clearTimeout(_toastTimer); t.classList.add('hidden'); };
+  // Errors stay until the user dismisses them (with a long safety fallback) so a
+  // failure is never missed by glancing away; success/info auto-dismiss with a
+  // duration scaled to message length so longer messages stay readable.
+  if (kind === 'err') {
+    t.classList.add('sticky');
+    _toastTimer = setTimeout(() => t.classList.add('hidden'), 20000);
+  } else {
+    t.classList.remove('sticky');
+    const dur = Math.min(9000, Math.max(3200, msg.length * 55));
+    _toastTimer = setTimeout(() => t.classList.add('hidden'), dur);
+  }
 }
 
 // ---- Dismissable alerts ----
@@ -81,17 +91,68 @@ document.addEventListener('click', e => {
 });
 
 // ---- Bottom sheet ----
-function showSheet(html, { onMount } = {}) {
+let _sheetPrevFocus = null, _sheetKeyHandler = null;
+function showSheet(html, { onMount, dismissable = true } = {}) {
   closeSheet();
+  // v0.65.1 (A11Y) — remember focus so we can restore it when the sheet closes.
+  _sheetPrevFocus = document.activeElement;
   const wrap = document.createElement('div');
   wrap.className = 'sheet-backdrop';
-  wrap.innerHTML = `<div class="sheet"><div class="sheet-handle"></div>${html}</div>`;
-  wrap.addEventListener('click', e => { if (e.target === wrap) closeSheet(); });
+  // Dialog semantics + a focusable container for screen readers / keyboard users.
+  wrap.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" tabindex="-1"><div class="sheet-handle"></div>${html}</div>`;
+  if (dismissable) wrap.addEventListener('click', e => { if (e.target === wrap) closeSheet(); });
   document.body.appendChild(wrap);
+  const sheet = wrap.querySelector('.sheet');
+  // v0.65.1 (A11Y) — give the dialog an accessible name (from its heading if it
+  // has one, else a generic label) so screen readers announce it correctly.
+  const _sheetHeading = sheet.querySelector('h1,h2,h3,h4');
+  if (_sheetHeading) { if (!_sheetHeading.id) _sheetHeading.id = 'sheetTitle'; sheet.setAttribute('aria-labelledby', _sheetHeading.id); }
+  else sheet.setAttribute('aria-label', 'Dialog');
+  const focusables = () => [...sheet.querySelectorAll('input,select,textarea,button,[href],[tabindex]:not([tabindex="-1"])')]
+    .filter(el => !el.disabled && el.offsetParent !== null);
+  // Move focus into the sheet (first field, else the sheet itself).
+  (focusables()[0] || sheet).focus();
+  // Esc closes (when dismissable); Tab is trapped inside the sheet.
+  _sheetKeyHandler = (e) => {
+    if (e.key === 'Escape' && dismissable) { e.preventDefault(); closeSheet(); return; }
+    if (e.key === 'Tab') {
+      const items = focusables();
+      if (!items.length) return;
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  };
+  document.addEventListener('keydown', _sheetKeyHandler);
   if (onMount) onMount(wrap);
 }
 function closeSheet() {
+  if (_sheetKeyHandler) { document.removeEventListener('keydown', _sheetKeyHandler); _sheetKeyHandler = null; }
   document.querySelectorAll('.sheet-backdrop').forEach(s => s.remove());
+  if (_sheetPrevFocus && _sheetPrevFocus.focus) { try { _sheetPrevFocus.focus(); } catch (_) {} _sheetPrevFocus = null; }
+}
+
+// ---- Manager proxy ("acting on behalf of") mode ----
+// A global, always-visible banner whenever a manager is editing on a tech's
+// behalf, with an always-available Exit. Prevents a manager getting "stuck"
+// writing to a tech's account without realising it.
+function updateProxyBar() {
+  const bar = $('#proxyBar');
+  if (!bar) return;
+  if (STATE.onBehalfOf) {
+    bar.innerHTML = `<span class="pb-text">Acting on behalf of <strong>${escapeHTML(STATE.onBehalfOfName || 'a technician')}</strong> — entries you add or edit are recorded against their account.</span><button class="pb-exit" data-act="exit-proxy">Exit</button>`;
+    bar.classList.remove('hidden');
+  } else {
+    bar.classList.add('hidden');
+    bar.innerHTML = '';
+  }
+}
+function exitProxy(opts = {}) {
+  if (!STATE.onBehalfOf) return;
+  STATE.onBehalfOf = null;
+  STATE.onBehalfOfName = null;
+  updateProxyBar();
+  if (!opts.silent) toast('Exited acting-on-behalf mode', 'ok');
 }
 
 // ---- Helpers ----
@@ -105,7 +166,7 @@ function fmtElapsed(ms) {
   return `${h}:${m}:${sec}`;
 }
 function workTypeLabel(t) {
-  return ({ deployment: 'Deployment', retrofit: 'Retrofit', service: 'Service', repair: 'Repair' }[t] || t);
+  return ({ deployment: 'Deployment', retrofit: 'Retrofit', maintenance: 'Maintenance', repair: 'Repair' }[t] || t);
 }
 function sourceLabel(s) { return s === 'maintainx' ? 'MaintainX' : 'Freshdesk'; }
 function todayISO() { return new Date().toISOString().slice(0,10); }
@@ -264,7 +325,7 @@ function renderTabbar() {
   $('#tabbar').innerHTML = tabs.map(t => `
     <button data-tab="${t.id}" class="tab-btn">${t.ico}<span>${t.label}</span></button>
   `).join('');
-  $$('.tab-btn').forEach(b => b.addEventListener('click', () => goto(b.dataset.tab)));
+  $$('.tab-btn').forEach(b => b.addEventListener('click', () => { if (STATE.onBehalfOf) exitProxy({ silent: true }); goto(b.dataset.tab); }));
 }
 
 function goto(view, arg=null) {
@@ -276,6 +337,10 @@ function goto(view, arg=null) {
 
 async function render() {
   const v = STATE.view;
+  updateProxyBar();
+  // v0.65.1 (F-M9) — clear the Home ticker on every navigation so intervals
+  // don't stack (renderHome re-creates it when Home is shown).
+  clearInterval(STATE._homeInterval); STATE._homeInterval = null;
   $('#hdrTitle').textContent = ({
     home:        'Today',
     timer:       'Time Tracker',
@@ -323,6 +388,8 @@ async function render() {
     if (v === 'launch')    return renderLaunchActuals(root);
     if (v === 'admin')     return renderAdmin(root);
     if (v === 'corpcard')  return renderCorpCard(root);
+    // v0.64 — Unplanned moved into the Dashboard. Redirect any stale link there.
+    if (v === 'unplanned') { STATE.view = 'dashboard'; STATE._dashSection = 'unplanned'; return renderDashboard(root); }
     // 'map' tab dropped in v0.7 — locations are now embedded in WO time-entry edit sheets.
   } catch (e) {
     root.innerHTML = alertHTML('err', '!', escapeHTML(e.message));
@@ -442,8 +509,8 @@ async function renderHome(root) {
           ${actives.map((a, i) => `
             <div style="background: rgba(255,255,255,0.08); border-radius: 6px; padding: 8px 10px; display:flex; justify-content:space-between; align-items:center;">
               <div>
-                <div style="font-weight:600; font-size: 13px;">${a.external_id}</div>
-                <div style="font-size:11px; color:#cde9c9;">${a.store_name || ''}</div>
+                <div style="font-weight:600; font-size: 13px;">${escapeHTML(a.external_id)}</div>
+                <div style="font-size:11px; color:#cde9c9;">${escapeHTML(a.store_name || '')}</div>
               </div>
               <div data-elapsed="${a.clock_in}" style="font-family: 'SF Mono', Menlo, monospace; font-size: 16px; font-weight:700;">00:00:00</div>
             </div>
@@ -501,7 +568,7 @@ async function renderHome(root) {
         el.textContent = fmtElapsed(Date.now() - start);
       });
     };
-    tick(); setInterval(tick, 1000);
+    tick(); clearInterval(STATE._homeInterval); STATE._homeInterval = setInterval(tick, 1000);
     $('#goTimer')?.addEventListener('click', () => goto('timer'));
   } else {
     $('#startTimer')?.addEventListener('click', () => goto('woPick'));
@@ -567,7 +634,7 @@ function woCard(w) {
 // source-system ticket number.  "MX-RPR-97461873" → "97461873"
 function sourceTicketId(externalId) {
   if (!externalId) return '';
-  const m = externalId.match(/^(MX|FD)-(DPL|RTR|SVC|RPR)-(.+)$/i);
+  const m = externalId.match(/^(MX|FD)-(DPL|RTR|SVC|MNT|RPR)-(.+)$/i);
   return m ? m[3] : externalId;
 }
 
@@ -584,11 +651,19 @@ function labelForWoStatus(s) {
   return ({ in_progress: 'In progress', open: 'Open', completed: 'Done', cancelled: 'Cancelled' }[s] || s);
 }
 function labelForStatus(s) {
+  // Single source of truth for invoice-status labels — used everywhere so the
+  // same state never shows a different (or raw enum) label across screens.
   return ({
-    draft: 'Draft', submitted: 'Pending Ops', in_review: 'In review',
-    approved_ops: 'Pending Sr.', approved_sr: 'Queued AP',
-    queued_ap: 'Queued AP', sent_ap: 'Sent to AP', rejected: 'Rejected',
-  }[s] || s);
+    draft: 'Draft', submitted: 'Pending Ops Mgr', in_review: 'In review',
+    approved_ops: 'Ops approved · ready for AP', approved_sr: 'Sr Mgr approved · ready for AP',
+    queued_ap: 'Queued for AP', sent_ap: 'Sent to AP', paid: 'Paid',
+    rejected: 'Rejected', cancelled: 'Cancelled',
+  }[s] || (s ? String(s).replace(/_/g, ' ') : ''));
+}
+// Human-readable role labels (never surface raw role enums like "ops_manager").
+function roleLabel(r) {
+  return ({ technician: 'Technician', ops_manager: 'Ops Manager',
+    sr_manager: 'Sr Manager', pm: 'PM' }[r] || (r ? String(r).replace(/_/g, ' ') : ''));
 }
 function badgeForStatus(s) {
   if (s === 'sent_ap') return 'paid';   // reuse 'paid' badge styling for terminal state
@@ -630,6 +705,19 @@ async function renderWoDetail(root, woId) {
       <div class="card-row"><span>Local reference</span><span class="amt" style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--muted);">${escapeHTML(w.external_id)}</span></div>
       ${w.description ? `<div style="margin-top: 10px; padding: 10px 12px; background: #fafafa; border-radius: 8px; font-size: 14px; line-height: 1.5; white-space: pre-wrap;">${escapeHTML(w.description)}</div>` : ''}
     </div>
+
+    ${['ops_manager','sr_manager','pm'].includes(STATE.user?.role) ? `
+    <div class="section-title">Unplanned Work</div>
+    <div class="card" style="padding:12px 14px;">
+      <div class="flex between" style="align-items:center;">
+        <div>
+          <div style="font-size:13px;font-weight:600;">Tag this entire work order as unplanned</div>
+          <div style="font-size:12px;color:var(--muted);">Flags the WO for leadership reporting on wasted/unplanned costs.</div>
+        </div>
+        <div id="woLevelTagBtn">${renderUnplannedTagBtn('work_order', w.id, w.unplanned_tag, w.unplanned_note, null)}</div>
+      </div>
+      ${w.unplanned_note ? `<div style="margin-top:8px;font-size:12px;color:var(--muted);font-style:italic;">${escapeHTML(w.unplanned_note)}</div>` : ''}
+    </div>` : ''}
 
     <div class="section-title">Status</div>
     <div class="card">
@@ -675,13 +763,15 @@ async function renderWoDetail(root, woId) {
               <div class="flex between">
                 <div>
                   <span class="badge ${isDrive ? 'pending' : 'approved'}">${isDrive ? '🚗 Drive' : '🛠 Work'}</span>
-                  <strong style="margin-left: 8px;">${new Date(t.clock_in).toLocaleDateString()}</strong>
+                  <strong style="margin-left: 8px;">${new Date(t.clock_in).toLocaleDateString()}</strong>${t.tech_name ? `<span class="meta"> · ${escapeHTML(t.tech_name)}</span>` : ''}
                   <div class="meta">${new Date(t.clock_in).toLocaleTimeString()} → ${t.clock_out ? new Date(t.clock_out).toLocaleTimeString() : 'running'}</div>
                 </div>
                 <div class="amt"><strong>${dur} hr${dur === '1.00' ? '' : 's'}</strong></div>
               </div>
               ${t.gps_lat_in  ? gpsChip(t.gps_lat_in,  t.gps_lng_in,  t.gps_accuracy_in,  'Clocked in')  : ''}
               ${t.gps_lat_out ? gpsChip(t.gps_lat_out, t.gps_lng_out, t.gps_accuracy_out, 'Clocked out') : ''}
+              ${['ops_manager','sr_manager','pm'].includes(STATE.user?.role)
+                ? `<div style="margin-top:8px;">${renderUnplannedTagBtn('time_entry', t.id, t.unplanned_tag, t.unplanned_note, null)}</div>${unplannedNoteLine(t.unplanned_tag, t.unplanned_note)}` : ''}
             </div>
           `;
         }).join('')}
@@ -694,10 +784,12 @@ async function renderWoDetail(root, woId) {
             <div class="flex between">
               <div>
                 <strong>${capitalize(e.category)}${e.subcategory ? ' · ' + escapeHTML(e.subcategory) : ''}</strong>
-                <div class="meta">${fmtDate(e.expense_date)}${e.description ? ' · ' + escapeHTML(e.description) : ''}</div>
+                <div class="meta">${fmtDate(e.expense_date)}${e.description ? ' · ' + escapeHTML(e.description) : ''}${e.tech_name ? ' · ' + escapeHTML(e.tech_name) : ''}</div>
               </div>
               <div class="amt"><strong>${fmt$(e.amount)}</strong></div>
             </div>
+            ${['ops_manager','sr_manager','pm'].includes(STATE.user?.role)
+              ? `<div style="margin-top:8px;">${renderUnplannedTagBtn('expense', e.id, e.unplanned_tag, e.unplanned_note, e.amount, e.unplanned_wasted)}</div>${unplannedNoteLine(e.unplanned_tag, e.unplanned_note)}${unplannedSplitLine(e.unplanned_tag, e.unplanned_wasted, e.amount)}` : ''}
           </div>
         `).join('')}
 
@@ -713,6 +805,9 @@ async function renderWoDetail(root, woId) {
       <button class="btn btn-primary" id="addExpToWO">Add expense</button>
     </div>
   `;
+
+  // v0.63 — wire unplanned tag buttons (WO-level + per time-entry + per expense)
+  wireUnplannedTagBtns(root, () => renderWoDetail(root, woId));
 
   $$('#statusChips .chip').forEach(c => c.addEventListener('click', async () => {
     const newStatus = c.dataset.status;
@@ -742,7 +837,7 @@ async function renderWoPick(root) {
   $('#hdrTitle').textContent = 'Pick Work Order';
   root.innerHTML = `
     <input class="field" id="woSearch" placeholder="Search by ID, store, or keyword…" />
-    <div class="help">ID prefix tells you the source (MX = MaintainX, FD = Freshdesk) and work type (DPL/RTR/SVC/RPR).</div>
+    <div class="help">ID prefix tells you the source (MX = MaintainX, FD = Freshdesk) and work type (DPL/RTR/MNT/RPR).</div>
 
     <button class="btn btn-ghost btn-block" id="addWoBtn" style="margin-bottom:14px;">
       ＋ Add a Freshdesk or MaintainX ticket
@@ -774,9 +869,17 @@ async function renderWoPick(root) {
 
 // ---- WO ADD (tech-side) ----
 async function renderWoAdd(root) {
+  // v0.62 — pull the live work-type list so admin-added types show up here.
+  // Fallback to the four originals if the endpoint is unreachable so the
+  // form still works offline / on broken auth.
+  const activeWtRows = await api('/work-types').catch(() => []);
+  const ACTIVE_WTS = activeWtRows.length
+    ? activeWtRows.map(w => w.name)
+    : ['deployment','retrofit','maintenance','repair'];
+
   let form = {
     source_system: 'maintainx',
-    work_type: 'retrofit',
+    work_type: ACTIVE_WTS.includes('retrofit') ? 'retrofit' : ACTIVE_WTS[0],
     ticket_id: '',
     title: '',
     store_name: '',
@@ -864,10 +967,9 @@ async function renderWoAdd(root) {
         ${form.work_type_unresolved ? `<span style="font-weight: 400; color: var(--ic-orange); margin-left: 8px;">⚠ couldn't auto-determine — pick one</span>` : ''}
       </span>
       <div class="chips">
-        <span class="chip ${form.work_type==='deployment'?'selected':''}" data-wt="deployment">Deployment</span>
-        <span class="chip ${form.work_type==='retrofit'?'selected':''}"   data-wt="retrofit">Retrofit</span>
-        <span class="chip ${form.work_type==='service'?'selected':''}"    data-wt="service">Service</span>
-        <span class="chip ${form.work_type==='repair'?'selected':''}"     data-wt="repair">Repair</span>
+        ${ACTIVE_WTS.map(wt => `
+          <span class="chip ${form.work_type === wt ? 'selected' : ''}" data-wt="${escapeHTML(wt)}">${escapeHTML(workTypeLabel(wt))}</span>
+        `).join('')}
       </div>
 
       <span class="label">Ticket / Work Order #</span>
@@ -914,7 +1016,7 @@ async function renderWoAdd(root) {
   }
   function prefixPreview() {
     const src = form.source_system === 'maintainx' ? 'MX' : 'FD';
-    const typ = ({ deployment:'DPL', retrofit:'RTR', service:'SVC', repair:'RPR' })[form.work_type];
+    const typ = ({ deployment:'DPL', retrofit:'RTR', maintenance:'MNT', repair:'RPR' })[form.work_type];
     return `<code>${src}-${typ}-</code>`;
   }
   function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
@@ -1076,7 +1178,7 @@ async function renderTimer(root) {
     return;
   }
 
-  const expectedFor = (a) => ({deployment:0.7, retrofit:0.7, service:2.4, repair:1.5}[a.work_type] || 1) * (a.cart_count || 1);
+  const expectedFor = (a) => ({deployment:0.7, retrofit:0.7, maintenance:2.4, repair:1.5}[a.work_type] || 1) * (a.cart_count || 1);
 
   // Per-timer break tally (resets each render)
   const breakMins = {};
@@ -1087,14 +1189,14 @@ async function renderTimer(root) {
       const expected = expectedFor(a);
       const mode = a.mode || 'work';
       const isDrive = mode === 'drive';
-      breakMins[a.id] = 0;
+      breakMins[a.id] = a.break_minutes || 0;
       return `
         <div class="card">
           <div class="flex between" style="margin-bottom:10px;">
             <div>
-              <div class="wo-id">${a.external_id}</div>
+              <div class="wo-id">${escapeHTML(a.external_id)}</div>
               <div class="wo-source">${sourceLabel(a.source_system)} · ${workTypeLabel(a.work_type)}</div>
-              <div style="font-size:12px; margin-top:4px;">${a.store_name || ''} · ${a.cart_count} carts</div>
+              <div style="font-size:12px; margin-top:4px;">${escapeHTML(a.store_name || '')} · ${a.cart_count} carts</div>
             </div>
             <span class="badge ${isDrive ? 'pending' : 'approved'}">Running</span>
           </div>
@@ -1102,7 +1204,7 @@ async function renderTimer(root) {
             <div class="mode-badge ${mode}">${isDrive ? '🚗 Drive time' : '🛠 Work time'}</div>
             <div class="since">CLOCKED IN AT ${new Date(a.clock_in).toLocaleTimeString()}</div>
             <div class="clock" data-clock="${a.id}" data-start="${a.clock_in}">00:00:00</div>
-            <div class="wo">${isDrive ? 'Drive time — not billable as labor' : `Expected ${expected.toFixed(1)} hrs · flag if > ${(expected * 1.5).toFixed(1)} hrs`}</div>
+            <div class="wo">${isDrive ? 'Drive time — billable, tracked separately from labor' : `Expected ${expected.toFixed(1)} hrs · flag if > ${(expected * 1.5).toFixed(1)} hrs`}</div>
           </div>
           ${gpsChip(a.gps_lat_in, a.gps_lng_in, a.gps_accuracy_in, 'Clock-in location')}
           <div class="actions">
@@ -1135,9 +1237,13 @@ async function renderTimer(root) {
 
   $('#addAnother').addEventListener('click', () => goto('woPick'));
   $('#manualBtn')?.addEventListener('click', openManualTimeSheet);
-  $$('[data-act="break"]').forEach(b => b.addEventListener('click', () => {
+  $$('[data-act="break"]').forEach(b => b.addEventListener('click', async () => {
     const id = b.dataset.tid;
     breakMins[id] = (breakMins[id] || 0) + 30;
+    // v0.65.1 (F-M8) — persist immediately (timer keeps running) so the break
+    // isn't silently lost on navigation / re-render.
+    try { await api(`/timeentries/${id}`, { method: 'PATCH', body: { break_minutes: breakMins[id], break_only: true } }); }
+    catch (e) { breakMins[id] -= 30; toast(e.message, 'err'); return; }
     toast(`Break time +30 min (total ${breakMins[id]})`);
   }));
   $$('[data-act="clockout"]').forEach(b => b.addEventListener('click', async () => {
@@ -1292,7 +1398,7 @@ async function renderAdd(root) {
   function previewHTML() {
     const cat   = selected.category;
     const w     = open.find(x => x.id == selected.work_order_id);
-    const woLbl = w ? `${w.external_id}${w.store_name ? ' — ' + w.store_name : ''}` : '— pick a work order —';
+    const woLbl = w ? `${escapeHTML(w.external_id)}${w.store_name ? ' — ' + escapeHTML(w.store_name) : ''}` : '— pick a work order —';
     const dateStr = selected.expense_date ? fmtDate(selected.expense_date) : '—';
 
     // Compute preview amount/qty using the same rules the server applies on save.
@@ -1363,7 +1469,7 @@ async function renderAdd(root) {
     `;
   }
   function woOption(w) {
-    return `<option value="${w.id}" ${selected.work_order_id == w.id ? 'selected' : ''}>${w.external_id} — ${w.store_name || ''} (${workTypeLabel(w.work_type)})</option>`;
+    return `<option value="${w.id}" ${selected.work_order_id == w.id ? 'selected' : ''}>${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})</option>`;
   }
 
   // v0.49 — capture every input into `selected` so that any subsequent
@@ -1748,19 +1854,363 @@ async function renderPolicyView(root) {
     root.innerHTML = `<div class="empty">Manager role required.</div>`;
     return;
   }
-  const [pol, rules, wtCfg] = await Promise.all([
+  // v0.61 / v0.62 — fetch every dependency the Policy page needs in one shot.
+  // Failures degrade silently to empty data (so a broken endpoint doesn't
+  // crash the whole tab).
+  const [pol, rules, wtCfg, catRules, ccCats, workOrders, woBudgets, workTypes] = await Promise.all([
     api('/policy'),
     api('/rules'),
     api('/settings/work-type-map').catch(() => null),
+    api('/category-rules').catch(() => []),
+    api('/corp-card/categories?include=archived').catch(() => []),
+    api('/workorders').catch(() => []),
+    api('/wo-budgets').catch(() => []),
+    api('/work-types?include=archived').catch(() => []),
   ]);
   root.innerHTML = `
     ${renderPolicyEditor(pol)}
+    ${renderWorkTypesEditor(workTypes)}
     ${renderWorkTypeMapEditor(wtCfg)}
     ${renderRulesEditor(rules)}
+    ${renderCategoryRulesEditor(catRules, ccCats)}
+    ${renderWoBudgetsEditor(workOrders, woBudgets, ccCats)}
   `;
   bindSavePolicy();
   bindRulesActions('policy');
   bindWorkTypeMapActions();
+  bindCategoryRulesActions();
+  bindWoBudgetsActions(workOrders, ccCats);
+  bindWorkTypesActions();
+}
+
+// ---- Work-types editor (v0.62) ----
+// Admin-managed list. The four originals (deployment/retrofit/maintenance/repair)
+// are seeded at boot and cannot be archived. Custom types added here show up
+// in the Work Order add/edit form and in the rule + dashboard work_type
+// filters.
+function renderWorkTypesEditor(workTypes) {
+  const DEFAULTS = new Set(['deployment','retrofit','maintenance','repair']);
+  const active   = workTypes.filter(w => !w.archived_at);
+  const archived = workTypes.filter(w => w.archived_at);
+  return `
+    <div class="section-title">Work types</div>
+    <div class="card">
+      <p class="help" style="margin: 0 0 12px;">
+        Add custom work types that show up on the WO add/edit form and in the dashboard + rule filters.
+        The four defaults (deployment, retrofit, maintenance, repair) can't be archived because their abbreviations and productivity rates are baked into the app.
+      </p>
+      ${active.length === 0 ? `<div class="empty" style="padding: 10px;">No work types yet.</div>` : ''}
+      ${active.map(w => `
+        <div class="attach-item">
+          <div class="thumb" style="font-size: 18px;">🛠</div>
+          <div class="meta">
+            <div class="name">${escapeHTML(w.name)}</div>
+            <div class="sub">${w.use_count || 0} WO${w.use_count === 1 ? '' : 's'}${DEFAULTS.has(w.name) ? ' · default' : ''}</div>
+          </div>
+          <div class="ctrl">
+            ${DEFAULTS.has(w.name) ? '' : `<button class="btn btn-ghost btn-sm" data-wt-archive="${w.id}" data-wt-name="${escapeHTML(w.name)}">Archive</button>`}
+          </div>
+        </div>
+      `).join('')}
+
+      <span class="label" style="margin-top: 14px;">Add a new work type</span>
+      <div class="flex gap-12">
+        <input class="field" id="wtNewName" placeholder="e.g., install_audit" style="flex: 2;" />
+        <button class="btn btn-primary" id="wtAddBtn" style="flex: 1;">＋ Add</button>
+      </div>
+      <div class="help" style="margin-top: -2px;">Lowercase letters, digits, dashes or underscores only.</div>
+
+      ${archived.length ? `
+        <div class="section-title" style="margin-top: 14px; font-size: 11px;">Archived (${archived.length})</div>
+        ${archived.map(w => `
+          <div class="attach-item" style="opacity: 0.7;">
+            <div class="thumb" style="font-size: 18px;">📦</div>
+            <div class="meta">
+              <div class="name" style="text-decoration: line-through;">${escapeHTML(w.name)}</div>
+              <div class="sub">${w.use_count || 0} historical WO${w.use_count === 1 ? '' : 's'}</div>
+            </div>
+            <div class="ctrl">
+              <button class="btn btn-ghost btn-sm" data-wt-unarchive="${w.id}">Restore</button>
+            </div>
+          </div>
+        `).join('')}
+      ` : ''}
+    </div>
+  `;
+}
+
+function bindWorkTypesActions() {
+  $('#wtAddBtn')?.addEventListener('click', async () => {
+    const name = ($('#wtNewName')?.value || '').trim();
+    if (!name) return toast('Enter a name', 'err');
+    try {
+      await api('/work-types', { method: 'POST', body: { name } });
+      toast('Added ✓', 'ok');
+      goto('policy');
+    } catch (e) { toast(e.message, 'err'); }
+  });
+  $$('[data-wt-archive]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm(`Archive "${b.dataset.wtName}"? Existing WOs keep the label; new WOs can't pick it until restored.`)) return;
+    try {
+      await api(`/work-types/${b.dataset.wtArchive}`, { method: 'DELETE' });
+      toast('Archived ✓', 'ok');
+      goto('policy');
+    } catch (e) { toast(e.message, 'err'); }
+  }));
+  $$('[data-wt-unarchive]').forEach(b => b.addEventListener('click', async () => {
+    try {
+      await api(`/work-types/${b.dataset.wtUnarchive}`, { method: 'PATCH', body: { unarchive: true } });
+      toast('Restored ✓', 'ok');
+      goto('policy');
+    } catch (e) { toast(e.message, 'err'); }
+  }));
+}
+
+// ---- Per-category rules editor (v0.61) ----
+// Every category (corp-card + tech-expense subcategory) gets three editable
+// rule rows auto-seeded when the category is created. Admin (ops_manager,
+// sr_manager, pm) sets the $ amount inline; blank = rule is off.
+const CATEGORY_RULE_LABELS = {
+  per_wo_cap:              { label: 'Per-WO $ cap',         help: 'Cap on combined spend in this category per work order. Overspend is flagged on the policy engine.' },
+  global_cap:              { label: 'Global $ cap',         help: 'A single $ cap across the whole org for this category. Useful for catch-all limits.' },
+  receipt_required_above:  { label: 'Receipt required > $', help: 'Any single charge above this dollar amount must have a receipt attached.' },
+};
+
+function renderCategoryRulesEditor(catRules, ccCats) {
+  // Bucket rules by (source, key, label).
+  const groups = new Map();
+  for (const r of catRules) {
+    const k = `${r.category_source}|${r.category_key}`;
+    if (!groups.has(k)) groups.set(k, { source: r.category_source, key: r.category_key, label: r.category_label, archived: false, rules: {} });
+    groups.get(k).rules[r.rule_kind] = r;
+  }
+  // Mark corp-card archived state for visual hint.
+  const archivedSet = new Set(ccCats.filter(c => c.archived_at).map(c => String(c.id)));
+  for (const g of groups.values()) {
+    if (g.source === 'corp_card' && archivedSet.has(g.key)) g.archived = true;
+  }
+  // Stable order: corp-card active, then archived; then tech_expense.
+  const list = [...groups.values()].sort((a, b) => {
+    if (a.source !== b.source) return a.source === 'corp_card' ? -1 : 1;
+    if (a.archived !== b.archived) return a.archived ? 1 : -1;
+    return a.label.localeCompare(b.label);
+  });
+
+  // v0.62 — rows are collapsed by default; remember last-expanded set in
+  // STATE._catRuleOpen so the user's expand state survives a render() call.
+  STATE._catRuleOpen = STATE._catRuleOpen || new Set();
+  const openSet = STATE._catRuleOpen;
+
+  // Quick summary string so the collapsed header tells you what's configured
+  // at a glance.
+  function summary(g) {
+    const bits = [];
+    const r1 = g.rules.per_wo_cap?.amount;
+    const r2 = g.rules.global_cap?.amount;
+    const r3 = g.rules.receipt_required_above?.amount;
+    if (r1 != null) bits.push(`per-WO $${(+r1).toFixed(0)}`);
+    if (r2 != null) bits.push(`global $${(+r2).toFixed(0)}`);
+    if (r3 != null) bits.push(`receipt >$${(+r3).toFixed(0)}`);
+    return bits.length ? bits.join(' · ') : 'no rules set';
+  }
+
+  return `
+    <div class="section-title">Per-category rules</div>
+    <div class="card">
+      <p class="help" style="margin: 0 0 10px;">
+        Each category has three editable rules — a per-WO $ cap, a global $ cap, and a receipt threshold.
+        Click a category to expand. Leave a field blank to turn that rule off. Adding a new corp-card category auto-creates these three rows.
+      </p>
+      <div style="display: flex; gap: 6px; margin-bottom: 8px;">
+        <button class="btn btn-ghost btn-sm" id="catRulesExpandAll" type="button">Expand all</button>
+        <button class="btn btn-ghost btn-sm" id="catRulesCollapseAll" type="button">Collapse all</button>
+      </div>
+      ${list.length === 0 ? `<div class="empty" style="padding: 12px; font-size: 12px;">No categories yet. Add one from the Corp Card tab.</div>` : ''}
+      ${list.map(g => {
+        const key  = `${g.source}|${g.key}`;
+        const open = openSet.has(key);
+        return `
+        <div class="cat-rule-row" data-cat-key="${escapeHTML(key)}" style="border-top: 1px solid var(--line);">
+          <button class="cat-rule-header" type="button" data-cat-toggle="${escapeHTML(key)}"
+                  style="display: flex; align-items: center; justify-content: space-between; width: 100%;
+                         background: none; border: 0; padding: 10px 0; cursor: pointer; text-align: left;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="display: inline-block; width: 12px; transition: transform 0.15s;">${open ? '▾' : '▸'}</span>
+              <span style="font-weight: 600;">${escapeHTML(g.label)}</span>
+              <span class="meta" style="font-weight: 400;">${g.source === 'corp_card' ? 'Corp card' : 'Tech expense'}${g.archived ? ' · archived' : ''}</span>
+            </div>
+            <span class="meta" style="font-size: 11px;">${escapeHTML(summary(g))}</span>
+          </button>
+          <div class="cat-rule-fields" style="display: ${open ? 'grid' : 'none'}; grid-template-columns: 1fr 1fr 1fr; gap: 8px; padding: 0 0 12px;">
+            ${['per_wo_cap','global_cap','receipt_required_above'].map(k => {
+              const r = g.rules[k];
+              if (!r) return '';
+              const meta = CATEGORY_RULE_LABELS[k];
+              return `
+                <label class="cat-rule-field" style="display: flex; flex-direction: column; gap: 3px;">
+                  <span class="label" title="${escapeHTML(meta.help)}" style="font-size: 11px;">${escapeHTML(meta.label)}</span>
+                  <input class="field cat-rule-input"
+                         type="number" step="0.01" min="0"
+                         data-rule-id="${r.id}"
+                         value="${r.amount != null ? r.amount : ''}"
+                         placeholder="—" />
+                </label>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function bindCategoryRulesActions() {
+  // Save on blur so the admin doesn't need a Save button per row.
+  $$('.cat-rule-input').forEach(inp => {
+    inp.addEventListener('blur', async () => {
+      const id  = inp.dataset.ruleId;
+      const raw = inp.value.trim();
+      const amount = raw === '' ? null : Number(raw);
+      if (raw !== '' && (!isFinite(amount) || amount < 0)) {
+        toast('Amount must be a non-negative number', 'err');
+        return;
+      }
+      try {
+        await api(`/category-rules/${id}`, { method: 'PUT', body: { amount } });
+        inp.style.outline = '2px solid var(--ic-green-deep)';
+        setTimeout(() => { inp.style.outline = ''; }, 800);
+      } catch (e) { toast(e.message, 'err'); }
+    });
+  });
+
+  // v0.62 — collapsible headers. Toggling re-renders the section in-place
+  // without losing the rest of the Policy page state.
+  STATE._catRuleOpen = STATE._catRuleOpen || new Set();
+  $$('[data-cat-toggle]').forEach(btn => btn.addEventListener('click', () => {
+    const key = btn.dataset.catToggle;
+    if (STATE._catRuleOpen.has(key)) STATE._catRuleOpen.delete(key);
+    else STATE._catRuleOpen.add(key);
+    // Toggle just the affected row to avoid re-fetching everything.
+    const row    = btn.closest('.cat-rule-row');
+    const fields = row.querySelector('.cat-rule-fields');
+    const caret  = btn.querySelector('span');
+    const isOpen = STATE._catRuleOpen.has(key);
+    fields.style.display = isOpen ? 'grid' : 'none';
+    if (caret) caret.textContent = isOpen ? '▾' : '▸';
+  }));
+
+  $('#catRulesExpandAll')?.addEventListener('click', () => {
+    $$('[data-cat-toggle]').forEach(btn => {
+      if (!STATE._catRuleOpen.has(btn.dataset.catToggle)) btn.click();
+    });
+  });
+  $('#catRulesCollapseAll')?.addEventListener('click', () => {
+    $$('[data-cat-toggle]').forEach(btn => {
+      if (STATE._catRuleOpen.has(btn.dataset.catToggle)) btn.click();
+    });
+  });
+}
+
+// ---- Per-WO category budgets editor (v0.61) ----
+// Pick a WO, set a $ cap per category. Overspend will surface in the
+// dashboard sub-tab's over-budget list (and, once wired, as a policy-engine
+// flag on the invoice).
+function renderWoBudgetsEditor(workOrders, woBudgets, ccCats) {
+  const woOpts = (workOrders || []).map(w => `<option value="${w.id}" data-ext="${escapeHTML(w.external_id || '')}">${escapeHTML((w.external_id || `WO #${w.id}`) + (w.store_name ? ` · ${w.store_name}` : ''))}</option>`).join('');
+  return `
+    <div class="section-title">Per-WO category budgets</div>
+    <div class="card">
+      <p class="help" style="margin: 0 0 14px;">
+        Set a $ cap per category on a specific work order. Spend over the cap is flagged on the corresponding category dashboard.
+        Leave a row blank to remove the budget.
+      </p>
+
+      <label class="cat-rule-field" style="display: flex; flex-direction: column; gap: 4px;">
+        <span class="label">Pick a work order</span>
+        <select class="field" id="woBudgetPick">
+          <option value="">— Select a WO —</option>
+          ${woOpts}
+        </select>
+      </label>
+
+      <div id="woBudgetEditor" style="margin-top: 12px;"></div>
+
+      ${woBudgets.length ? `
+        <div class="section-title" style="margin-top: 18px; font-size: 12px;">Existing budgets (${woBudgets.length})</div>
+        <div style="font-size: 12px;">
+          ${woBudgets.map(b => `
+            <div style="display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--line);">
+              <span>${escapeHTML(b.wo_external_id || `WO #${b.work_order_id}`)} · ${escapeHTML(b.category_label)}</span>
+              <strong>$${b.amount_cap.toFixed(2)}</strong>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function bindWoBudgetsActions(workOrders, ccCats) {
+  const sel = $('#woBudgetPick');
+  if (!sel) return;
+  const editor = $('#woBudgetEditor');
+
+  async function showEditor(woId) {
+    if (!woId) { editor.innerHTML = ''; return; }
+    const existing = await api(`/wo-budgets?work_order_id=${woId}`).catch(() => []);
+    const byKey = {};
+    for (const b of existing) byKey[`${b.category_source}|${b.category_key}`] = b;
+
+    const categories = [
+      ...(ccCats.filter(c => !c.archived_at).map(c => ({ source: 'corp_card', key: String(c.id), label: c.name }))),
+      ...['Meal','Tools','Hotel','Supplies','Misc'].map(s => ({ source: 'tech_expense', key: s, label: s })),
+    ];
+
+    editor.innerHTML = `
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+        ${categories.map(c => {
+          const k = `${c.source}|${c.key}`;
+          const cap = byKey[k]?.amount_cap;
+          return `
+            <label class="cat-rule-field" style="display: flex; flex-direction: column; gap: 3px;">
+              <span class="label" style="font-size: 11px;">${escapeHTML(c.label)} <span class="meta">(${c.source === 'corp_card' ? 'CC' : 'TE'})</span></span>
+              <input class="field wo-budget-input"
+                     type="number" step="0.01" min="0"
+                     data-wo="${woId}"
+                     data-source="${c.source}"
+                     data-key="${escapeHTML(c.key)}"
+                     value="${cap != null ? cap : ''}"
+                     placeholder="—" />
+            </label>
+          `;
+        }).join('')}
+      </div>
+    `;
+
+    $$('.wo-budget-input', editor).forEach(inp => {
+      inp.addEventListener('blur', async () => {
+        const raw = inp.value.trim();
+        const amount_cap = raw === '' ? null : Number(raw);
+        if (raw !== '' && (!isFinite(amount_cap) || amount_cap < 0)) {
+          toast('Cap must be a non-negative number', 'err');
+          return;
+        }
+        try {
+          await api('/wo-budgets', { method: 'PUT', body: {
+            work_order_id: Number(inp.dataset.wo),
+            category_source: inp.dataset.source,
+            category_key:    inp.dataset.key,
+            amount_cap,
+          } });
+          inp.style.outline = '2px solid var(--ic-green-deep)';
+          setTimeout(() => { inp.style.outline = ''; }, 800);
+        } catch (e) { toast(e.message, 'err'); }
+      });
+    });
+  }
+
+  sel.addEventListener('change', () => showEditor(sel.value));
 }
 
 // ---- Work-type integration mapping (v0.30) ----
@@ -1774,13 +2224,13 @@ function renderWorkTypeMapEditor(cfg) {
   const mxMap   = m.maintainx?.map   || '';
   const fdField = m.freshdesk_caperhelp?.field || '';
   const fdMap   = m.freshdesk_caperhelp?.map   || '';
-  const ENUM = ['deployment','retrofit','service','repair'];
+  const ENUM = ['deployment','retrofit','maintenance','repair'];
   return `
     <div class="section-title">Work-type integration mapping</div>
     <div class="card">
       <p class="help" style="margin: 0 0 12px;">
         Tells the integration which field on each ticket carries the work type
-        (Deployment / Retrofit / Service / Repair) and how to translate raw values
+        (Deployment / Retrofit / Maintenance / Repair) and how to translate raw values
         to our four buckets. <strong>No keyword guessing</strong> — when no mapping
         matches, the user is asked to pick manually.
       </p>
@@ -1790,7 +2240,7 @@ function renderWorkTypeMapEditor(cfg) {
       <input class="field" id="wtMxField" value="${escapeHTML(mxField)}" placeholder='e.g. "Type of Work"' />
 
       <span class="label">Value → work_type (JSON)</span>
-      <textarea class="field" id="wtMxMap" rows="6" placeholder='${escapeHTML('{ "Deployment": "deployment", "Retrofit": "retrofit", "Service Call": "service", "Repair": "repair" }')}'>${escapeHTML(mxMap)}</textarea>
+      <textarea class="field" id="wtMxMap" rows="6" placeholder='${escapeHTML('{ "Deployment": "deployment", "Retrofit": "retrofit", "Service Call": "maintenance", "Repair": "repair" }')}'>${escapeHTML(mxMap)}</textarea>
       <div class="help" style="margin-top: -8px;">Right-hand side must be one of: <code>${ENUM.join('</code>, <code>')}</code>. Match is case-insensitive.</div>
 
       <div class="section-title" style="margin: 18px 4px 8px;">Freshdesk — caperhelp</div>
@@ -1798,7 +2248,7 @@ function renderWorkTypeMapEditor(cfg) {
       <input class="field" id="wtFdField" value="${escapeHTML(fdField)}" placeholder='e.g. "cf_request_type"' />
 
       <span class="label">Value → work_type (JSON)</span>
-      <textarea class="field" id="wtFdMap" rows="6" placeholder='${escapeHTML('{ "Deployment": "deployment", "Retrofit": "retrofit", "Service": "service", "Repair": "repair" }')}'>${escapeHTML(fdMap)}</textarea>
+      <textarea class="field" id="wtFdMap" rows="6" placeholder='${escapeHTML('{ "Deployment": "deployment", "Retrofit": "retrofit", "Service": "maintenance", "Repair": "repair" }')}'>${escapeHTML(fdMap)}</textarea>
 
       <button class="btn btn-primary btn-block" id="saveWtMap" style="margin-top: 14px;">Save mapping</button>
       <div id="wtMapStatus" style="margin-top: 10px;"></div>
@@ -1839,7 +2289,7 @@ function bindSavePolicy() {
       policy_meal_trip_min_hours:        $('#pol_meal_min')?.value,
       policy_hours_per_10_carts_deployment:  $('#pol_hpc_dpl')?.value,
       policy_hours_per_10_carts_retrofit:    $('#pol_hpc_rtr')?.value,
-      policy_hours_per_10_carts_service:     $('#pol_hpc_svc')?.value,
+      policy_hours_per_10_carts_maintenance: $('#pol_hpc_mnt')?.value,
       policy_hours_per_10_carts_repair:      $('#pol_hpc_rpr')?.value,
       policy_ap_email:                       $('#pol_ap_email')?.value,
     };
@@ -1894,7 +2344,11 @@ function ruleRowHTML(r) {
   `;
 }
 
-function openAddRuleSheet() {
+async function openAddRuleSheet() {
+  // v0.62 — load active work types so the filter dropdown reflects admin-added ones.
+  const wtRows = await api('/work-types').catch(() => []);
+  const WT_OPTIONS = wtRows.length ? wtRows.map(w => w.name) : ['deployment','retrofit','maintenance','repair'];
+
   let form = { rule_type: 'max_hours_per_wo', work_type_filter: '', category_filter: '',
                cart_count_min: '', threshold: '', description: '', severity: 'flag' };
 
@@ -1922,10 +2376,7 @@ function openAddRuleSheet() {
       <span class="label">Apply to work type</span>
       <select class="field" id="rWt">
         <option value="" ${!form.work_type_filter?'selected':''}>All work types</option>
-        <option value="deployment" ${form.work_type_filter==='deployment'?'selected':''}>Deployment only</option>
-        <option value="retrofit"   ${form.work_type_filter==='retrofit'?'selected':''}>Retrofit only</option>
-        <option value="service"    ${form.work_type_filter==='service'?'selected':''}>Service only</option>
-        <option value="repair"     ${form.work_type_filter==='repair'?'selected':''}>Repair only</option>
+        ${WT_OPTIONS.map(wt => `<option value="${escapeHTML(wt)}" ${form.work_type_filter===wt?'selected':''}>${escapeHTML(workTypeLabel(wt))} only</option>`).join('')}
       </select>
 
       ${showCartFilter ? `
@@ -2057,8 +2508,8 @@ function renderPolicyEditor(pol) {
       </div>
       <div class="flex gap-12">
         <div style="flex: 1;">
-          <span class="label">Service <span style="color:var(--muted);font-weight:400">(hrs / 10 carts)</span>${isOver('policy_hours_per_10_carts_service')}</span>
-          <input class="field" id="pol_hpc_svc" type="number" step="0.5" min="0" value="${e.HOURS_PER_10_CARTS.service}" />
+          <span class="label">Maintenance <span style="color:var(--muted);font-weight:400">(hrs / 10 carts)</span>${isOver('policy_hours_per_10_carts_maintenance')}</span>
+          <input class="field" id="pol_hpc_mnt" type="number" step="0.5" min="0" value="${e.HOURS_PER_10_CARTS.maintenance}" />
         </div>
         <div style="flex: 1;">
           <span class="label">Repair <span style="color:var(--muted);font-weight:400">(hrs / 10 carts)</span>${isOver('policy_hours_per_10_carts_repair')}</span>
@@ -2100,7 +2551,7 @@ async function openManualTimeSheet(opts = {}) {
 
     <span class="label">Work order</span>
     <select class="field" id="mtWO">
-      ${open.map(w => `<option value="${w.id}">${w.external_id} — ${w.store_name || ''}</option>`).join('')}
+      ${open.map(w => `<option value="${w.id}">${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')}</option>`).join('')}
     </select>
 
     <span class="label">Date</span>
@@ -2216,12 +2667,12 @@ function openRateSheet(currentRate) {
 function invoiceLineHTML(l, allAttachments = []) {
   const attsForExpense = (eid) => allAttachments.filter(a => a.expense_id === eid);
   return `
-    <div class="card" data-line="${l.external_id}">
+    <div class="card" data-line="${escapeHTML(l.external_id)}">
       <div class="flex between">
         <div>
-          <div class="wo-id">${l.external_id}</div>
+          <div class="wo-id">${escapeHTML(l.external_id)}</div>
           <div class="wo-source">${sourceLabel(l.source_system)} · ${workTypeLabel(l.work_type)} · ${l.cart_count} carts</div>
-          <div style="font-size:12px;color:var(--ink-2);margin-top:4px">${l.store_name || ''}</div>
+          <div style="font-size:12px;color:var(--ink-2);margin-top:4px">${escapeHTML(l.store_name || '')}</div>
         </div>
         ${l.flags.length ? `<span class="badge flagged">Flagged</span>` : `<span class="badge approved">OK</span>`}
       </div>
@@ -2231,10 +2682,10 @@ function invoiceLineHTML(l, allAttachments = []) {
           <div class="exp-item">
             <div>
               <strong>Labor</strong> <span class="amt">${l.labor_hours} hrs · ${fmt$(l.labor_amount)}</span>
-              <div class="meta">${(l.expected_hours).toFixed(1)} hrs expected for ${l.cart_count} carts</div>
+              <div class="meta">${(l.expected_hours || 0).toFixed(1)} hrs expected for ${l.cart_count} carts</div>
             </div>
             <div class="ctrl">
-              <button class="btn btn-ghost" data-act="edit-time" data-wo="${l.external_id}">Edit</button>
+              <button class="btn btn-ghost" data-act="edit-time" data-wo="${escapeHTML(l.external_id)}">Edit</button>
             </div>
           </div>
         </div>
@@ -2293,7 +2744,26 @@ function bindLineActions(timeEntries, expenses) {
 // row, grouped by date. Used in editable mode (tech-self draft + manager
 // proxy mode). Each row has Edit + Delete buttons that hit the existing
 // /timeentries/:id and /expenses/:id endpoints.
-function renderEditableLineItems(by_date, invoice) {
+// v0.64.3 — compact "live preview" panel for the side-by-side manager review.
+// Shows the running invoice total + component breakdown so an Ops Manager sees
+// how their line-item edits reflect without scrolling to the full invoice.
+function renderInvoicePreviewPanel(p) {
+  const row = (label, val, strong) => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--border);font-size:13px;"><span style="color:var(--secondary-text);">${label}</span><span style="${strong ? 'font-weight:700;' : ''}">${val}</span></div>`;
+  return `
+    <div class="card" style="margin-top:14px;">
+      <div style="font-size:11px;color:var(--secondary-text);text-transform:uppercase;letter-spacing:.5px;">Live invoice total</div>
+      <div style="font-size:30px;font-weight:800;color:var(--ic-green-deep,#0a7d4d);margin:2px 0 4px;">${fmt$(p.total)}</div>
+      <div style="font-size:11px;color:var(--secondary-text);margin-bottom:8px;">Updates as you edit · ${p.itemCount} line item${p.itemCount === 1 ? '' : 's'}</div>
+      ${row('Labour', `${fmtHrs(p.laborHours)} · ${fmt$(p.labor)}`)}
+      ${p.mileage > 0 ? row('Mileage', fmt$(p.mileage)) : ''}
+      ${p.other > 0.005 ? row('Other expenses', fmt$(p.other)) : ''}
+      ${row('Total', fmt$(p.total), true)}
+      ${p.flags > 0 ? `<div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:#fdecea;color:#c0392b;font-size:12px;font-weight:600;">⚠ ${p.flags} policy flag${p.flags === 1 ? '' : 's'} on this invoice</div>` : ''}
+      <div style="margin-top:10px;font-size:11px;color:var(--secondary-text);">Status: ${escapeHTML(labelForStatus(p.status))}</div>
+    </div>`;
+}
+
+function renderEditableLineItems(by_date, invoice, opts = {}) {
   if (!by_date || !by_date.length) {
     return `
       <div class="card" style="margin-top: 14px;">
@@ -2317,9 +2787,9 @@ function renderEditableLineItems(by_date, invoice) {
         return `
           <div class="ed-day">
             <div class="ed-day-head">${fmtLongDate(d.date)}</div>
-            ${labor.map(t => editTimeRowHTML(t, invoice, false)).join('')}
-            ${drive.map(t => editTimeRowHTML(t, invoice, true)).join('')}
-            ${expRows.map(e => editExpenseRowHTML(e, invoice)).join('')}
+            ${labor.map(t => editTimeRowHTML(t, invoice, false, opts)).join('')}
+            ${drive.map(t => editTimeRowHTML(t, invoice, true, opts)).join('')}
+            ${expRows.map(e => editExpenseRowHTML(e, invoice, opts)).join('')}
           </div>
         `;
       }).join('')}
@@ -2327,7 +2797,7 @@ function renderEditableLineItems(by_date, invoice) {
   `;
 }
 
-function editTimeRowHTML(t, invoice, isDrive) {
+function editTimeRowHTML(t, invoice, isDrive, opts = {}) {
   const start = t.clock_in  ? new Date(t.clock_in ).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '';
   const end   = t.clock_out ? new Date(t.clock_out).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '';
   const hrs   = t.hours || 0;
@@ -2342,17 +2812,19 @@ function editTimeRowHTML(t, invoice, isDrive) {
         </div>
         <div class="meta">${start} → ${end} · ${hrs.toFixed(2)} hrs ${isDrive ? '(drive, non-billable)' : ''}</div>
         ${t.notes ? `<div class="ed-row-notes">${escapeHTML(t.notes)}</div>` : ''}
+        ${(!opts.readOnly && ['ops_manager','sr_manager','pm'].includes(STATE.user?.role)) ? `<div style="margin-top:6px;">${renderUnplannedTagBtn('time_entry', t.id, t.unplanned_tag, t.unplanned_note, amt, t.unplanned_wasted)}</div>${unplannedNoteLine(t.unplanned_tag, t.unplanned_note)}${unplannedSplitLine(t.unplanned_tag, t.unplanned_wasted, amt)}` : ''}
       </div>
       <div class="ed-row-amt">${isDrive ? '—' : fmt$(amt)}</div>
       <div class="ed-row-acts">
+        ${(opts.hideTimeEditDelete || opts.readOnly) ? '' : `
         <button class="btn-icon" title="Edit" data-edit-time="${t.id}">✏️</button>
-        <button class="btn-icon btn-icon-danger" title="Delete" data-del-time="${t.id}">×</button>
+        <button class="btn-icon btn-icon-danger" title="Delete" data-del-time="${t.id}">×</button>`}
       </div>
     </div>
   `;
 }
 
-function editExpenseRowHTML(e, invoice) {
+function editExpenseRowHTML(e, invoice, opts = {}) {
   const cat = capitalize(e.category || '');
   const sub = e.subcategory ? ` · ${escapeHTML(e.subcategory)}` : '';
   const qty = e.quantity ? ` · ${e.quantity} ${e.category === 'mileage' ? 'mi' : ''}` : '';
@@ -2373,11 +2845,13 @@ function editExpenseRowHTML(e, invoice) {
         <div class="meta">${e.store_name ? escapeHTML(e.store_name) + qty : (qty || '').replace(/^ · /, '')}</div>
         ${e.description ? `<div class="ed-row-notes">${escapeHTML(e.description)}</div>` : ''}
         ${thumbs}
+        ${(!opts.readOnly && ['ops_manager','sr_manager','pm'].includes(STATE.user?.role)) ? `<div style="margin-top:6px;">${renderUnplannedTagBtn('expense', e.id, e.unplanned_tag, e.unplanned_note, e.amount, e.unplanned_wasted)}</div>${unplannedNoteLine(e.unplanned_tag, e.unplanned_note)}${unplannedSplitLine(e.unplanned_tag, e.unplanned_wasted, e.amount)}` : ''}
       </div>
       <div class="ed-row-amt">${fmt$(e.amount || 0)}</div>
       <div class="ed-row-acts">
+        ${opts.readOnly ? '' : `
         <button class="btn-icon" title="Edit" data-edit-exp="${e.id}">✏️</button>
-        <button class="btn-icon btn-icon-danger" title="Delete" data-del-exp="${e.id}">×</button>
+        <button class="btn-icon btn-icon-danger" title="Delete" data-del-exp="${e.id}">×</button>`}
       </div>
     </div>
   `;
@@ -2674,7 +3148,7 @@ function openEditTimeSheet(extId, entries) {
     return;
   }
   showSheet(`
-    <h3>Time entries — ${extId}</h3>
+    <h3>Time entries — ${escapeHTML(extId)}</h3>
     <p class="help">Adjust break minutes or notes. Hours are derived from your clock in/out timestamps.</p>
     ${entriesHaveGps(entries) ? `
       <div class="section-title" style="margin-top: 6px;">Route &amp; stops for ${escapeHTML(extId)}</div>
@@ -2739,7 +3213,7 @@ function openEditTimeSheet(extId, entries) {
   });
 }
 
-function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+function capitalize(s) { s = (s == null) ? '' : String(s); return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
 function fmtDate(s) { if (!s) return ''; const d = new Date(s); return d.toLocaleDateString(undefined, { month:'short', day:'numeric' }); }
 function fmtShortDate(s) { if (!s) return ''; const d = new Date(s); return `${d.getDate()}-${d.toLocaleDateString('en-US', { month: 'short' })}`; }
 function fmtMonthDay(s)  { if (!s) return ''; const d = new Date(s); return `${d.getMonth()+1}/${d.getDate()}`; }
@@ -2897,8 +3371,8 @@ async function renderMap(root) {
               <div class="card" style="padding: 10px 12px;">
                 <div class="flex between">
                   <div>
-                    <strong>${t.external_id}</strong>
-                    <div class="meta">${t.store_name || ''} · ${new Date(t.clock_in).toLocaleString()}</div>
+                    <strong>${escapeHTML(t.external_id)}</strong>
+                    <div class="meta">${escapeHTML(t.store_name || '')} · ${new Date(t.clock_in).toLocaleString()}</div>
                   </div>
                   <div class="meta">${dur} hrs</div>
                 </div>
@@ -3035,7 +3509,7 @@ async function renderApprovalQueue(root) {
     <div class="card" style="background: var(--ic-green-deep); color: #fff; border: 0;">
       <div class="flex between" style="align-items: center;">
         <div>
-          <div class="label" style="color: #b5e8a3;">${escapeHTML(role === 'sr_manager' || role === 'pm' ? 'Awaiting Sr. Manager sign-off' : 'Pending your approval')}</div>
+          <div class="label" style="color: #b5e8a3;">${escapeHTML(role === 'sr_manager' || role === 'pm' ? 'Pending Sr. Manager review (optional)' : 'Pending your approval')}</div>
           <div style="font-size: 28px; font-weight: 800; margin-top: 4px;">${queue.length} <span style="font-size: 14px; font-weight: 500; color: #cde9c9;">invoice${queue.length===1?'':'s'}</span></div>
         </div>
         <div style="text-align: right;">
@@ -3068,7 +3542,7 @@ async function renderApprovalQueue(root) {
                     ${inv.flag_preview ? `<div style="margin-top: 4px; color: var(--ink-2); font-style: italic;">${escapeHTML(inv.flag_preview)}</div>` : ''}
                   </div>
                 ` : ''}
-                ${inv.escalated_at ? `<div style="font-size: 11px; color: var(--ic-orange); margin-top: 6px; font-weight: 600;">⤴ Escalated by Ops Mgr — Sr Mgr review required</div>` : ''}
+                ${inv.escalated_at ? `<div style="font-size: 11px; color: var(--ic-orange); margin-top: 6px; font-weight: 600;">⤴ Escalated by Ops Mgr — Sr Mgr review (optional)</div>` : ''}
                 ${inv.notes ? `<div style="font-size: 12px; color: var(--warn-fg); margin-top: 6px;">📝 ${escapeHTML(inv.notes.slice(0, 120))}${inv.notes.length > 120 ? '…' : ''}</div>` : ''}
                 ${aging ? `<div style="font-size: 11px; color: var(--ic-orange); margin-top: 6px; font-weight: 600;">⏰ ${ageDays} days in queue</div>` : ''}
               </div>
@@ -3089,8 +3563,8 @@ async function renderApprovalQueue(root) {
 }
 
 // ---- VENDOR INVOICE UPLOAD (v0.36, manager-only) ----
-// 3rd-party vendor invoice. Goes directly to Sr Mgr review (Ops Mgr can't
-// self-approve their own upload).
+// 3rd-party vendor invoice. v0.65.2 — any manager (Ops / Sr / PM) can approve
+// it (Sr Mgr approval is optional); the creator still can't self-approve.
 function openVendorInvoiceSheet() {
   let pendingFile = null;
   function html() {
@@ -3635,7 +4109,7 @@ async function openSendToApSheet(invoice) {
       ${!preview.can_send ? `
         <div class="alert warn" style="margin-top: 12px;">
           <span class="ico">⚠</span>
-          <div class="body">This invoice is currently <code>${escapeHTML(preview.current_status)}</code>. It must be <code>approved_sr</code> before sending.</div>
+          <div class="body">This invoice is currently <code>${escapeHTML(preview.current_status)}</code>. It must be approved (Ops Mgr or Sr Mgr) before sending.</div>
         </div>
       ` : ''}
 
@@ -4066,16 +4540,8 @@ async function renderAllInvoices(root) {
   const filtered = filter === 'all' ? all : all.filter(i => i.status === filter);
   const totalValue = filtered.reduce((s, i) => s + (i.total || 0), 0);
 
-  const STATUS_LABELS = {
-    draft: 'Draft', submitted: 'Pending Ops', approved_ops: 'Pending Sr Mgr',
-    approved_sr: 'Approved (Sr)', queued_ap: 'Queued for AP', sent_ap: 'Sent to AP',
-    rejected: 'Rejected',
-  };
-  const STATUS_BADGE = {
-    draft: 'gray', submitted: 'pending', approved_ops: 'pending',
-    approved_sr: 'approved', queued_ap: 'approved', sent_ap: 'approved',
-    rejected: 'rejected',
-  };
+  // Status labels + badges come from the shared labelForStatus()/badgeForStatus()
+  // helpers so every screen shows identical wording (no divergent local map).
 
   const filterChip = (key, label, count) => `
     <button class="chip ${filter===key?'selected':''}" data-filter="${key}">
@@ -4087,7 +4553,7 @@ async function renderAllInvoices(root) {
     <div class="card" style="background: var(--ic-green-deep); color: #fff; border: 0; margin-bottom: 14px;">
       <div class="flex between" style="align-items: center;">
         <div>
-          <div class="label" style="color: #b5e8a3;">${escapeHTML(filter === 'all' ? 'All invoices' : STATUS_LABELS[filter] || filter)}</div>
+          <div class="label" style="color: #b5e8a3;">${escapeHTML(filter === 'all' ? 'All invoices' : labelForStatus(filter))}</div>
           <div style="font-size: 28px; font-weight: 800; margin-top: 4px;">${filtered.length} <span style="font-size: 14px; font-weight: 500; color: #cde9c9;">invoice${filtered.length===1?'':'s'}</span></div>
         </div>
         <div style="text-align: right;">
@@ -4099,7 +4565,7 @@ async function renderAllInvoices(root) {
 
     <div class="chips" style="margin-bottom: 14px; flex-wrap: wrap;">
       ${filterChip('all', 'All', all.length)}
-      ${Object.entries(counts).map(([k, n]) => filterChip(k, STATUS_LABELS[k] || k, n)).join('')}
+      ${Object.entries(counts).map(([k, n]) => filterChip(k, labelForStatus(k), n)).join('')}
     </div>
 
     ${filtered.length === 0
@@ -4111,7 +4577,7 @@ async function renderAllInvoices(root) {
                 <div style="font-weight: 700; font-size: 15px;">${escapeHTML(inv.tech_name)}</div>
                 <div class="meta" style="margin-top: 4px;">${inv.invoice_number} · ${fmtDate(inv.period_start)} → ${fmtDate(inv.period_end)}</div>
                 <div style="margin-top: 8px;">
-                  <span class="badge ${STATUS_BADGE[inv.status] || 'gray'}">${escapeHTML(STATUS_LABELS[inv.status] || inv.status)}</span>
+                  <span class="badge ${badgeForStatus(inv.status)}">${escapeHTML(labelForStatus(inv.status))}</span>
                 </div>
               </div>
               <div style="text-align: right;">
@@ -4163,7 +4629,7 @@ async function renderAdmin(root) {
                   <code>${escapeHTML(u.username || '(no username)')}</code> · ${escapeHTML(u.email)}
                 </div>
                 <div style="margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap;">
-                  <span class="role-tag ${u.role}">${u.role.replace('_',' ')}</span>
+                  <span class="role-tag ${u.role}">${escapeHTML(roleLabel(u.role))}</span>
                   ${u.worker_type ? `<span class="role-tag ${u.worker_type}">${u.worker_type}</span>` : ''}
                   ${u.must_change_password ? `<span class="chip-warn" style="font-size: 10px; padding: 2px 6px; border-radius: 8px; background: #fef4e7; color: #b56400;">temp password</span>` : ''}
                   ${!u.has_password ? `<span class="chip-warn" style="font-size: 10px; padding: 2px 6px; border-radius: 8px; background: var(--err-bg); color: var(--err-fg);">no password</span>` : ''}
@@ -4479,6 +4945,8 @@ async function renderCostTracker(root) {
   if (typeof STATE._trackerSearch !== 'string') STATE._trackerSearch = '';
   if (typeof STATE._trackerPage   !== 'number') STATE._trackerPage = 0;
   if (typeof STATE._trackerOnlyMissing !== 'boolean') STATE._trackerOnlyMissing = false;
+  // v0.62.3 — new filters so completed/in-progress WOs are easy to find.
+  if (typeof STATE._trackerStatus !== 'string') STATE._trackerStatus = '';   // '', 'completed', 'in_progress', 'open', 'cancelled'
   if (!STATE._trackerSort) STATE._trackerSort = { col: 'service_date', dir: 'desc' };
 
   const search = STATE._trackerSearch.toLowerCase();
@@ -4492,6 +4960,7 @@ async function renderCostTracker(root) {
     (row.pm_dri       || '').toLowerCase().includes(search) ||
     (row.ops_manager  || '').toLowerCase().includes(search));
   if (STATE._trackerOnlyMissing) filteredRows = filteredRows.filter(row => row.missing_data);
+  if (STATE._trackerStatus)      filteredRows = filteredRows.filter(row => (row.status || 'open') === STATE._trackerStatus);
 
   const { col, dir } = STATE._trackerSort;
   const sortedRows = [...filteredRows].sort((x, y) => {
@@ -4649,7 +5118,14 @@ async function renderCostTracker(root) {
     <div class="card" style="margin-top: 14px;">
       <div class="flex between" style="align-items: center; flex-wrap: wrap; gap: 8px;">
         <div class="section-title" style="margin: 0;">COST TRACKER MAIN · ${rows.length} rows</div>
-        <div style="display: flex; gap: 8px; align-items: center;">
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+          <select class="field" id="trackerStatus" style="width: 160px; padding: 6px 10px; font-size: 12px;">
+            <option value=""             ${!STATE._trackerStatus ? 'selected' : ''}>All statuses</option>
+            <option value="open"         ${STATE._trackerStatus === 'open' ? 'selected' : ''}>Open</option>
+            <option value="in_progress"  ${STATE._trackerStatus === 'in_progress' ? 'selected' : ''}>In progress</option>
+            <option value="completed"    ${STATE._trackerStatus === 'completed' ? 'selected' : ''}>Completed</option>
+            <option value="cancelled"    ${STATE._trackerStatus === 'cancelled' ? 'selected' : ''}>Cancelled</option>
+          </select>
           <label style="font-size: 12px; display: flex; gap: 6px; align-items: center; cursor: pointer;">
             <input type="checkbox" id="trackerOnlyMissing" ${STATE._trackerOnlyMissing ? 'checked' : ''} />
             Only missing data ${missingCount > 0 ? `(${missingCount})` : ''}
@@ -4663,6 +5139,7 @@ async function renderCostTracker(root) {
             <thead>
               <tr style="background: #f4f5f7;">
                 <th style="padding: 6px 8px;"></th>
+                <th class="ts" data-sort="status" style="padding: 6px 8px; cursor: pointer;">Status${sortIco('status')}</th>
                 <th style="padding: 6px 8px;">Reconciled</th>
                 <th class="ts" data-sort="store_name"   style="padding: 6px 8px; cursor: pointer;">Store${sortIco('store_name')}</th>
                 <th style="padding: 6px 8px;">PM DRI</th>
@@ -4692,6 +5169,14 @@ async function renderCostTracker(root) {
                 return `
                   <tr style="border-top: 1px solid var(--line); cursor: pointer; ${rowBg}" data-edit-wo="${row.wo_id}">
                     <td style="padding: 6px 8px; text-align: center;">${flag}</td>
+                    <td style="padding: 6px 8px;">${(() => {
+                      const s = row.status || 'open';
+                      const color = s === 'completed' ? 'var(--ic-green-deep)'
+                                  : s === 'in_progress' ? 'var(--ic-orange)'
+                                  : s === 'cancelled' ? 'var(--muted)'
+                                  : 'var(--ink-2)';
+                      return `<span style="font-size: 10px; font-weight: 700; color: ${color}; text-transform: uppercase; letter-spacing: 0.4px;">${escapeHTML(labelForStatus(s))}</span>`;
+                    })()}</td>
                     <td style="padding: 6px 8px;">${row.cost_reconciled === 'Yes' ? '<span style="color: var(--ic-green-deep);">✓</span>' : ''}</td>
                     <td style="padding: 6px 8px;"><strong>${escapeHTML(row.store_name || '')}</strong></td>
                     <td style="padding: 6px 8px; color: ${row.pm_dri ? 'inherit' : 'var(--muted)'};">${escapeHTML(row.pm_dri || '—')}</td>
@@ -4710,7 +5195,10 @@ async function renderCostTracker(root) {
                     <td style="padding: 6px 8px; text-align: right; font-weight: 700;">${fmt$(row.actual_total)}</td>
                     <td style="padding: 6px 8px; color: var(--muted); font-family: monospace; font-size: 10px;">${escapeHTML(row.invoice_link || '')}</td>
                     <td style="padding: 6px 8px; color: var(--muted); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHTML(row.notes || '')}">${escapeHTML(row.notes || '')}</td>
-                    <td style="padding: 6px 8px; text-align: right;"><button class="btn btn-ghost btn-sm" data-edit-btn="${row.wo_id}" title="Edit row">✏️</button></td>
+                    <td style="padding: 6px 8px; text-align: right; white-space: nowrap;">
+                      <button class="btn btn-ghost btn-sm" data-open-wo="${row.wo_id}" title="Open full work order (view & tag line items)">↗ WO</button>
+                      <button class="btn btn-ghost btn-sm" data-edit-btn="${row.wo_id}" title="Edit row / tag unplanned">✏️</button>
+                    </td>
                   </tr>
                 `;
               }).join('')}
@@ -4739,6 +5227,11 @@ async function renderCostTracker(root) {
     STATE._trackerPage = 0;
     renderCostTracker(root);
   });
+  $('#trackerStatus')?.addEventListener('change', (ev) => {
+    STATE._trackerStatus = ev.target.value || '';
+    STATE._trackerPage = 0;
+    renderCostTracker(root);
+  });
   $$('.ts[data-sort]').forEach(th => th.addEventListener('click', () => {
     const c = th.dataset.sort;
     STATE._trackerSort = STATE._trackerSort.col === c
@@ -4756,6 +5249,12 @@ async function renderCostTracker(root) {
   $$('[data-edit-btn]').forEach(btn => btn.addEventListener('click', (ev) => {
     ev.stopPropagation();
     openCostTrackerEditSheet(Number(btn.dataset.editBtn), rows, () => renderCostTracker(root));
+  }));
+  // v0.64 — jump straight to the full work-order detail (where managers can
+  // review each tech's labor/expenses and tag individual line items).
+  $$('[data-open-wo]').forEach(btn => btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    goto('woDetail', Number(btn.dataset.openWo));
   }));
   // v0.57 — clicking an invoice row in the "by store" rollup opens the
   // invoice detail page so the Ops Mgr can review / approve from there.
@@ -4802,6 +5301,17 @@ function openCostTrackerEditSheet(woId, rows, onSaved) {
       ${escapeHTML(row.service_type || '')} · ${row.cart_count || 0} carts · ${row.service_date ? fmtDate(row.service_date) : 'no date'}
       ${row.missing_data ? `<br/><span style="color: var(--ic-orange);">⚠ No actuals data on this WO yet — fill in what you know.</span>` : ''}
     </p>
+
+    <div style="margin: 4px 0 14px; padding: 10px 12px; border: 1px solid var(--ic-orange); border-radius: 8px; background: #fff7ef;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+        <div>
+          <div style="font-size: 13px; font-weight: 700; color: var(--ic-orange-deep);">Unplanned / wasted labour</div>
+          <div style="font-size: 11px; color: var(--muted);">Flags this WO for leadership reporting. Backend only — never shown on the AP invoice.</div>
+        </div>
+        <div id="ctEdUnplanned"><span style="font-size:11px;color:var(--muted);">Loading…</span></div>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="ctEdOpenWo" style="margin-top: 10px;">Open full work order → tag individual labor & expenses</button>
+    </div>
 
     <span class="label">Cost Reconciled</span>
     <select class="field" id="ctEdReconciled">
@@ -4878,6 +5388,18 @@ function openCostTrackerEditSheet(woId, rows, onSaved) {
   `, {
     onMount: (wrap) => {
       $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
+      // v0.64 — load the WO's current unplanned tag state, then render + wire a
+      // prominent "Tag as unplanned" button. Also wire "open full work order".
+      (async () => {
+        let woTag = null, woNote = null;
+        try { const wo = await api(`/workorders/${woId}`); woTag = wo.unplanned_tag; woNote = wo.unplanned_note; } catch (_) {}
+        const holder = $('#ctEdUnplanned', wrap);
+        if (holder) {
+          holder.innerHTML = renderUnplannedTagBtn('work_order', woId, woTag, woNote);
+          wireUnplannedTagBtns(holder);
+        }
+      })();
+      $('#ctEdOpenWo', wrap)?.addEventListener('click', () => { closeSheet(); goto('woDetail', woId); });
       $('#ctEdHas3p', wrap).addEventListener('change', (ev) => {
         $('#ctEd3pBlock', wrap).style.display = ev.target.checked ? '' : 'none';
       });
@@ -4961,18 +5483,34 @@ async function renderCorpCard(root) {
     api('/admin/users').catch(() => null),  // optional; falls back to /team if forbidden
   ]);
 
-  // Build a tech list. /admin/users is admin-only; for ops_manager use /team.
+  // v0.62.1 — the on-behalf-of picker on the Add Corp-Card sheet now accepts
+  // any active teammate (technician OR manager), not just techs. Operations
+  // managers sometimes need to file a corp-card charge on behalf of another
+  // manager (e.g., a Sr Mgr's flight). Backend already validates any user_id.
   let techs = [];
   if (allUsers && Array.isArray(allUsers)) {
-    techs = allUsers.filter(u => u.role === 'technician' && u.status !== 'disabled');
+    techs = allUsers
+      .filter(u => u.status !== 'disabled')
+      .map(u => ({ id: u.id, name: u.name, role: u.role }));
   } else {
     try {
       const team = await api('/team');
-      techs = (team.team || team || []).filter(t => t && (t.role === 'technician' || t.tech_user_id));
-      // Normalize shape: /team returns join rows; map to {id, name}.
-      techs = techs.map(t => ({ id: t.id || t.tech_user_id, name: t.name || t.tech_name }));
+      const rows = (team.team || team || []).filter(t => t && (t.id || t.tech_user_id));
+      techs = rows.map(t => ({
+        id:   t.id || t.tech_user_id,
+        name: t.name || t.tech_name,
+        role: t.role || 'technician',
+      }));
     } catch (_) { techs = []; }
   }
+  // Sort technicians first (most common case for corp-card on-behalf-of), then
+  // by name within each group.
+  techs.sort((a, b) => {
+    if ((a.role === 'technician') !== (b.role === 'technician')) {
+      return a.role === 'technician' ? -1 : 1;
+    }
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
 
   root.innerHTML = `
     <!-- Header band: period scope + filters + primary actions -->
@@ -5031,13 +5569,17 @@ async function renderCorpCard(root) {
           </select>
         </div>
         <div style="flex: 1; min-width: 160px;">
-          <span class="label">Tech</span>
+          <span class="label">On behalf of</span>
           <select class="field" id="ccFilterTech">
-            <option value="">All techs (incl. unassigned)</option>
+            <option value="">All teammates (incl. unassigned)</option>
             <option value="__none__" ${CC_STATE.tech_id === '__none__' ? 'selected' : ''}>Unassigned (Sr-Mgr events)</option>
-            ${techs.map(t => `
-              <option value="${t.id}" ${String(CC_STATE.tech_id) === String(t.id) ? 'selected' : ''}>${escapeHTML(t.name)}</option>
-            `).join('')}
+            ${(() => {
+              const techList = techs.filter(t => t.role === 'technician');
+              const teamList = techs.filter(t => t.role !== 'technician');
+              const techOpts = techList.map(t => `<option value="${t.id}" ${String(CC_STATE.tech_id) === String(t.id) ? 'selected' : ''}>${escapeHTML(t.name)}</option>`).join('');
+              const teamOpts = teamList.map(t => `<option value="${t.id}" ${String(CC_STATE.tech_id) === String(t.id) ? 'selected' : ''}>${escapeHTML(t.name)} (${escapeHTML(roleLabel(t.role))})</option>`).join('');
+              return `${techList.length ? `<optgroup label="Technicians">${techOpts}</optgroup>` : ''}${teamList.length ? `<optgroup label="Managers / teammates">${teamOpts}</optgroup>` : ''}`;
+            })()}
           </select>
         </div>
       </div>
@@ -5089,7 +5631,7 @@ async function renderCorpCard(root) {
           <thead>
             <tr>
               <th>Date</th><th>Category</th><th>Tech</th><th>Work order · Store</th><th>Description</th>
-              <th>Filed by</th><th class="r">Amount</th><th></th>
+              <th>Filed by</th><th>Unplanned</th><th class="r">Amount</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -5104,6 +5646,7 @@ async function renderCorpCard(root) {
                 </td>
                 <td>${e.description ? escapeHTML(e.description) : '<span class="meta">—</span>'}</td>
                 <td>${escapeHTML(e.created_by_name)}<div class="meta">${escapeHTML(e.created_by_role)}</div></td>
+                <td>${renderUnplannedTagBtn('corp_card_expense', e.id, e.unplanned_tag, e.unplanned_note, e.amount, e.unplanned_wasted)}${unplannedSplitLine(e.unplanned_tag, e.unplanned_wasted, e.amount)}</td>
                 <td class="r amt-pos"><strong>${fmt$(e.amount)}</strong></td>
                 <td class="r">
                   <button class="btn-icon" title="Edit"   data-cc-edit="${e.id}">✏️</button>
@@ -5112,7 +5655,7 @@ async function renderCorpCard(root) {
               </tr>
             `).join('')}
             <tr class="cc-total-row">
-              <td colspan="6" class="r"><strong>Subtotal</strong></td>
+              <td colspan="7" class="r"><strong>Subtotal</strong></td>
               <td class="r amt-total"><strong>${fmt$(exps.reduce((s, e) => s + e.amount, 0))}</strong></td>
               <td></td>
             </tr>
@@ -5152,6 +5695,11 @@ async function renderCorpCard(root) {
       renderCorpCard(root);
     } catch (err) { toast(err.message, 'err'); }
   }));
+
+  // v0.63 — every corp-card charge is taggable as unplanned (wasted_labour /
+  // ad_hoc / unexpected), so corp-card spend rolls into the leadership summary
+  // alongside labor, tech expenses, and WO-level tags.
+  wireUnplannedTagBtns(root);
 }
 
 // Add / Edit a corp-card charge.
@@ -5192,10 +5740,16 @@ function openCorpCardAddSheet(categories, workorders, techs, onSaved, editing = 
     <span class="label">Amount ($)</span>
     <input class="field" type="number" step="0.01" min="0" id="ccAmt" placeholder="0.00" value="${escapeHTML(String(sel.amount || ''))}" />
 
-    <span class="label">Tech (optional — leave empty for events / Sr-Mgr-level spend)</span>
+    <span class="label">On behalf of (optional — tech or teammate)</span>
     <select class="field" id="ccTech">
-      <option value="">— Not tied to a specific tech —</option>
-      ${techs.map(t => `<option value="${t.id}" ${String(sel.on_behalf_of_user_id) === String(t.id) ? 'selected' : ''}>${escapeHTML(t.name)}</option>`).join('')}
+      <option value="">— Not tied to a specific person —</option>
+      ${(() => {
+        const techList = techs.filter(t => t.role === 'technician');
+        const teamList = techs.filter(t => t.role !== 'technician');
+        const techOpts = techList.map(t => `<option value="${t.id}" ${String(sel.on_behalf_of_user_id) === String(t.id) ? 'selected' : ''}>${escapeHTML(t.name)}</option>`).join('');
+        const teamOpts = teamList.map(t => `<option value="${t.id}" ${String(sel.on_behalf_of_user_id) === String(t.id) ? 'selected' : ''}>${escapeHTML(t.name)} (${escapeHTML(roleLabel(t.role))})</option>`).join('');
+        return `${techList.length ? `<optgroup label="Technicians">${techOpts}</optgroup>` : ''}${teamList.length ? `<optgroup label="Managers / teammates">${teamOpts}</optgroup>` : ''}`;
+      })()}
     </select>
 
     <span class="label">Work order (optional — links to store)</span>
@@ -5204,7 +5758,7 @@ function openCorpCardAddSheet(categories, workorders, techs, onSaved, editing = 
       <option value="">— No work order / store linkage —</option>
       ${woFiltered().map(w => `
         <option value="${w.id}" ${String(sel.work_order_id) === String(w.id) ? 'selected' : ''}>
-          ${w.external_id} — ${w.store_name || ''} (${workTypeLabel(w.work_type)})
+          ${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})
         </option>
       `).join('')}
     </select>
@@ -5224,7 +5778,7 @@ function openCorpCardAddSheet(categories, workorders, techs, onSaved, editing = 
         const list = woFiltered();
         $('#ccWo', wrap).innerHTML = `
           <option value="">— No work order / store linkage —</option>
-          ${list.map(w => `<option value="${w.id}">${w.external_id} — ${w.store_name || ''} (${workTypeLabel(w.work_type)})</option>`).join('')}
+          ${list.map(w => `<option value="${w.id}">${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})</option>`).join('')}
         `;
       });
       $('#ccSave', wrap).addEventListener('click', async () => {
@@ -5675,10 +6229,177 @@ function openLaunchActualReviewSheet(la) {
 }
 
 // ---- DASHBOARD (manager-only) ----
-// Aggregates spend by tech / work_type / store / cart-bucket plus a 12-week
-// trend with linear projection and bottoms-up forecast (open WO carts ×
-// historical $/cart by work_type).
+// v0.61 — Dashboard now has a sub-tab strip: 'Overview' (the existing
+// aggregate view) + one tab per category. Category tabs read from
+// /api/category-dashboard which returns spend totals + over-budget WOs for
+// every category, including soft-archived corp-card categories.
 async function renderDashboard(root) {
+  const isManager = ['ops_manager','sr_manager','pm'].includes(STATE.user?.role);
+  // v0.64 — Unplanned work is now a sub-section of the Dashboard (previously its
+  // own left-nav tab). Managers get an Overview | Unplanned toggle up top.
+  const section = (isManager && STATE._dashSection === 'unplanned') ? 'unplanned' : 'overview';
+  const sectionToggle = isManager ? `
+    <div style="display:flex;gap:8px;margin-bottom:14px;">
+      <button data-dashsection="overview" class="btn btn-sm ${section === 'overview' ? 'btn-primary' : 'btn-ghost'}">Overview</button>
+      <button data-dashsection="unplanned" class="btn btn-sm ${section === 'unplanned' ? 'btn-primary' : 'btn-ghost'}">⚠ Unplanned work</button>
+    </div>` : '';
+
+  if (section === 'unplanned') {
+    root.innerHTML = `${sectionToggle}<div id="dashBody"></div>`;
+    bindDashSectionToggle();
+    return renderUnplanned($('#dashBody'));
+  }
+
+  const tab = STATE._dashCatTab || 'overview';
+  // Fetch the category list/data once. We always need it for the strip,
+  // even on the Overview tab. Fail silently for non-managers (403).
+  const catDash = isManager ? await api('/category-dashboard').catch(() => []) : [];
+
+  root.innerHTML = `
+    ${sectionToggle}
+    ${renderDashCatStrip(catDash, tab)}
+    <div id="dashBody"></div>
+  `;
+  bindDashSectionToggle();
+  bindDashCatStrip();
+
+  const body = $('#dashBody');
+  if (tab === 'overview') {
+    return renderDashboardOverview(body);
+  }
+  // Category tab: cat key = "<source>:<key>", e.g. "corp_card:3" or "tech_expense:Hotel".
+  const [source, ...rest] = tab.split(':');
+  const key = rest.join(':');
+  const data = catDash.find(c => c.source === source && c.key === key);
+  return renderCategoryDashTab(body, data, source, key);
+}
+
+// v0.62 — dropdown replacement for the v0.61 chip strip. Categories are
+// grouped (corp-card → tech-expense → archived corp-card) inside <optgroup>s
+// so the menu stays scannable as the category list grows.
+function renderDashCatStrip(catDash, activeTab) {
+  const groups = {
+    corp_card_active:   catDash.filter(c => c.source === 'corp_card'   && !c.archived),
+    tech_expense:       catDash.filter(c => c.source === 'tech_expense'),
+    corp_card_archived: catDash.filter(c => c.source === 'corp_card'   &&  c.archived),
+  };
+  const opt = (c) => {
+    const id    = `${c.source}:${c.key}`;
+    const over  = c.over_budget_wos?.length ? ` ⚠ ${c.over_budget_wos.length}` : '';
+    const sel   = activeTab === id ? 'selected' : '';
+    return `<option value="${escapeHTML(id)}" ${sel}>${escapeHTML(c.label)}${over}</option>`;
+  };
+  return `
+    <div class="dash-cat-filter" style="display: flex; align-items: center; gap: 10px; margin: 0 0 12px;">
+      <label class="label" for="dashCatSelect" style="margin: 0; font-size: 12px;">View by category</label>
+      <select id="dashCatSelect" class="field" style="flex: 1; max-width: 360px;">
+        <option value="overview" ${activeTab === 'overview' ? 'selected' : ''}>Overview (all categories)</option>
+        ${groups.corp_card_active.length ? `
+          <optgroup label="Corp-card categories">
+            ${groups.corp_card_active.map(opt).join('')}
+          </optgroup>` : ''}
+        ${groups.tech_expense.length ? `
+          <optgroup label="Tech-expense subcategories">
+            ${groups.tech_expense.map(opt).join('')}
+          </optgroup>` : ''}
+        ${groups.corp_card_archived.length ? `
+          <optgroup label="Archived corp-card">
+            ${groups.corp_card_archived.map(opt).join('')}
+          </optgroup>` : ''}
+      </select>
+    </div>
+  `;
+}
+
+function bindDashCatStrip() {
+  const sel = $('#dashCatSelect');
+  if (!sel) return;
+  sel.addEventListener('change', () => {
+    STATE._dashCatTab = sel.value;
+    goto('dashboard');
+  });
+}
+
+// v0.64 — Overview | Unplanned sub-section toggle at the top of the Dashboard.
+function bindDashSectionToggle() {
+  $$('[data-dashsection]').forEach(b => b.addEventListener('click', () => {
+    STATE._dashSection = b.dataset.dashsection;
+    goto('dashboard');
+  }));
+}
+
+// Per-category dashboard panel — totals, current rules, and any
+// over-budget WOs for this category.
+function renderCategoryDashTab(root, data, source, key) {
+  if (!data) {
+    root.innerHTML = `<div class="empty">Category not found.</div>`;
+    return;
+  }
+  const t = data.totals || {};
+  const rules = data.rules || {};
+  const fmt = (n) => `$${(n || 0).toFixed(2)}`;
+  const ruleRow = (label, amount) => `
+    <div style="display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px;">
+      <span class="meta">${escapeHTML(label)}</span>
+      <strong>${amount != null ? fmt(amount) : '—'}</strong>
+    </div>
+  `;
+  root.innerHTML = `
+    <div class="meta" style="margin-bottom: 12px;">
+      ${escapeHTML(data.label)} · ${source === 'corp_card' ? 'Corp-card category' : 'Tech-expense subcategory'}${data.archived ? ' · archived' : ''}
+    </div>
+
+    <div class="dash-kpi-grid" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px;">
+      <div class="card"><div class="meta">MTD</div><div style="font-size: 22px; font-weight: 600;">${fmt(t.mtd)}</div></div>
+      <div class="card"><div class="meta">YTD</div><div style="font-size: 22px; font-weight: 600;">${fmt(t.ytd)}</div></div>
+      <div class="card"><div class="meta">All time</div><div style="font-size: 22px; font-weight: 600;">${fmt(t.all_time)}</div></div>
+      <div class="card"><div class="meta">Charges</div><div style="font-size: 22px; font-weight: 600;">${t.count || 0}</div></div>
+    </div>
+
+    <div class="section-title">Rules</div>
+    <div class="card">
+      ${ruleRow('Per-WO $ cap',     rules.per_wo_cap)}
+      ${ruleRow('Global $ cap',     rules.global_cap)}
+      ${ruleRow('Receipt required above', rules.receipt_required_above)}
+      <div style="font-size: 11px; color: var(--muted); margin-top: 10px;">Edit values on the Policy tab → Per-category rules.</div>
+    </div>
+
+    <div class="section-title">Per-WO budgets (${(data.budgets || []).length})</div>
+    <div class="card">
+      ${(data.budgets || []).length === 0 ? `<div class="empty" style="padding: 8px; font-size: 12px;">No per-WO budgets set for this category yet.</div>` : `
+        ${data.budgets.map(b => {
+          const over = b.spent > b.amount_cap;
+          return `
+            <div style="display: flex; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--line); ${over ? 'color: var(--ic-orange-deep);' : ''}">
+              <div>
+                <div>${escapeHTML(b.external_id || `WO #${b.work_order_id}`)}</div>
+                <div class="meta" style="font-size: 11px;">${escapeHTML(b.store_name || '—')}</div>
+              </div>
+              <div style="text-align: right;">
+                <div><strong>${fmt(b.spent)}</strong> of ${fmt(b.amount_cap)}</div>
+                ${over ? `<div style="font-size: 11px;">over by ${fmt(b.spent - b.amount_cap)}</div>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('')}
+      `}
+    </div>
+
+    ${data.over_budget_wos && data.over_budget_wos.length ? `
+      <div class="section-title" style="color: var(--ic-orange-deep);">⚠ Over-budget WOs (${data.over_budget_wos.length})</div>
+      <div class="card">
+        ${data.over_budget_wos.map(w => `
+          <div style="display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--line);">
+            <span>${escapeHTML(w.external_id || `WO #${w.work_order_id}`)} · ${escapeHTML(w.store_name || '—')}</span>
+            <strong style="color: var(--ic-orange-deep);">over by ${fmt(w.overage)}</strong>
+          </div>
+        `).join('')}
+      </div>
+    ` : ''}
+  `;
+}
+
+async function renderDashboardOverview(root) {
   const period      = STATE._dashPeriod || 'last_90';
   const techFilter  = STATE._dashTech   || '';
   const storeFilter = STATE._dashStore  || '';
@@ -5886,7 +6607,7 @@ async function renderDashboard(root) {
           <div class="dash-list-row tap" data-inv="${inv.id}">
             <div style="flex: 1; min-width: 0;">
               <strong>${escapeHTML(inv.tech_name)}</strong>
-              <div class="meta">${escapeHTML(inv.invoice_number)} · ${escapeHTML(inv.status.replace('_', ' '))} · ${fmtDate(inv.period_start)} → ${fmtDate(inv.period_end)}</div>
+              <div class="meta">${escapeHTML(inv.invoice_number)} · ${escapeHTML(labelForStatus(inv.status))} · ${fmtDate(inv.period_start)} → ${fmtDate(inv.period_end)}</div>
             </div>
             <strong>${fmt$(inv.total)}</strong>
           </div>
@@ -5908,8 +6629,9 @@ async function renderDashboard(root) {
   $('#dashStore')?.addEventListener('change', e => { STATE._dashStore = e.target.value.trim(); goto('dashboard'); });
   $('#dashWt')?.addEventListener('change',    e => {
     const v = e.target.value.trim().toLowerCase();
-    if (v && !['deployment','retrofit','service','repair'].includes(v)) {
-      return toast('Type one of: deployment, retrofit, service, repair', 'err');
+    const allowed = new Set((r.meta.available_work_types || []).map(s => String(s).toLowerCase()));
+    if (v && !allowed.has(v)) {
+      return toast(`Type one of: ${[...allowed].join(', ')}`, 'err');
     }
     STATE._dashWt = v; goto('dashboard');
   });
@@ -6031,10 +6753,10 @@ function kpiTile(label, value, sub, variant, withHelp) {
 const WT_COLORS = {
   deployment: '#43B02A',  // Instacart green
   retrofit:   '#1A56B0',  // blue
-  service:    '#F36D00',  // Instacart orange
+  maintenance: '#F36D00',  // Instacart orange
   repair:     '#C0392B',  // red
 };
-const WT_ORDER = ['deployment','retrofit','service','repair'];
+const WT_ORDER = ['deployment','retrofit','maintenance','repair'];
 const TECH_COLORS = ['#43B02A', '#F36D00', '#1A56B0', '#7F47C2', '#C0392B', '#0CA678'];
 
 // v0.40 — Cost Tracker monthly summary card (forecast vs actual by service
@@ -7099,9 +7821,10 @@ function openPastInvoiceSheet() {
 async function renderInvoiceDetail(root, invoiceId) {
   if (!invoiceId) return goto('mine');
 
-  const [r, list] = await Promise.all([
+  const [r, list, notices] = await Promise.all([
     api(`/invoices/${invoiceId}`),
     api('/invoices').catch(() => []),    // managers may not have a personal invoice list
+    api(`/invoices/${invoiceId}/notices`).catch(() => []),   // v0.64.3 — manager edit notices
   ]);
   const { invoice, lines, summary, by_date = [], extracted = null, extracted_at = null, tech_user = null } = r;
   const me = STATE.user;
@@ -7134,8 +7857,21 @@ async function renderInvoiceDetail(root, invoiceId) {
   }, 0);
   const mileageRate   = 0.725;
   const totalMileage  = totalMiles * mileageRate;
-  const totalOther    = +(summary.total - totalLabor - totalMileage).toFixed(2);
+  const totalDrive    = +(summary.drive_amount || 0).toFixed(2);
+  const totalOther    = +(summary.total - totalLabor - totalDrive - totalMileage).toFixed(2);
   const grandTotal    = summary.total;
+
+  // v0.64.4 — two-page review: snapshot the invoice "as submitted" the FIRST
+  // time a manager opens it, so edits don't overwrite the left-hand reference.
+  const isMgrReview = invoice.invoice_type !== 'vendor' && isManagerView && !isManagerProxy
+    && ['draft','submitted','in_review'].includes(invoice.status);
+  if (isMgrReview) {
+    STATE._invBaseline = STATE._invBaseline || {};
+    if (!STATE._invBaseline[invoiceId]) {
+      STATE._invBaseline[invoiceId] = { by_date: JSON.parse(JSON.stringify(by_date)), total: grandTotal };
+    }
+  }
+  const baseline = isMgrReview ? STATE._invBaseline[invoiceId] : null;
 
   // Day rows for the main line table — one row per day even if no work
   // (matches the contractor convention of showing the whole week).
@@ -7152,6 +7888,12 @@ async function renderInvoiceDetail(root, invoiceId) {
   })).filter(d => d.stops.length > 0);
 
   root.innerHTML = `
+    ${notices && notices.length ? `
+      <div style="margin-bottom:12px;background:#eef4ff;border:1px solid #b9d0ff;border-radius:8px;padding:10px 12px;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:4px;">ℹ️ ${notices.length} manager edit${notices.length === 1 ? '' : 's'} on this invoice</div>
+        <div style="font-size:12px;color:var(--secondary-text);line-height:1.5;">${notices.slice(0, 3).map(n => escapeHTML(n.body)).join('<br>')}</div>
+        <div style="font-size:11px;color:var(--secondary-text);margin-top:4px;">Informational — no action needed unless the invoice is rejected and returned for resubmission.</div>
+      </div>` : ''}
     ${isManagerProxy ? `
       <div class="alert warn" style="margin-bottom: 12px;">
         <span class="ico">✏️</span>
@@ -7388,16 +8130,38 @@ async function renderInvoiceDetail(root, invoiceId) {
                   <td class="r amt-zero">$0.00</td>
                 </tr>`;
             }
-            // For each labor row of this day produce a multi-line cell with WO meta + retailer + location + notes
-            // Combined work + drive entries for this day
-            const allEntries = [...day.time_entries, ...(day.drive_entries || [])]
-              .sort((a, b) => new Date(a.clock_in) - new Date(b.clock_in));
+            // For each labor row of this day produce a multi-line cell with WO meta + retailer + location + notes.
+            // v0.62.2 — labor (and drive) can be entered EITHER as time entries
+            // (Timer flow) OR as expenses with category='labor'/'drive' (Add
+            // Expense flow). Both contribute to summary.labor_hours, so both
+            // need to appear as rows here or the totals won't reconcile.
+            const laborExpRows = (day.expense_entries || [])
+              .filter(e => e.category === 'labor' || e.category === 'drive')
+              .map(e => ({
+                _from_expense: true,
+                id:           'exp-' + e.id,
+                external_id:  e.external_id,
+                store_name:   e.store_name,
+                work_type:    e.work_type,
+                clock_in:     e.expense_date, // for sort + date column
+                clock_out:    null,
+                hours:        Number(e.quantity || 0),
+                notes:        e.description || '',
+                mode:         e.category === 'drive' ? 'drive' : 'work',
+              }));
+            const allEntries = [
+              ...day.time_entries,
+              ...(day.drive_entries || []),
+              ...laborExpRows,
+            ].sort((a, b) => new Date(a.clock_in || 0) - new Date(b.clock_in || 0));
             return allEntries.map(t => {
-              const start = t.clock_in  ? new Date(t.clock_in ).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '';
-              const end   = t.clock_out ? new Date(t.clock_out).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '';
+              const start = t._from_expense ? '' : (t.clock_in  ? new Date(t.clock_in ).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '');
+              const end   = t._from_expense ? '' : (t.clock_out ? new Date(t.clock_out).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '');
               const isDrive = t.mode === 'drive';
-              const modeTag = isDrive ? '[🚗 Drive]' : `[${workTypeLabel(t.work_type)}]`;
-              const meta    = `[${fmtMonthDay(t.clock_in)}] ${modeTag} ${t.external_id}`;
+              const wtTag   = t._from_expense
+                ? (isDrive ? '[🚗 Drive · logged]' : `[${workTypeLabel(t.work_type || 'labor')} · logged]`)
+                : (isDrive ? '[🚗 Drive]' : `[${workTypeLabel(t.work_type)}]`);
+              const meta    = `[${fmtMonthDay(t.clock_in || date)}] ${wtTag} ${t.external_id}`;
               return `
                 <tr ${isDrive ? 'class="inv-drive-row"' : ''}>
                   <td>${fmtShortDate(date)}</td>
@@ -7406,11 +8170,11 @@ async function renderInvoiceDetail(root, invoiceId) {
                     ${t.store_name ? `<div><strong>Retailer:</strong> ${escapeHTML(t.store_name)}</div>` : ''}
                     ${t.notes ? `<div class="inv-notes">${escapeHTML(t.notes)}</div>` : ''}
                   </td>
-                  <td class="r">${escapeHTML(start)}</td>
-                  <td class="r">${escapeHTML(end)}</td>
+                  <td class="r">${escapeHTML(start) || '—'}</td>
+                  <td class="r">${escapeHTML(end)   || '—'}</td>
                   <td class="r"><strong>${t.hours.toFixed(2)}</strong></td>
-                  <td class="r">${isDrive ? '<span style="color: var(--muted); font-size: 9px;">non-billable</span>' : '$' + (invoice.hourly_rate || 40).toFixed(2)}</td>
-                  <td class="r ${isDrive ? '' : 'amt-pos'}">${isDrive ? '<span style="color: var(--muted);">—</span>' : fmt$(+(t.hours * (invoice.hourly_rate || 40)).toFixed(2))}</td>
+                  <td class="r">$${(invoice.hourly_rate || 40).toFixed(2)}</td>
+                  <td class="r amt-pos">${fmt$(+((t.hours || 0) * (invoice.hourly_rate || 40)).toFixed(2))}</td>
                 </tr>`;
             }).join('');
           }).join('')}
@@ -7423,10 +8187,10 @@ async function renderInvoiceDetail(root, invoiceId) {
           </tr>
           ${summary.drive_hours > 0 ? `
             <tr style="background: #fff8f0;">
-              <td colspan="4" style="text-align: right; padding: 4px; color: var(--ic-orange); font-weight: 600;">Total Drive Hours <span style="color: var(--muted); font-weight: 400; font-size: 9px;">(non-billable)</span></td>
+              <td colspan="4" style="text-align: right; padding: 4px; color: var(--ic-orange); font-weight: 600;">Total Drive Hours <span style="color: var(--muted); font-weight: 400; font-size: 9px;">(billable · tracked separately)</span></td>
               <td class="r" style="color: var(--ic-orange);"><strong>${summary.drive_hours.toFixed(2)}</strong></td>
-              <td class="r" style="color: var(--muted); font-size: 9px;">tracked only</td>
-              <td class="r" style="color: var(--muted);">—</td>
+              <td class="r inv-subtotal-cell">SUBTOTAL</td>
+              <td class="r amt-total">${fmt$(totalDrive)}</td>
             </tr>
           ` : ''}
           ${totalMiles > 0 ? `
@@ -7657,6 +8421,41 @@ async function renderInvoiceDetail(root, invoiceId) {
       </div>
     ` : ''}
 
+    ${isMgrReview ? `
+      <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-orange); background: #fff7ef;">
+        <div class="section-title" style="margin-top: 0; color: var(--ic-orange-deep);">Review · submitted vs working copy</div>
+        <p class="help" style="margin: 0;">Left is the invoice <strong>as submitted</strong>. Edit on the <strong>right</strong> — the working total updates as you save each change, and you can split tagged work into wasted vs actual. Tags are backend-only; they never appear on the AP invoice.</p>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;">
+        <div style="flex:1;min-width:320px;">
+          <div class="card" style="margin-top:14px;padding:10px 14px;background:var(--surface-2,#f8f8f8);">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;">
+              <span style="font-weight:700;">As submitted</span>
+              <span style="font-weight:700;">${fmt$(baseline.total)}</span>
+            </div>
+            <div style="font-size:11px;color:var(--secondary-text);">Read-only snapshot</div>
+          </div>
+          ${renderEditableLineItems(baseline.by_date, invoice, { readOnly: true })}
+        </div>
+        <div style="flex:1;min-width:320px;">
+          <div class="card" style="margin-top:14px;padding:10px 14px;border:1px solid var(--ic-orange);">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;">
+              <span style="font-weight:700;color:var(--ic-orange-deep);">Working copy (live)</span>
+              <span style="font-weight:700;">${fmt$(grandTotal)}</span>
+            </div>
+            <div style="font-size:11px;color:var(--secondary-text);">${(() => { const d = +(grandTotal - baseline.total).toFixed(2); if (Math.abs(d) < 0.005) return 'No changes yet'; return d > 0 ? `▲ ${fmt$(d)} vs submitted` : `▼ ${fmt$(Math.abs(d))} vs submitted`; })()}</div>
+          </div>
+          ${renderEditableLineItems(by_date, invoice, { hideTimeEditDelete: true })}
+          ${renderInvoicePreviewPanel({
+            total: grandTotal, labor: totalLabor, laborHours: summary.labor_hours || 0,
+            mileage: totalMileage, other: totalOther, flags: summary.flag_count || 0,
+            itemCount: (by_date || []).reduce((a, d) => a + (d.time_entries?.length || 0) + (d.drive_entries?.length || 0) + (d.expense_entries?.length || 0), 0),
+            status: invoice.status,
+          })}
+        </div>
+      </div>
+    ` : ''}
+
     ${invoice.invoice_type !== 'vendor' && (
        (me.role === 'ops_manager' && invoice.status === 'submitted') ||
        ((me.role === 'sr_manager' || me.role === 'pm') && invoice.status === 'approved_ops')
@@ -7797,6 +8596,9 @@ async function renderInvoiceDetail(root, invoiceId) {
       goto('invDetail', invoice.id);
     } catch (e) { toast(e.message, 'err'); }
   }));
+  // v0.64 — "Tag as unplanned" buttons on invoice line items (managers only).
+  // Re-render after a tag so the saved note shows with the line-item details.
+  wireUnplannedTagBtns(root, () => goto('invDetail', invoice.id));
   $('#importPdfBtn')?.addEventListener('click', async () => {
     const btn = $('#importPdfBtn');
     btn.disabled = true; btn.textContent = 'Importing…';
@@ -7960,20 +8762,32 @@ async function renderInvoiceDetail(root, invoiceId) {
 }
 
 function trailFor(inv) {
-  // v0.28 — Sr Mgr countersign is optional. The trail shows the step but
-  // marks it as "optional" and never as "current" (it's never a blocking gate).
+  // v0.65 — Sr Mgr approval is REQUIRED (no longer optional). Escalation is
+  // shown distinctly and never counts as an Ops approval.
+  const escalated   = !!inv.escalated_at;
+  const opsApproved = !!inv.approved_ops_at;
   const steps = [
-    { who: 'Submitted',                  done: !!inv.submitted_at,                                                  when: inv.submitted_at },
-    { who: 'Ops Manager review',         done: ['approved_ops','approved_sr','queued_ap','sent_ap'].includes(inv.status), cur: inv.status === 'submitted', when: inv.approved_ops_at },
-    { who: 'Senior Manager (optional)',  done: ['approved_sr','queued_ap','sent_ap'].includes(inv.status),           when: inv.approved_sr_at, optional: true },
-    { who: 'Sent to AP',                 done: inv.status === 'sent_ap',                                             cur: ['queued_ap','approved_ops','approved_sr'].includes(inv.status), when: inv.sent_to_ap_at },
+    { who: 'Submitted', done: !!inv.submitted_at, when: inv.submitted_at },
+    {
+      who: opsApproved ? 'Ops Manager approved' : (escalated ? 'Escalated to Sr Mgr by Ops' : 'Ops Manager review'),
+      done: opsApproved || escalated || ['approved_ops','approved_sr','queued_ap','sent_ap'].includes(inv.status),
+      cur: inv.status === 'submitted',
+      when: inv.approved_ops_at || inv.escalated_at,
+    },
+    {
+      who: 'Senior Manager approval',
+      done: ['approved_sr','queued_ap','sent_ap'].includes(inv.status),
+      cur: inv.status === 'approved_ops',
+      when: inv.approved_sr_at,
+    },
+    { who: 'Sent to AP', done: inv.status === 'sent_ap', cur: ['queued_ap','approved_sr'].includes(inv.status), when: inv.sent_to_ap_at },
   ];
   return `
     ${steps.map((s, i) => `
-      <div class="trail-step ${s.done ? 'done' : (s.cur ? 'cur' : '')} ${s.optional && !s.done ? 'optional' : ''}">
-        <span class="dot">${s.done ? '✓' : (s.optional ? '◯' : (i+1))}</span>
+      <div class="trail-step ${s.done ? 'done' : (s.cur ? 'cur' : '')}">
+        <span class="dot">${s.done ? '✓' : (i+1)}</span>
         <span class="who">${s.who}</span>
-        <span class="when">${s.when ? new Date(s.when).toLocaleDateString() : (s.optional && !s.done ? 'skipped' : '')}</span>
+        <span class="when">${s.when ? new Date(s.when).toLocaleDateString() : ''}</span>
       </div>
     `).join('')}
     ${inv.status === 'rejected' || inv.rejection_reason ? `
@@ -7986,12 +8800,58 @@ function trailFor(inv) {
   `;
 }
 
+// ---- Accessibility: centralized post-render enhancements ----
+// (A11Y-07) associate visual .label spans with their field via aria-labelledby;
+// (A11Y-09) make clickable cards/chips/rows keyboard-operable. Runs on any DOM
+// change so every dynamically-rendered view and sheet is covered without having
+// to edit each template by hand.
+let _a11ySeq = 0;
+function wireLabels(root) {
+  root.querySelectorAll('span.label:not([data-lblwired])').forEach(lab => {
+    let field = null, n = lab.nextElementSibling, hops = 0;
+    while (n && hops < 3 && !field) {
+      if (/^(INPUT|SELECT|TEXTAREA)$/.test(n.tagName)) field = n;
+      else if (n.querySelector) field = n.querySelector('input,select,textarea');
+      n = n.nextElementSibling; hops++;
+    }
+    lab.setAttribute('data-lblwired', '1');
+    if (!field) return;
+    if (!lab.id) lab.id = 'l_a11y_' + (++_a11ySeq);
+    const ex = field.getAttribute('aria-labelledby') || '';
+    if (!ex.split(' ').includes(lab.id)) field.setAttribute('aria-labelledby', (ex ? ex + ' ' : '') + lab.id);
+  });
+}
+const A11Y_TAP_SEL = '.card.tap, .chip[data-status], [data-inv], [data-edit-wo], [data-tracker-inv], [data-cc-id], [data-wo-go], [data-wo-roll], [data-uptag], [data-upwt], [data-upstore], .dash-list-row, th.ts';
+function wireInteractives(root) {
+  root.querySelectorAll(A11Y_TAP_SEL).forEach(el => {
+    if (el.dataset.kbdwired || el.tagName === 'BUTTON' || el.tagName === 'A') return;
+    el.dataset.kbdwired = '1';
+    if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+    if (!el.hasAttribute('role')) el.setAttribute('role', 'button');
+  });
+}
+let _a11yPending = false;
+function runA11y() { _a11yPending = false; try { wireLabels(document); wireInteractives(document); } catch (_) {} }
+function initA11y() {
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const el = e.target;
+    if (el && el.getAttribute && el.getAttribute('role') === 'button' && el.tagName !== 'BUTTON' && el.tagName !== 'A') {
+      e.preventDefault(); el.click();
+    }
+  });
+  const obs = new MutationObserver(() => { if (!_a11yPending) { _a11yPending = true; requestAnimationFrame(runA11y); } });
+  obs.observe(document.body, { childList: true, subtree: true });
+  runA11y();
+}
+
 // ---- Wire global events ----
 document.addEventListener('DOMContentLoaded', () => {
-  $$('.tab-btn').forEach(b => b.addEventListener('click', () => goto(b.dataset.tab)));
+  $$('.tab-btn').forEach(b => b.addEventListener('click', () => { if (STATE.onBehalfOf) exitProxy({ silent: true }); goto(b.dataset.tab); }));
   document.addEventListener('click', e => {
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (!act) return;
+    if (act === 'exit-proxy') { exitProxy(); render(); return; }
     if (act === 'logout')   {
       // v0.35 — call /logout to delete the server session, then clear local state
       api('/logout', { method: 'POST' }).catch(() => {});
@@ -8009,5 +8869,532 @@ document.addEventListener('DOMContentLoaded', () => {
       goto('home');
     }
   });
+  // v0.65.1 (F-M7) — guard against accidental double-submits: swallow a second
+  // click on the same button within 500ms (capture phase, before handlers run).
+  let _lastClick = { el: null, t: 0 };
+  document.addEventListener('click', e => {
+    const btn = e.target.closest && e.target.closest('button, .btn');
+    if (!btn || btn.dataset.act === 'dismiss') return;
+    const now = Date.now();
+    if (_lastClick.el === btn && now - _lastClick.t < 500) { e.stopImmediatePropagation(); e.preventDefault(); return; }
+    _lastClick = { el: btn, t: now };
+  }, true);
+  initA11y();
   boot();
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v0.63.1 — UNPLANNED WORK DASHBOARD
+// Tags are multi-select JSON arrays. An item keeps its existing work type /
+// expense category and ALSO carries one or more unplanned reasons.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ---- Tag definitions -------------------------------------------------------
+const UNPLANNED_TAGS = {
+  wasted_labour: { label: 'Wasted Labour', color: '#c0392b', bg: '#fdecea' },
+  ad_hoc:        { label: 'Ad-hoc',        color: '#d35400', bg: '#fef3e2' },
+  unexpected:    { label: 'Unexpected',    color: '#7d3c98', bg: '#f5eef8' },
+};
+
+// Parse stored value (JSON array or legacy single string) → string[]
+function parseUnplannedTags(raw) {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    if (Array.isArray(v)) return v.filter(t => UNPLANNED_TAGS[t]);
+  } catch (_) {}
+  return UNPLANNED_TAGS[raw] ? [raw] : [];
+}
+
+// One or more badge chips from a tag array or stored JSON string
+function unplannedBadges(rawOrArray) {
+  const tags = Array.isArray(rawOrArray) ? rawOrArray : parseUnplannedTags(rawOrArray);
+  if (!tags.length) return '';
+  return tags.map(tag => {
+    const t = UNPLANNED_TAGS[tag];
+    if (!t) return '';
+    return `<span style="display:inline-block;padding:2px 7px;border-radius:12px;font-size:11px;font-weight:600;color:${t.color};background:${t.bg};border:1px solid ${t.color}33;margin-right:3px;">${t.label}</span>`;
+  }).join('');
+}
+// Legacy alias used in a few inline spots
+function unplannedBadge(raw) { return unplannedBadges(raw); }
+
+// ---- Multi-select tag-picker sheet -----------------------------------------
+// currentTagsRaw: the stored JSON string (or legacy single string) from the row
+function openUnplannedTagSheet(entityType, entityId, currentTagsRaw, currentNote, onSave, originalAmount, currentWasted) {
+  const activeTags = parseUnplannedTags(currentTagsRaw);
+  const hasAmount  = typeof originalAmount === 'number' && isFinite(originalAmount) && originalAmount > 0;
+  const wastedDefault = (currentWasted != null && currentWasted !== '' && isFinite(+currentWasted)) ? +currentWasted : 0;
+  const opts = [
+    { v: 'wasted_labour', l: 'Wasted Labour', desc: 'Rework, preventable re-visits, duplicate effort' },
+    { v: 'ad_hoc',        l: 'Ad-hoc',        desc: 'Reactive / unscheduled work not in the plan' },
+    { v: 'unexpected',    l: 'Unexpected',     desc: 'Unforeseen circumstances (equipment failure, etc.)' },
+  ];
+
+  const checkboxes = opts.map(o => {
+    const t = UNPLANNED_TAGS[o.v];
+    const checked = activeTags.includes(o.v) ? 'checked' : '';
+    return `
+    <label style="display:flex;align-items:flex-start;gap:10px;padding:10px;border-radius:8px;cursor:pointer;margin-bottom:6px;border:1px solid ${checked ? t.color : 'var(--border)'};background:${checked ? t.bg : 'transparent'};" id="upLabel_${o.v}">
+      <input type="checkbox" name="uptag" value="${o.v}" ${checked}
+             style="margin-top:3px;accent-color:${t.color};"
+             onchange="document.getElementById('upLabel_${o.v}').style.borderColor=this.checked?'${t.color}':'var(--border)';document.getElementById('upLabel_${o.v}').style.background=this.checked?'${t.bg}':'transparent';">
+      <span>
+        <strong style="display:block;color:${t.color};">${o.l}</strong>
+        <span style="font-size:12px;color:var(--secondary-text);">${o.desc}</span>
+      </span>
+    </label>`;
+  }).join('');
+
+  showSheet(`
+    <div style="padding:20px;">
+      <div style="font-weight:700;font-size:16px;margin-bottom:4px;">Tag as Unplanned Work</div>
+      <div style="font-size:13px;color:var(--secondary-text);margin-bottom:4px;">
+        Select one or more reasons. The item keeps its existing work type and category — these tags are additive.
+      </div>
+      <div style="font-size:12px;color:var(--secondary-text);margin-bottom:14px;">Uncheck all to remove the unplanned flag.</div>
+      <form id="upTagForm">
+        ${checkboxes}
+        ${hasAmount ? `
+        <div style="margin-top:14px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2,#f8f8f8);">
+          <div style="font-size:13px;font-weight:600;margin-bottom:4px;">How much of this was wasted?</div>
+          <div style="font-size:12px;color:var(--secondary-text);margin-bottom:8px;">Reported total <strong>${fmt$(originalAmount)}</strong>. Defaults to <strong>$0</strong> wasted — set the wasted portion; the rest stays as actual.</div>
+          <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+            <label style="font-size:12px;font-weight:600;color:var(--danger,#c0392b);">Wasted $
+              <input id="upTagWasted" type="number" min="0" max="${originalAmount}" step="0.01" value="${wastedDefault}" style="width:110px;font-size:13px;border:1px solid var(--border);border-radius:6px;padding:6px;margin-left:4px;">
+            </label>
+            <div style="font-size:12px;color:var(--secondary-text);">Actual (kept): <strong id="upTagActual">${fmt$(Math.max(0, originalAmount - wastedDefault))}</strong></div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+            <span style="font-size:11px;color:var(--secondary-text);">Quick set:</span>
+            ${[['None',0],['25%',0.25],['50%',0.5],['75%',0.75],['All',1]].map(([l,f]) =>
+              `<button type="button" class="btn upWastedPreset" data-frac="${f}" style="font-size:11px;padding:3px 8px;">${l}</button>`).join('')}
+          </div>
+        </div>` : ''}
+        <label style="display:block;font-size:13px;font-weight:600;margin-top:14px;margin-bottom:4px;">Note (optional)</label>
+        <textarea id="upTagNote" rows="2" placeholder="e.g. Cart battery failure caused extra trip" style="width:100%;box-sizing:border-box;font-size:13px;border:1px solid var(--border);border-radius:6px;padding:8px;">${escapeHTML(currentNote || '')}</textarea>
+        <div style="display:flex;gap:10px;margin-top:16px;">
+          <button type="submit" class="btn btn-primary" style="flex:1;">Save</button>
+          <button type="button" id="upTagCancel" class="btn" style="flex:0 0 80px;">Cancel</button>
+        </div>
+      </form>
+    </div>
+  `);
+
+  $('#upTagCancel')?.addEventListener('click', closeSheet);
+  const clampWasted = () => {
+    let w = Number($('#upTagWasted')?.value);
+    if (!isFinite(w) || w < 0) w = 0;
+    if (w > originalAmount) w = originalAmount;
+    return +w.toFixed(2);
+  };
+  $('#upTagWasted')?.addEventListener('input', () => {
+    $('#upTagActual').textContent = fmt$(Math.max(0, originalAmount - clampWasted()));
+  });
+  $$('.upWastedPreset').forEach(b => b.addEventListener('click', () => {
+    const w = +(originalAmount * Number(b.dataset.frac)).toFixed(2);
+    const wIn = $('#upTagWasted'); if (wIn) wIn.value = w;
+    $('#upTagActual').textContent = fmt$(Math.max(0, originalAmount - w));
+  }));
+  $('#upTagForm')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    const selected = [...document.querySelectorAll('input[name="uptag"]:checked')].map(el => el.value);
+    const note = $('#upTagNote')?.value.trim() || null;
+    const wasted = hasAmount ? clampWasted() : null;
+    try {
+      await api('/unplanned/tag', {
+        method: 'PATCH',
+        body: { entity_type: entityType, entity_id: entityId, tags: selected, note, wasted },
+      });
+      closeSheet();
+      const labelStr = selected.length ? selected.map(t => UNPLANNED_TAGS[t]?.label).join(' + ') : 'removed';
+      toast(selected.length ? `Tagged: ${labelStr}` : 'Unplanned tag removed');
+      onSave && onSave(selected.length ? JSON.stringify(selected) : null, note);
+    } catch (err) {
+      toast('Error: ' + err.message, 'err');
+    }
+  });
+}
+
+// ---- Inline tag button (renders current tags + edit affordance) -------------
+// currentTagsRaw: the raw stored value (JSON string or null)
+function unplannedBtnInner(tags) {
+  return tags.length
+    ? tags.map(t => `<span style="color:${UNPLANNED_TAGS[t]?.color};font-size:11px;font-weight:700;">● ${UNPLANNED_TAGS[t]?.label}</span>`).join(' ')
+        + ` <span style="font-size:10px;color:var(--secondary-text);font-weight:500;">✎&nbsp;edit</span>`
+    : `<span style="font-size:12px;font-weight:600;">🏷 Tag as unplanned</span>`;
+}
+
+// Inline "Note: …" line shown next to a tagged item so the reason note is
+// visible with the line-item details. Renders nothing when untagged/no note.
+function unplannedNoteLine(rawTag, note) {
+  if (!note || !parseUnplannedTags(rawTag).length) return '';
+  return `<div style="margin-top:4px;font-size:11px;color:var(--secondary-text);font-style:italic;">Note: ${escapeHTML(note)}</div>`;
+}
+
+// Inline "Wasted $X · Actual $Y of $Z" line for a tagged item carrying a split.
+function unplannedSplitLine(rawTag, wasted, original) {
+  if (!parseUnplannedTags(rawTag).length) return '';
+  if (typeof original !== 'number' || !isFinite(original) || original <= 0) return '';
+  const w = (wasted != null && wasted !== '' && isFinite(+wasted)) ? Math.min(+wasted, original) : 0;
+  if (w <= 0) return '';   // default 0 wasted → nothing to show
+  const a = Math.max(0, original - w);
+  return `<div style="margin-top:2px;font-size:11px;"><span style="color:var(--danger,#c0392b);font-weight:600;">Wasted ${fmt$(w)}</span> · <span style="color:var(--secondary-text);">Actual ${fmt$(a)} of ${fmt$(original)}</span></div>`;
+}
+
+function renderUnplannedTagBtn(entityType, entityId, currentTagsRaw, currentNote, originalAmount, currentWasted) {
+  const tags = parseUnplannedTags(currentTagsRaw);
+  const amtAttr = (typeof originalAmount === 'number' && isFinite(originalAmount)) ? originalAmount : '';
+  const wAttr   = (currentWasted != null && currentWasted !== '' && isFinite(+currentWasted)) ? +currentWasted : '';
+  return `<button data-upbtn="1" data-et="${entityType}" data-eid="${entityId}"
+            data-tag="${escapeHTML(currentTagsRaw || '')}" data-note="${escapeHTML(currentNote || '')}"
+            data-amount="${amtAttr}" data-wasted="${wAttr}"
+            title="Tag as unplanned / wasted-labour for leadership reporting (backend only — never shown on the AP invoice)"
+            style="background:#fff7ef;border:1px solid var(--ic-orange);color:var(--ic-orange-deep);border-radius:6px;padding:4px 12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;font-weight:600;">
+            ${unplannedBtnInner(tags)}
+          </button>`;
+}
+
+// Wire all [data-upbtn] buttons inside a container
+function wireUnplannedTagBtns(container, onSave) {
+  container.querySelectorAll('[data-upbtn]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const et   = btn.dataset.et;
+      const eid  = Number(btn.dataset.eid);
+      const raw  = btn.dataset.tag || null;
+      const note = btn.dataset.note || null;
+      const amount = btn.dataset.amount !== '' ? Number(btn.dataset.amount) : undefined;
+      const wasted = btn.dataset.wasted !== '' ? Number(btn.dataset.wasted) : null;
+      openUnplannedTagSheet(et, eid, raw, note, (newRaw, newNote) => {
+        btn.dataset.tag  = newRaw || '';
+        btn.dataset.note = newNote || '';
+        const newTags  = parseUnplannedTags(newRaw);
+        btn.innerHTML = unplannedBtnInner(newTags);
+        onSave && onSave();
+      }, amount, wasted);
+    });
+  });
+}
+
+// ---- Main Unplanned dashboard view ----------------------------------------
+async function renderUnplanned(root) {
+  const period = STATE._unplannedPeriod || 'last_90';
+  root.innerHTML = `<div style="padding:16px;max-width:900px;margin:0 auto;">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:16px;">
+      <div>
+        <div style="font-size:20px;font-weight:700;">Unplanned Work</div>
+        <div style="font-size:13px;color:var(--secondary-text);">Leadership view of unforecasted costs &amp; time</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${['last_30','last_90','ytd','all'].map(p =>
+          `<button data-upperiod="${p}" class="btn ${period===p?'btn-primary':''}" style="font-size:12px;padding:5px 10px;">${
+            {last_30:'30d',last_90:'90d',ytd:'YTD',all:'All'}[p]}</button>`
+        ).join('')}
+      </div>
+    </div>
+    <div id="unplannedBody"><div style="padding:40px;text-align:center;color:var(--secondary-text);">Loading…</div></div>
+  </div>`;
+
+  $$('[data-upperiod]').forEach(b => b.addEventListener('click', () => {
+    STATE._unplannedPeriod = b.dataset.upperiod;
+    renderUnplanned(root);
+  }));
+
+  let data;
+  try {
+    data = await api(`/unplanned/summary?period=${period}`);
+  } catch (e) {
+    $('#unplannedBody').innerHTML = alertHTML('err', '!', e.message);
+    return;
+  }
+
+  const s = data.summary;
+  const fmtH = h => `${(+h).toFixed(1)}h`;
+
+  // KPI tiles
+  const kpis = [
+    { label: 'Total Wasted Cost',       val: fmt$(s.total_cost),          sub: `of ${fmt$(s.total_original_cost != null ? s.total_original_cost : s.total_cost)} tagged`, hi: true },
+    { label: 'Actual (within tagged)',  val: fmt$(s.total_actual_cost || 0), sub: 'legitimate portion' },
+    { label: 'Wasted Labour',           val: fmtH(s.total_labor_hours),   sub: fmt$(s.total_labor_cost) + ' wasted' },
+    { label: 'Wasted Expenses',         val: fmt$(s.total_expense_cost),  sub: 'tech-paid items' },
+    { label: 'Wasted Corp Card',        val: fmt$(s.total_cc_cost),       sub: 'corp card items' },
+    { label: 'Tagged Work Orders',      val: s.tagged_wo_count,           sub: 'WOs flagged' },
+  ];
+
+  // By-tag breakdown
+  const tagBreakdown = Object.entries(UNPLANNED_TAGS).map(([k, t]) => {
+    const d = data.by_tag[k] || {};
+    const total = (d.labor_cost||0) + (d.expense_cost||0) + (d.cc_cost||0);
+    return `
+      <div data-uptag="${k}" title="Filter detail by ${t.label}" style="cursor:pointer;border:1px solid ${t.color}44;border-radius:10px;padding:14px;background:${t.bg};">
+        <div style="font-weight:700;color:${t.color};margin-bottom:6px;">${t.label}</div>
+        <div style="font-size:22px;font-weight:700;">${fmt$(total)}</div>
+        <div style="font-size:12px;color:var(--secondary-text);margin-top:4px;">
+          ${fmtH(d.labor_hours||0)} labour · ${fmt$(d.expense_cost||0)} expenses · ${fmt$(d.cc_cost||0)} corp card
+        </div>
+        <div style="font-size:12px;color:var(--secondary-text);">${d.wo_count||0} WOs tagged</div>
+      </div>`;
+  }).join('');
+
+  // By work type table — unplanned slice vs the type's full cost. Click to filter.
+  const wtRows = Object.entries(data.by_work_type || {})
+    .sort(([,a],[,b]) => (b.unplanned_cost ?? b.total_cost) - (a.unplanned_cost ?? a.total_cost))
+    .map(([wt, d]) => {
+      const unplanned = d.unplanned_cost != null ? d.unplanned_cost : d.total_cost;
+      const total = d.total_all_cost != null ? d.total_all_cost : unplanned;
+      const pct = d.unplanned_pct != null ? d.unplanned_pct : (total > 0 ? Math.round(unplanned/total*100) : 0);
+      return `
+      <tr data-upwt="${escapeHTML(wt)}" style="cursor:pointer;" title="Filter detail by ${escapeHTML(wt)}">
+        <td style="padding:6px 8px;text-transform:capitalize;">${escapeHTML(wt)}</td>
+        <td style="padding:6px 8px;text-align:right;font-weight:700;color:var(--danger,#c0392b);">${fmt$(unplanned)}</td>
+        <td style="padding:6px 8px;text-align:right;color:var(--secondary-text);">${fmt$(total)}</td>
+        <td style="padding:6px 8px;text-align:right;">${pct}%</td>
+        <td style="padding:6px 8px;text-align:right;">${d.count}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--secondary-text);">No data</td></tr>';
+
+  // By store table (top 10). Click to filter.
+  const storeRows = Object.entries(data.by_store || {})
+    .sort(([,a],[,b]) => b.total_cost - a.total_cost)
+    .slice(0, 10)
+    .map(([store, d]) => `
+      <tr data-upstore="${escapeHTML(store)}" style="cursor:pointer;" title="Filter detail by this store">
+        <td style="padding:6px 8px;">${escapeHTML(store)}</td>
+        <td style="padding:6px 8px;text-align:right;">${fmt$(d.total_cost)}</td>
+        <td style="padding:6px 8px;text-align:right;">${d.count}</td>
+      </tr>`).join('') || '<tr><td colspan="3" style="padding:12px;text-align:center;color:var(--secondary-text);">No data</td></tr>';
+
+  // By work order — unplanned cost vs the WO's total cost. Click a row to open
+  // the full work-order detail (drill-down).
+  const woRoll = data.by_work_order || [];
+  const woRollRows = woRoll.map(w => `
+      <tr data-wo-roll="${w.wo_id}" style="cursor:pointer;" title="Open work order ${escapeHTML(w.external_id)}">
+        <td style="padding:6px 8px;font-size:12px;color:var(--secondary-text);white-space:nowrap;">${escapeHTML((w.date||'').slice(0,10) || '—')}</td>
+        <td style="padding:6px 8px;max-width:230px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><span style="color:var(--primary);font-weight:600;">${escapeHTML(w.external_id)}</span>${w.title ? ` <span style="font-size:11px;color:var(--secondary-text);">${escapeHTML(w.title)}</span>` : ''}</td>
+        <td style="padding:6px 8px;text-transform:capitalize;color:var(--secondary-text);">${escapeHTML(w.work_type||'')}</td>
+        <td style="padding:6px 8px;">${escapeHTML(w.store_name||'')}</td>
+        <td style="padding:6px 8px;text-align:right;font-weight:700;color:var(--danger,#c0392b);">${fmt$(w.unplanned_cost)}</td>
+        <td style="padding:6px 8px;text-align:right;color:var(--secondary-text);">${fmt$(w.total_cost)}</td>
+        <td style="padding:6px 8px;text-align:right;">${w.unplanned_pct}%</td>
+      </tr>`).join('') || '<tr><td colspan="7" style="padding:12px;text-align:center;color:var(--secondary-text);">No tagged work orders</td></tr>';
+
+  // Unified, filterable list of every tagged line item (drill-down table).
+  const fmtDateShort = (d) => d ? String(d).slice(0, 10) : '';
+  const upItems = [];
+  for (const r of (data.detail?.time_entries || [])) upItems.push({ kind:'Labor', date:r.clock_in, tags:r.tags||parseUnplannedTags(r.unplanned_tag), work_type:r.work_type||'', store:r.store_name||'', wo_id:r.wo_id, wo:r.wo_external_id||'', wo_title:r.wo_title||'', who:r.tech_name||'', cost:+r.cost||0, original:+r.original_cost||+r.cost||0, what:fmtH(r.hours||0)+' wasted labour', note:r.note||'' });
+  for (const r of (data.detail?.expenses || [])) upItems.push({ kind:'Expense', date:r.expense_date, tags:r.tags||parseUnplannedTags(r.unplanned_tag), work_type:r.work_type||'', store:r.store_name||'', wo_id:r.wo_id, wo:r.wo_external_id||'', wo_title:r.wo_title||'', who:r.tagged_by_name||'', cost:+r.wasted||0, original:+r.original||+r.amount||0, what:(r.category||'')+(r.subcategory?(' / '+r.subcategory):''), note:r.note||'' });
+  for (const r of (data.detail?.corp_card_expenses || [])) upItems.push({ kind:'Corp card', date:r.expense_date, tags:r.tags||parseUnplannedTags(r.unplanned_tag), work_type:r.work_type||'', store:r.store_name||'', wo_id:r.wo_id, wo:r.wo_external_id||'', wo_title:r.wo_title||'', who:r.tagged_by_name||'', cost:+r.wasted||0, original:+r.original||+r.amount||0, what:'Corp card: '+(r.category||''), note:r.note||'' });
+  for (const r of (data.detail?.work_orders || [])) upItems.push({ kind:'Work order', date:r.tagged_at, tags:r.tags||parseUnplannedTags(r.unplanned_tag), work_type:r.work_type||'', store:r.store_name||'', wo_id:r.id, wo:r.external_id||'', wo_title:r.title||'', who:r.tagged_by_name||'', cost:0, what:'Whole work order', note:r.note||'', woLevel:true });
+  const wtOpts    = [...new Set(upItems.map(i => i.work_type).filter(Boolean))].sort();
+  const storeOpts = [...new Set(upItems.map(i => i.store).filter(Boolean))].sort();
+
+  // Weekly trend sparkline (simple bar chart with divs)
+  const trend = data.weekly_trend || [];
+  const maxCost = Math.max(...trend.map(r => r.cost), 1);
+  const sparkBars = trend.map(r => {
+    const pct = Math.round((r.cost / maxCost) * 80);
+    return `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:28px;">
+      <div style="font-size:9px;color:var(--secondary-text);">${fmt$(r.cost)}</div>
+      <div style="width:100%;background:var(--primary);border-radius:3px 3px 0 0;height:${pct}px;"></div>
+      <div style="font-size:9px;color:var(--secondary-text);writing-mode:vertical-rl;transform:rotate(180deg);">${r.week}</div>
+    </div>`;
+  }).join('');
+
+  // Detailed items tabs — multi-badge, work type / category always shown
+  const teRows = (data.detail?.time_entries || []).slice(0, 50).map(r => `
+    <tr>
+      <td style="padding:5px 8px;">${unplannedBadges(r.tags || r.unplanned_tag)}</td>
+      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.wo_external_id||'')} — ${escapeHTML(r.wo_title||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;text-transform:capitalize;color:var(--secondary-text);">${escapeHTML(r.work_type||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.store_name||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right;">${fmtH(r.hours)}</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right;">${fmt$(r.cost)}</td>
+      <td style="padding:5px 8px;font-size:12px;color:var(--secondary-text);">${escapeHTML(r.tech_name||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;color:var(--secondary-text);">${escapeHTML(r.note||'')}</td>
+    </tr>`).join('') || '<tr><td colspan="8" style="padding:12px;text-align:center;color:var(--secondary-text);">No tagged time entries</td></tr>';
+
+  const expRows2 = (data.detail?.expenses || []).slice(0, 50).map(r => `
+    <tr>
+      <td style="padding:5px 8px;">${unplannedBadges(r.tags || r.unplanned_tag)}</td>
+      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.wo_external_id||'')} — ${escapeHTML(r.wo_title||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;text-transform:capitalize;color:var(--secondary-text);">${escapeHTML(r.work_type||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.store_name||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;font-weight:600;">${escapeHTML(r.category||'')}${r.subcategory ? ` <span style="font-weight:400;">/ ${escapeHTML(r.subcategory)}</span>` : ''}</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right;">${fmt$(r.amount)}</td>
+      <td style="padding:5px 8px;font-size:12px;color:var(--secondary-text);">${escapeHTML(r.note||'')}</td>
+    </tr>`).join('') || '<tr><td colspan="7" style="padding:12px;text-align:center;color:var(--secondary-text);">No tagged expenses</td></tr>';
+
+  const woDetailRows = (data.detail?.work_orders || []).slice(0, 50).map(r => `
+    <tr>
+      <td style="padding:5px 8px;">${unplannedBadges(r.tags || r.unplanned_tag)}</td>
+      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.external_id||'')} — ${escapeHTML(r.title||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;text-transform:capitalize;font-weight:600;">${escapeHTML(r.work_type||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.store_name||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;color:var(--secondary-text);">${escapeHTML(r.tagged_by_name||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;color:var(--secondary-text);">${escapeHTML(r.note||'')}</td>
+    </tr>`).join('') || '<tr><td colspan="6" style="padding:12px;text-align:center;color:var(--secondary-text);">No tagged WOs</td></tr>';
+
+  const thStyle = 'padding:6px 8px;text-align:left;font-size:12px;font-weight:600;border-bottom:2px solid var(--border);background:var(--surface-2,#f8f8f8);';
+  const thR     = thStyle.replace('text-align:left','text-align:right');
+
+  $('#unplannedBody').innerHTML = `
+    <!-- KPI strip -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px;">
+      ${kpis.map(k => `
+        <div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;padding:14px;">
+          <div style="font-size:12px;color:var(--secondary-text);margin-bottom:4px;">${k.label}</div>
+          <div style="font-size:${k.hi ? '24px' : '20px'};font-weight:700;${k.hi ? 'color:var(--danger,#c0392b)' : ''}">${k.val}</div>
+          <div style="font-size:11px;color:var(--secondary-text);">${k.sub}</div>
+        </div>`).join('')}
+    </div>
+
+    <!-- By tag breakdown -->
+    <div style="font-weight:700;font-size:15px;margin-bottom:8px;">By Tag Type</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:24px;">
+      ${tagBreakdown}
+    </div>
+
+    <!-- Weekly trend -->
+    ${trend.length ? `
+    <div style="font-weight:700;font-size:15px;margin-bottom:8px;">Weekly Trend</div>
+    <div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:24px;">
+      <div style="display:flex;align-items:flex-end;gap:4px;height:100px;overflow-x:auto;">${sparkBars}</div>
+    </div>` : ''}
+
+    <!-- By work type -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px;">
+      <div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;padding:16px;">
+        <div style="font-weight:700;font-size:14px;margin-bottom:10px;">By Work Type</div>
+        <table style="width:100%;border-collapse:collapse;">
+          <thead><tr>
+            <th style="${thStyle}">Type</th>
+            <th style="${thR}">Unplanned</th>
+            <th style="${thR}">Total</th>
+            <th style="${thR}">%</th>
+            <th style="${thR}">Items</th>
+          </tr></thead>
+          <tbody>${wtRows}</tbody>
+        </table>
+      </div>
+      <div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;padding:16px;">
+        <div style="font-weight:700;font-size:14px;margin-bottom:10px;">Top Stores (by cost)</div>
+        <table style="width:100%;border-collapse:collapse;">
+          <thead><tr>
+            <th style="${thStyle}">Store</th>
+            <th style="${thR}">Cost</th>
+            <th style="${thR}">Items</th>
+          </tr></thead>
+          <tbody>${storeRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- By work order: unplanned vs total cost (drill-down, earliest → latest) -->
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-bottom:8px;">
+      <div style="font-weight:700;font-size:15px;">By Work Order — unplanned vs total cost</div>
+      <div style="font-size:12px;color:var(--secondary-text);">${woRoll.length} work order${woRoll.length === 1 ? '' : 's'} · earliest → latest${woRoll.length > 20 ? ' · scroll for more' : ''}</div>
+    </div>
+    <div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;overflow:auto;margin-bottom:24px;max-height:640px;">
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr>
+          <th style="${thStyle}position:sticky;top:0;z-index:1;">Date</th>
+          <th style="${thStyle}position:sticky;top:0;z-index:1;">Work Order</th>
+          <th style="${thStyle}position:sticky;top:0;z-index:1;">Type</th>
+          <th style="${thStyle}position:sticky;top:0;z-index:1;">Store</th>
+          <th style="${thR}position:sticky;top:0;z-index:1;">Unplanned</th>
+          <th style="${thR}position:sticky;top:0;z-index:1;">Total</th>
+          <th style="${thR}position:sticky;top:0;z-index:1;">%</th>
+        </tr></thead>
+        <tbody>${woRollRows}</tbody>
+      </table>
+    </div>
+
+    <!-- Filterable tagged-items detail (drill to WO) -->
+    <div id="upItemsAnchor"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+      <div style="font-weight:700;font-size:15px;">Tagged Items <span style="font-weight:400;color:var(--secondary-text);font-size:13px;">— click a row to open its work order</span></div>
+      <div id="upItemsSubtotal" style="font-size:13px;color:var(--secondary-text);"></div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;">
+      <div style="display:flex;gap:4px;flex-wrap:wrap;">
+        <button data-upreason="" class="btn" style="font-size:12px;padding:4px 10px;">All reasons</button>
+        ${Object.entries(UNPLANNED_TAGS).map(([k,t]) => `<button data-upreason="${k}" class="btn" style="font-size:12px;padding:4px 10px;">${t.label}</button>`).join('')}
+      </div>
+      <select id="upfWt" class="field" style="font-size:12px;padding:4px 8px;max-width:160px;"><option value="">All work types</option>${wtOpts.map(w=>`<option value="${escapeHTML(w)}">${escapeHTML(w)}</option>`).join('')}</select>
+      <select id="upfStore" class="field" style="font-size:12px;padding:4px 8px;max-width:180px;"><option value="">All stores</option>${storeOpts.map(w=>`<option value="${escapeHTML(w)}">${escapeHTML(w)}</option>`).join('')}</select>
+      <select id="upfKind" class="field" style="font-size:12px;padding:4px 8px;max-width:130px;"><option value="">All kinds</option><option>Labor</option><option>Expense</option><option>Corp card</option><option>Work order</option></select>
+      <input id="upfQ" class="field" placeholder="Search WO / store / note…" style="font-size:12px;padding:4px 8px;flex:1;min-width:140px;" />
+      <button id="upfClear" class="btn" style="font-size:12px;padding:4px 10px;">Clear</button>
+    </div>
+    <div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;overflow:auto;">
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr>
+          <th style="${thStyle}">Date</th>
+          <th style="${thStyle}">Reason(s)</th>
+          <th style="${thStyle}">Kind</th>
+          <th style="${thStyle}">Work Order</th>
+          <th style="${thStyle}">Type</th>
+          <th style="${thStyle}">Store</th>
+          <th style="${thStyle}">Detail</th>
+          <th style="${thStyle}">Who</th>
+          <th style="${thR}">Cost</th>
+        </tr></thead>
+        <tbody id="upItemsBody"></tbody>
+      </table>
+    </div>
+  `;
+
+  // ── Drill-down + filtering for the tagged-items table ────────────────────
+  STATE._upFilter = STATE._upFilter || { reason:'', work_type:'', store:'', kind:'', q:'' };
+  const f = STATE._upFilter;
+  const matchF = (i) =>
+       (!f.reason    || (i.tags||[]).includes(f.reason))
+    && (!f.work_type || i.work_type === f.work_type)
+    && (!f.store     || i.store === f.store)
+    && (!f.kind      || i.kind === f.kind)
+    && (!f.q         || `${i.wo} ${i.wo_title} ${i.store} ${i.who} ${i.what} ${i.note}`.toLowerCase().includes(f.q.toLowerCase()));
+
+  function syncUpControls() {
+    $$('[data-upreason]').forEach(b => b.classList.toggle('btn-primary', (b.dataset.upreason||'') === (f.reason||'')));
+    if ($('#upfWt'))    $('#upfWt').value = f.work_type || '';
+    if ($('#upfStore')) $('#upfStore').value = f.store || '';
+    if ($('#upfKind'))  $('#upfKind').value = f.kind || '';
+    if ($('#upfQ') && document.activeElement !== $('#upfQ')) $('#upfQ').value = f.q || '';
+  }
+  function paintUpItems() {
+    const rows = upItems.filter(matchF);
+    const subtotal = rows.reduce((a, i) => a + (i.cost || 0), 0);
+    $('#upItemsBody').innerHTML = rows.map(i => `
+      <tr ${i.wo_id ? `data-wo-go="${i.wo_id}" style="cursor:pointer;"` : ''}>
+        <td style="padding:5px 8px;font-size:12px;color:var(--secondary-text);">${escapeHTML(fmtDateShort(i.date))}</td>
+        <td style="padding:5px 8px;">${unplannedBadges(i.tags)}</td>
+        <td style="padding:5px 8px;font-size:12px;">${escapeHTML(i.kind)}</td>
+        <td style="padding:5px 8px;font-size:12px;">${i.wo ? `<span style="color:var(--primary);font-weight:600;">${escapeHTML(i.wo)}</span>` : '—'}</td>
+        <td style="padding:5px 8px;font-size:12px;text-transform:capitalize;color:var(--secondary-text);">${escapeHTML(i.work_type)}</td>
+        <td style="padding:5px 8px;font-size:12px;">${escapeHTML(i.store)}</td>
+        <td style="padding:5px 8px;font-size:12px;">${escapeHTML(i.what)}${i.note ? `<div style="font-size:11px;color:var(--secondary-text);font-style:italic;">${escapeHTML(i.note)}</div>` : ''}</td>
+        <td style="padding:5px 8px;font-size:12px;color:var(--secondary-text);">${escapeHTML(i.who)}</td>
+        <td style="padding:5px 8px;font-size:12px;text-align:right;">${i.woLevel ? '—' : `${fmt$(i.cost)}${(i.original != null && Math.abs(i.original - i.cost) > 0.005) ? `<div style="font-size:10px;color:var(--secondary-text);">of ${fmt$(i.original)}</div>` : ''}`}</td>
+      </tr>`).join('') || '<tr><td colspan="9" style="padding:14px;text-align:center;color:var(--secondary-text);">No items match these filters.</td></tr>';
+    $('#upItemsSubtotal').textContent = `${rows.length} item${rows.length === 1 ? '' : 's'} · ${fmt$(subtotal)}`;
+    $$('#upItemsBody [data-wo-go]').forEach(tr => tr.addEventListener('click', () => goto('woDetail', Number(tr.dataset.woGo))));
+  }
+  const scrollUpItems = () => $('#upItemsAnchor')?.scrollIntoView({ behavior:'smooth', block:'start' });
+
+  $$('[data-upreason]').forEach(b => b.addEventListener('click', () => { f.reason = b.dataset.upreason; syncUpControls(); paintUpItems(); }));
+  $('#upfWt')?.addEventListener('change',   e => { f.work_type = e.target.value; paintUpItems(); });
+  $('#upfStore')?.addEventListener('change', e => { f.store = e.target.value; paintUpItems(); });
+  $('#upfKind')?.addEventListener('change',  e => { f.kind = e.target.value; paintUpItems(); });
+  $('#upfQ')?.addEventListener('input',      e => { f.q = e.target.value; paintUpItems(); });
+  $('#upfClear')?.addEventListener('click', () => { f.reason=''; f.work_type=''; f.store=''; f.kind=''; f.q=''; if ($('#upfQ')) $('#upfQ').value=''; syncUpControls(); paintUpItems(); });
+
+  // Drill from overview breakdowns → set the matching filter + jump to the table.
+  $$('[data-uptag]').forEach(el => el.addEventListener('click', () => { f.reason = el.dataset.uptag; syncUpControls(); paintUpItems(); scrollUpItems(); }));
+  $$('[data-upwt]').forEach(el => el.addEventListener('click', () => { f.work_type = el.dataset.upwt; syncUpControls(); paintUpItems(); scrollUpItems(); }));
+  $$('[data-upstore]').forEach(el => el.addEventListener('click', () => { f.store = el.dataset.upstore; syncUpControls(); paintUpItems(); scrollUpItems(); }));
+  // Work-order rollup rows → open the full WO detail.
+  $$('[data-wo-roll]').forEach(tr => tr.addEventListener('click', () => goto('woDetail', Number(tr.dataset.woRoll))));
+
+  syncUpControls();
+  paintUpItems();
+}

@@ -76,11 +76,23 @@ app.use('/api', require('./routes/rules')(db));
 app.use('/api', require('./routes/dashboard')(db));
 app.use('/api', require('./routes/launch_actuals')(db));
 app.use('/api', require('./routes/corpcard')(db));
+app.use('/api', require('./routes/category_rules')(db));
+app.use('/api', require('./routes/work_types')(db));
+app.use('/api', require('./routes/unplanned')(db));   // v0.63 — unplanned/wasted-labour tagging
 
 // Health check
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-// Static frontend
+// v0.66 — Redesigned React app ("CostWise v2"), served ALONGSIDE the existing
+// vanilla UI and backed by the same API. Lets the redesign be piloted behind a
+// flag without disturbing the current frontend. Built from redesign/react-app
+// via `npm run build:web` → web-dist/. The path-scoped SPA fallback only catches
+// /v2 routes, so / and /api are untouched.
+const V2_DIR = path.join(__dirname, 'web-dist');
+app.use('/v2', express.static(V2_DIR));
+app.get(/^\/v2(\/.*)?$/, (_req, res) => res.sendFile(path.join(V2_DIR, 'index.html')));
+
+// Static frontend (existing vanilla app at /)
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Errors
@@ -102,7 +114,8 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('');
-  console.log('  Caper CostWise — v0.48 (Expensify export for FTE techs)');
-  console.log(`  → http://localhost:${PORT}`);
+  console.log('  Caper CostWise — v0.66.0 (redesigned React app at /v2, served alongside the existing UI)');
+  console.log(`  → http://localhost:${PORT}        (existing UI)`);
+  console.log(`  → http://localhost:${PORT}/v2     (redesigned app — React + Tailwind, WCAG AA)`);
   console.log('');
 });

@@ -140,6 +140,14 @@ module.exports = (db) => {
     const statuses = (req.query.status || '').split(',').filter(Boolean);
     const params = [];
     let where = '1=1';
+    // v0.65.1 (F-M3) — Ops Mgrs see only their own team's invoices (plus any
+    // vendor invoice they created); Sr Mgr / PM continue to see everything.
+    if (me.role === 'ops_manager') {
+      const techIds = teamTechIds(db, userId);
+      const ph = techIds.map(() => '?').join(',') || 'NULL';
+      where += ` AND (i.user_id IN (${ph}) OR i.created_by = ?)`;
+      params.push(...techIds, userId);
+    }
     if (statuses.length) {
       where += ` AND i.status IN (${statuses.map(() => '?').join(',')})`;
       params.push(...statuses);
@@ -226,6 +234,13 @@ module.exports = (db) => {
     const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(id);
     if (!inv) return res.status(404).json({ error: 'invoice not found' });
 
+    // v0.65 — Segregation of duties: you cannot approve an invoice you own
+    // (tech labor) or created (vendor). A different approver is required.
+    const ownerOrCreator = inv.invoice_type === 'vendor' ? inv.created_by : inv.user_id;
+    if (ownerOrCreator && ownerOrCreator === userId) {
+      return res.status(409).json({ error: 'you cannot approve your own invoice — a different approver is required' });
+    }
+
     const now = new Date().toISOString();
 
     // v0.36 — Vendor invoices skip Ops Mgr review (the Ops Mgr created them)
@@ -234,18 +249,22 @@ module.exports = (db) => {
     // clause re-asserts the source status; if a concurrent caller already
     // moved it, changes() === 0 and we return 409.
     if (inv.invoice_type === 'vendor') {
-      if (me.role !== 'sr_manager' && me.role !== 'pm') {
-        return res.status(403).json({ error: 'vendor invoices require Sr Mgr / PM approval' });
+      // v0.65.2 — Sr Mgr approval is optional at all levels, so any manager
+      // (Ops / Sr / PM) may approve a vendor invoice; a single approval clears
+      // it for AP. Sr/PM stamps approved_sr; Ops stamps approved_ops. The
+      // self-approval guard above still blocks the Ops Mgr who created it.
+      if (!['ops_manager','sr_manager','pm'].includes(me.role)) {
+        return res.status(403).json({ error: 'manager role required to approve vendor invoices' });
       }
       if (inv.status !== 'submitted') {
         return res.status(409).json({ error: `vendor invoice is ${inv.status}, not submitted` });
       }
-      const r = db.prepare(`
-        UPDATE invoices SET status = 'approved_sr', approved_sr_at = ?, approved_sr_by = ?
-        WHERE id = ? AND status = 'submitted' AND invoice_type = 'vendor'
-      `).run(now, userId, id);
+      const isSr = me.role === 'sr_manager' || me.role === 'pm';
+      const r = isSr
+        ? db.prepare(`UPDATE invoices SET status = 'approved_sr', approved_sr_at = ?, approved_sr_by = ? WHERE id = ? AND status = 'submitted' AND invoice_type = 'vendor'`).run(now, userId, id)
+        : db.prepare(`UPDATE invoices SET status = 'approved_ops', approved_ops_at = ?, approved_ops_by = ? WHERE id = ? AND status = 'submitted' AND invoice_type = 'vendor'`).run(now, userId, id);
       if (r.changes === 0) return res.status(409).json({ error: 'invoice state changed — refresh and retry' });
-      logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: 'approve_vendor_sr' });
+      logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: isSr ? 'approve_vendor_sr' : 'approve_vendor_ops' });
       return res.json(db.prepare("SELECT * FROM invoices WHERE id = ?").get(id));
     }
 
@@ -267,6 +286,10 @@ module.exports = (db) => {
 
     if (me.role === 'sr_manager' || me.role === 'pm') {
       if (inv.status !== 'approved_ops') return res.status(409).json({ error: `invoice is ${inv.status}, not approved_ops` });
+      // v0.65 — the Sr Mgr gate must be cleared by someone other than the Ops approver.
+      if (inv.approved_ops_by && inv.approved_ops_by === userId) {
+        return res.status(409).json({ error: 'the Sr Mgr approval must be made by someone other than the Ops Mgr who approved it' });
+      }
       const r = db.prepare(`
         UPDATE invoices SET status = 'approved_sr', approved_sr_at = ?, approved_sr_by = ?
         WHERE id = ? AND status = 'approved_ops'
@@ -322,11 +345,11 @@ module.exports = (db) => {
   // ============================================================
   // POST /api/invoices/:id/escalate  { note? }
   // ------------------------------------------------------------
-  // Ops Mgr defers a flagged invoice to Sr Mgr for secondary approval.
+  // Ops Mgr defers a flagged invoice to Sr Mgr for secondary review.
   // Stamps escalated_at + escalated_by; advances status to approved_ops so
-  // Sr Mgr's queue picks it up. After this, /send-to-ap requires Sr Mgr
-  // countersign before it'll accept (the Sr Mgr step stops being optional
-  // for THIS invoice).
+  // Sr Mgr's queue picks it up. v0.65.2 — Sr Mgr review is OPTIONAL: escalation
+  // only surfaces the invoice for an optional second look; it no longer blocks
+  // /send-to-ap, which accepts approved_ops without a Sr Mgr countersign.
   router.post('/invoices/:id/escalate', (req, res) => {
     const userId = Number(req.header('x-user-id'));
     const me = getMe(db, userId);
@@ -350,18 +373,26 @@ module.exports = (db) => {
     const note = (req.body?.note || '').trim() || null;
     // Move to approved_ops if still in submitted (so Sr Mgr's queue picks it
     // up), and stamp escalation. If already in approved_ops we just stamp.
+    // v0.65 — Escalation is NOT an Ops approval, so we no longer stamp
+    // approved_ops_at/by (which fabricated a review that never happened). A
+    // 'submitted' invoice still advances to 'approved_ops' so the Sr Mgr queue
+    // surfaces it, but only the escalation is recorded. Both paths are race-safe.
+    let r;
     if (inv.status === 'submitted') {
-      db.prepare(`
+      r = db.prepare(`
         UPDATE invoices SET
-          status = 'approved_ops', approved_ops_at = ?, approved_ops_by = ?,
+          status = 'approved_ops',
           escalated_at = ?, escalated_by = ?, escalation_note = ?
-        WHERE id = ?
-      `).run(now, userId, now, userId, note, id);
-    } else {
-      db.prepare(`
-        UPDATE invoices SET escalated_at = ?, escalated_by = ?, escalation_note = ?
-        WHERE id = ?
+        WHERE id = ? AND status = 'submitted'
       `).run(now, userId, note, id);
+    } else {
+      r = db.prepare(`
+        UPDATE invoices SET escalated_at = ?, escalated_by = ?, escalation_note = ?
+        WHERE id = ? AND status = 'approved_ops'
+      `).run(now, userId, note, id);
+    }
+    if (r.changes === 0) {
+      return res.status(409).json({ error: 'invoice state changed — refresh and retry' });
     }
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId,
                    action: 'escalate_to_sr', details: { note } });

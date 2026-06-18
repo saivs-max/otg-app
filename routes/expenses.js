@@ -9,6 +9,9 @@ const weekBoundsFor = (d) => weekBounds(new Date(d));
 // (v0.55 — drive promoted to billable; the earlier non-billable treatment was wrong).
 const VALID_CATS = new Set(['mileage','tolls','parking','vendor','labor','drive','other']);
 const VALID_SUBS = new Set(['Meal','Tools','Hotel','Supplies','Misc']); // category='other' requires one of these
+// v0.65 — hard per-expense ceiling. Previously there was no upper bound, so a
+// fat-finger / absurd amount (e.g. $99,999,999) was stored verbatim.
+const MAX_EXPENSE_AMOUNT = 100000;
 
 module.exports = (db) => {
 
@@ -110,7 +113,12 @@ module.exports = (db) => {
       amount = +(q * rate).toFixed(2);
     } else {
       amount = Number(amount);
-      if (!isFinite(amount) || amount < 0) return res.status(400).json({ error: 'amount must be a positive number' });
+      if (!isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'amount must be greater than 0' });
+    }
+    // v0.65 — unified hard ceiling across every category (also catches a huge
+    // mileage/labor/drive amount computed from quantity × rate).
+    if (!isFinite(amount) || amount > MAX_EXPENSE_AMOUNT) {
+      return res.status(400).json({ error: `amount exceeds the per-expense maximum of $${MAX_EXPENSE_AMOUNT.toLocaleString()}` });
     }
     // Meal cap (now lives under category='other', subcategory='Meal')
     {
@@ -168,8 +176,20 @@ module.exports = (db) => {
     }
     if (e.invoice_id) {
       const inv = db.prepare("SELECT status FROM invoices WHERE id = ?").get(e.invoice_id);
-      if (inv && inv.status !== 'draft') {
-        return res.status(409).json({ error: `Cannot edit — invoice is ${inv.status}, not draft.` });
+      if (inv) {
+        // v0.64 — Ops managers (sr/pm, or ops_mgr on the tech's team) can correct
+        // line items right up until the invoice is approved: draft / submitted /
+        // in_review. The owning tech can still only edit while it's a draft.
+        // Once approved, queued, sent to AP, or rejected, line items are locked.
+        const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+        const isManagerActor = me && (
+          me.role === 'sr_manager' || me.role === 'pm' ||
+          (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
+        );
+        const editable = isManagerActor ? ['draft','submitted','in_review'] : ['draft'];
+        if (!editable.includes(inv.status)) {
+          return res.status(409).json({ error: `Cannot edit — invoice is ${inv.status}.` });
+        }
       }
     }
 
@@ -224,6 +244,26 @@ module.exports = (db) => {
 
     logAudit(db, { entity_type: 'expenses', entity_id: id, user_id: userId, action: 'update',
                    details: { category, amount } });
+
+    // v0.64 — keep the invoice total fresh immediately after a line-item edit.
+    // computeInvoice is shared from routes/invoices.js (see db.__computeInvoice).
+    if (e.invoice_id && typeof db.__computeInvoice === 'function') {
+      try { db.__computeInvoice(e.invoice_id); } catch (_) {}
+    }
+
+    // v0.64.3 — when a MANAGER edits a tech's expense, leave an informational
+    // notice for the tech. No action required unless the invoice is rejected.
+    if (e.user_id !== userId) {
+      try {
+        const tech = db.prepare("SELECT email FROM users WHERE id = ?").get(e.user_id);
+        const mgr  = db.prepare("SELECT name FROM users WHERE id = ?").get(userId);
+        db.prepare(`INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, status)
+                    VALUES ('line_item_edited', ?, ?, ?, ?, ?, 'logged')`)
+          .run(e.invoice_id || null, userId, tech?.email || null,
+               `${mgr?.name || 'A manager'} edited an expense on your invoice`,
+               `${mgr?.name || 'A manager'} updated a ${category}${subcategory ? ' / ' + subcategory : ''} expense to $${(+amount).toFixed(2)}. Informational — no action needed unless the invoice is rejected and returned for resubmission.`);
+      } catch (_) {}
+    }
 
     const row = db.prepare("SELECT * FROM expenses WHERE id = ?").get(id);
     res.json(row);

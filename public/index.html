@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="theme-color" content="#003D29" />
 <title>Caper CostWise</title>
 
@@ -17,7 +17,7 @@
 <body>
 
 <!-- Login / user picker -->
-<div id="loginScreen" class="screen-fullscreen">
+<div id="loginScreen" class="screen-fullscreen" role="region" aria-label="Sign in">
   <div class="login-card">
     <div class="brand">
       <div class="brand-mark">
@@ -70,14 +70,17 @@
 
   <!-- Header -->
   <header class="app-header">
-    <button id="backBtn" class="hdr-btn hidden" data-act="back">‹</button>
+    <button id="backBtn" class="hdr-btn hidden" data-act="back" aria-label="Back">‹</button>
     <div class="hdr-title" id="hdrTitle">Today</div>
     <div style="display:flex; gap:6px;">
-      <button class="hdr-btn hidden" id="hdrPwdBtn"      data-act="change-password" title="Change password">🔒</button>
-      <button class="hdr-btn hidden" id="hdrSettingsBtn" data-act="settings" title="Settings">⚙</button>
-      <button class="hdr-btn" data-act="logout" title="Sign out">⎋</button>
+      <button class="hdr-btn hidden" id="hdrPwdBtn"      data-act="change-password" title="Change password" aria-label="Change password">🔒</button>
+      <button class="hdr-btn hidden" id="hdrSettingsBtn" data-act="settings" title="Settings" aria-label="Settings">⚙</button>
+      <button class="hdr-btn" data-act="logout" title="Sign out" aria-label="Sign out">⎋</button>
     </div>
   </header>
+
+  <!-- Global "acting on behalf of" indicator (manager proxy mode) -->
+  <div id="proxyBar" class="proxybar hidden" role="status" aria-live="polite"></div>
 
   <!-- Tab views -->
   <main id="view" class="view"></main>
@@ -87,7 +90,7 @@
 </div>
 
 <!-- Toast -->
-<div id="toast" class="toast hidden"></div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
 <script src="/app.js"></script>
 </body>
