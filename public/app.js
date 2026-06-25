@@ -34,6 +34,105 @@ async function api(path, opts = {}) {
   return j;
 }
 
+// ---- MaintainX work-order sync (per-worker pull + labor import) ----
+// On-demand only: the worker decides when to pull. Writeback to MaintainX is a
+// deferred phase, so these helpers only read from MaintainX into Bread.
+let _mxStatusCache = null;
+async function mxGetStatus(force) {
+  if (_mxStatusCache && !force) return _mxStatusCache;
+  try { _mxStatusCache = await api('/integrations/maintainx/status'); }
+  catch (_) { _mxStatusCache = { connected: false }; }
+  return _mxStatusCache;
+}
+
+async function mxDoConnect(body, close) {
+  try {
+    const r = await api('/integrations/maintainx/connect', { method: 'POST', body });
+    _mxStatusCache = r;
+    toast('MaintainX connected ✓', 'ok');
+    close(r);
+  } catch (e) { toast(e.message || 'Could not connect to MaintainX', 'err'); }
+}
+
+// Lightweight accessible modal to paste an API key (or try demo data).
+function mxConnectModal() {
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.setAttribute('role', 'dialog');
+    ov.setAttribute('aria-modal', 'true');
+    ov.setAttribute('aria-label', 'Connect MaintainX');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;';
+    ov.innerHTML = `
+      <div class="card" style="max-width:430px;width:100%;background:#fff;">
+        <div class="section-title" style="margin-top:0;">Connect MaintainX</div>
+        <p class="help" style="margin:0 0 12px;">Paste your personal MaintainX API key (MaintainX → Settings → Integrations → API Keys) to pull the work orders assigned to you and import the time you logged as labor.</p>
+        <input class="field" id="mxToken" type="password" autocomplete="off" placeholder="MaintainX API key" style="width:100%;margin-bottom:12px;" />
+        <div class="flex between" style="gap:8px;align-items:center;">
+          <button class="btn btn-ghost btn-sm" id="mxDemo" title="Try the sync with sample work orders">Use demo data</button>
+          <div class="flex" style="gap:8px;">
+            <button class="btn btn-ghost btn-sm" id="mxCancel">Cancel</button>
+            <button class="btn btn-primary btn-sm" id="mxConnect">Connect</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    const input = ov.querySelector('#mxToken');
+    input.focus();
+    const close = (val) => { ov.remove(); document.removeEventListener('keydown', onKey); resolve(val); };
+    const onKey = (e) => { if (e.key === 'Escape') close(null); };
+    document.addEventListener('keydown', onKey);
+    ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
+    ov.querySelector('#mxCancel').addEventListener('click', () => close(null));
+    ov.querySelector('#mxConnect').addEventListener('click', () => {
+      const token = input.value.trim();
+      if (!token) return toast('Enter your MaintainX API key, or use demo data', 'err');
+      mxDoConnect({ token }, close);
+    });
+    ov.querySelector('#mxDemo').addEventListener('click', () => mxDoConnect({ demo: true }, close));
+  });
+}
+
+// Returns true once connected; opens the connect modal if needed.
+async function mxEnsureConnected() {
+  const s = await mxGetStatus(true);
+  if (s.connected) return true;
+  const r = await mxConnectModal();
+  return !!(r && r.connected);
+}
+
+async function mxSyncAll(btn) {
+  if (!(await mxEnsureConnected())) return;
+  const old = btn ? btn.innerHTML : null;
+  if (btn) { btn.disabled = true; btn.innerHTML = 'Syncing…'; }
+  try {
+    const { summary } = await api('/integrations/maintainx/sync-now', { method: 'POST' });
+    const bits = [`${summary.pulled} work order${summary.pulled === 1 ? '' : 's'}`];
+    if (summary.laborImported) bits.push(`${summary.laborImported} labor time${summary.laborImported === 1 ? '' : 's'} imported`);
+    toast(`Synced ${bits.join(' · ')} ✓`, 'ok');
+    goto(STATE.view, STATE.view_arg);
+  } catch (e) {
+    toast(e.message || 'Sync failed', 'err');
+    if (btn) { btn.disabled = false; btn.innerHTML = old; }
+  }
+}
+
+async function mxSyncOne(woId, btn) {
+  if (!(await mxEnsureConnected())) return;
+  const old = btn ? btn.innerHTML : null;
+  if (btn) { btn.disabled = true; btn.innerHTML = 'Syncing…'; }
+  try {
+    const { result } = await api(`/workorders/${woId}/sync-maintainx`, { method: 'POST' });
+    const l = result.labor || {};
+    if (l.direction === 'pull')           toast(`Labor updated from MaintainX: ${(l.minutes / 60).toFixed(2)} hrs ✓`, 'ok');
+    else if (l.direction === 'app_wins')  toast('Synced ✓ — your logged time is kept (MaintainX not overwritten)', 'ok');
+    else                                  toast('Synced from MaintainX ✓', 'ok');
+    goto('woDetail', woId);
+  } catch (e) {
+    toast(e.message || 'Sync failed', 'err');
+    if (btn) { btn.disabled = false; btn.innerHTML = old; }
+  }
+}
+
 // v0.45 — BUG-009 fix: secure file-download helper. Mints a single-use,
 // 5-minute, path-bound download token, then opens the URL with ?dt=. Avoids
 // putting the long-lived bearer session token in URLs / browser history /
@@ -525,6 +624,7 @@ async function renderHome(root) {
     <div class="flex between" style="align-items: center; margin: 22px 4px 10px;">
       <div class="section-title" style="margin: 0;">Today's work orders</div>
       <div class="flex gap-12">
+        <button class="btn btn-ghost btn-sm" id="mxSyncBtn" title="Pull your work orders and logged time from MaintainX">⟳ Sync MaintainX</button>
         <button class="btn btn-ghost btn-sm" id="homeUploadInvBtn" title="Upload a pre-existing invoice PDF">📄 Upload invoice</button>
         <button class="btn btn-primary btn-sm" id="newWoBtn">＋ New WO</button>
       </div>
@@ -579,6 +679,7 @@ async function renderHome(root) {
     else                       goto('invoice');
   });
   $('#newWoBtn')?.addEventListener('click', () => goto('woAdd'));
+  $('#mxSyncBtn')?.addEventListener('click', (e) => mxSyncAll(e.currentTarget));
   $('#homeUploadInvBtn')?.addEventListener('click', openTechUploadSheet);
   $$('.card.tap[data-inv]').forEach(c => c.addEventListener('click', () => goto('invDetail', Number(c.dataset.inv))));
 
@@ -660,10 +761,28 @@ function labelForStatus(s) {
     rejected: 'Rejected', cancelled: 'Cancelled',
   }[s] || (s ? String(s).replace(/_/g, ' ') : ''));
 }
+// v0.67 — Viewer-aware status label. Ops Managers should never see the
+// Senior-Manager stage surfaced as its own status: an escalated invoice that a
+// Sr Mgr countersigned (approved_sr) reads simply as "Approved · ready for AP"
+// in the Ops Mgr's table. Every other role/status falls back to labelForStatus.
+function labelForStatusViewer(s, role) {
+  if (role === 'ops_manager' && s === 'approved_sr') return 'Approved · ready for AP';
+  return labelForStatus(s);
+}
 // Human-readable role labels (never surface raw role enums like "ops_manager").
 function roleLabel(r) {
   return ({ technician: 'Technician', ops_manager: 'Ops Manager',
     sr_manager: 'Sr Manager', pm: 'PM' }[r] || (r ? String(r).replace(/_/g, ' ') : ''));
+}
+// v0.67 — An invoice is cleared for the technician to send to AP once approval
+// is complete: ops-approved in the normal flow, or Sr Mgr-countersigned on an
+// escalated invoice. An escalated invoice still awaiting its Sr Mgr second look
+// (approved_ops + escalated_at) is NOT yet sendable. Mirrors trailFor().
+function readyToSendToAp(inv) {
+  if (!inv || inv.status === 'sent_ap') return false;
+  return inv.status === 'queued_ap'
+      || inv.status === 'approved_sr'
+      || (inv.status === 'approved_ops' && !inv.escalated_at);
 }
 function badgeForStatus(s) {
   if (s === 'sent_ap') return 'paid';   // reuse 'paid' badge styling for terminal state
@@ -729,6 +848,18 @@ async function renderWoDetail(root, woId) {
       </div>
     </div>
 
+    ${w.source_system === 'maintainx' ? `
+    <div class="section-title">MaintainX</div>
+    <div class="card">
+      <div class="flex between" style="align-items:center; gap:12px;">
+        <div style="min-width:0;">
+          <div style="font-size:13px;font-weight:600;">Synced from MaintainX</div>
+          <div style="font-size:12px;color:var(--muted);">Pull the latest status and import the time you logged in MaintainX as labor. Your own logged time is never overwritten.</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="mxSyncOneBtn" style="white-space:nowrap;">⟳ Sync</button>
+      </div>
+    </div>` : ''}
+
     ${w.summary && (w.summary.work_hours || w.summary.drive_hours || w.summary.distance_miles) ? `
       <div class="section-title">Shift summary</div>
       <div class="card">
@@ -762,7 +893,7 @@ async function renderWoDetail(root, woId) {
             <div class="card" style="padding: 14px;">
               <div class="flex between">
                 <div>
-                  <span class="badge ${isDrive ? 'pending' : 'approved'}">${isDrive ? '🚗 Drive' : '🛠 Work'}</span>
+                  <span class="badge ${isDrive ? 'pending' : 'approved'}">${isDrive ? '🚗 Drive' : '🛠 Work'}</span>${(t.source === 'maintainx_sync') ? '<span class="badge gray" style="margin-left:6px;">MaintainX</span>' : ''}
                   <strong style="margin-left: 8px;">${new Date(t.clock_in).toLocaleDateString()}</strong>${t.tech_name ? `<span class="meta"> · ${escapeHTML(t.tech_name)}</span>` : ''}
                   <div class="meta">${new Date(t.clock_in).toLocaleTimeString()} → ${t.clock_out ? new Date(t.clock_out).toLocaleTimeString() : 'running'}</div>
                 </div>
@@ -818,6 +949,7 @@ async function renderWoDetail(root, woId) {
       goto('woDetail', w.id);
     } catch (e) { toast(e.message, 'err'); }
   }));
+  $('#mxSyncOneBtn')?.addEventListener('click', (e) => mxSyncOne(w.id, e.currentTarget));
   $('#clockToWO').addEventListener('click', () => clockIn(w.id));
   $('#addExpToWO').addEventListener('click', () => {
     STATE._prefillWO = w.id;
@@ -4534,6 +4666,9 @@ function openNewTechSheet() {
 // All invoices view (manager scope) — shows every invoice the manager can see
 // across all statuses, with quick filter buttons. Reads /api/team-invoices.
 async function renderAllInvoices(root) {
+  const me = STATE.user;
+  // v0.67 — Ops Managers don't see the Senior-Manager stage as its own status.
+  const isOps = me.role === 'ops_manager';
   const filter = STATE._allInvFilter || 'all';
   const all = await api(`/team-invoices`);
   const counts = all.reduce((m, i) => (m[i.status] = (m[i.status] || 0) + 1, m), {});
@@ -4553,7 +4688,7 @@ async function renderAllInvoices(root) {
     <div class="card" style="background: var(--ic-green-deep); color: #fff; border: 0; margin-bottom: 14px;">
       <div class="flex between" style="align-items: center;">
         <div>
-          <div class="label" style="color: #b5e8a3;">${escapeHTML(filter === 'all' ? 'All invoices' : labelForStatus(filter))}</div>
+          <div class="label" style="color: #b5e8a3;">${escapeHTML(filter === 'all' ? 'All invoices' : labelForStatusViewer(filter, me.role))}</div>
           <div style="font-size: 28px; font-weight: 800; margin-top: 4px;">${filtered.length} <span style="font-size: 14px; font-weight: 500; color: #cde9c9;">invoice${filtered.length===1?'':'s'}</span></div>
         </div>
         <div style="text-align: right;">
@@ -4565,7 +4700,10 @@ async function renderAllInvoices(root) {
 
     <div class="chips" style="margin-bottom: 14px; flex-wrap: wrap;">
       ${filterChip('all', 'All', all.length)}
-      ${Object.entries(counts).map(([k, n]) => filterChip(k, labelForStatus(k), n)).join('')}
+      ${Object.entries(counts)
+        // v0.67 — Ops Mgr table never exposes a "Sr Mgr approved" filter chip.
+        .filter(([k]) => !(isOps && k === 'approved_sr'))
+        .map(([k, n]) => filterChip(k, labelForStatusViewer(k, me.role), n)).join('')}
     </div>
 
     ${filtered.length === 0
@@ -4577,7 +4715,7 @@ async function renderAllInvoices(root) {
                 <div style="font-weight: 700; font-size: 15px;">${escapeHTML(inv.tech_name)}</div>
                 <div class="meta" style="margin-top: 4px;">${inv.invoice_number} · ${fmtDate(inv.period_start)} → ${fmtDate(inv.period_end)}</div>
                 <div style="margin-top: 8px;">
-                  <span class="badge ${badgeForStatus(inv.status)}">${escapeHTML(labelForStatus(inv.status))}</span>
+                  <span class="badge ${badgeForStatus(inv.status)}">${escapeHTML(labelForStatusViewer(inv.status, me.role))}</span>
                 </div>
               </div>
               <div style="text-align: right;">
@@ -7493,6 +7631,9 @@ async function renderMine(root) {
   })();
   const currentDraft = all.find(i => i.status === 'draft' && i.period_start === thisWeekStart);
   const others = all.filter(i => i.id !== (currentDraft && currentDraft.id));
+  // v0.67 — invoices the Ops Mgr approved that now await this tech's final step:
+  // verify the details and send to AP.
+  const awaitingSend = all.filter(readyToSendToAp);
 
   let filter = 'all';
   let page = 0;   // v0.34 — paginated 10/page; resets when filter changes
@@ -7508,6 +7649,23 @@ async function renderMine(root) {
   function html() {
     const filtered = others.filter(match);
     return `
+      <!-- v0.67 — Verify & send notification. Ops approval is the final approval;
+           once approved, the tech does the AP hand-off themselves. -->
+      ${awaitingSend.length ? `
+        <div class="card" style="border-left: 4px solid var(--ic-orange); background: #fff8e7; padding: 14px; margin-bottom: 14px;">
+          <div style="font-weight: 700; font-size: 14px; color: var(--ic-green-deep);">🔔 ${awaitingSend.length} invoice${awaitingSend.length===1?'':'s'} approved — verify &amp; send to AP</div>
+          <div style="font-size: 12px; color: var(--ink-2); margin-top: 4px;">Your Ops Manager approved ${awaitingSend.length===1?'it':'them'}. Review the details, then send to Accounts Payable.</div>
+          <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 6px;">
+            ${awaitingSend.slice(0, 5).map(inv => `
+              <button class="btn btn-warn btn-sm" data-send-inv="${inv.id}" style="display:flex; justify-content: space-between; align-items:center;">
+                <span>${escapeHTML(inv.invoice_number)} · ${fmtDate(inv.period_start)} → ${fmtDate(inv.period_end)}</span>
+                <span>${fmt$(inv.total)} →</span>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+
       <!-- THIS WEEK card (always shown, prominent) -->
       <div class="section-title">This week</div>
       ${currentDraft
@@ -7590,6 +7748,7 @@ async function renderMine(root) {
   function bind() {
     $('#openCurrent')?.addEventListener('click', () => goto('invoice'));
     $('#openCurrentNew')?.addEventListener('click', () => goto('invoice'));
+    $$('[data-send-inv]').forEach(b => b.addEventListener('click', () => goto('invDetail', Number(b.dataset.sendInv))));
     $('#newInvBtn')?.addEventListener('click', openPastInvoiceSheet);
     $('#customInvBtn')?.addEventListener('click', openCustomPeriodSheet);
     $('#techUploadInvBtn')?.addEventListener('click', openTechUploadSheet);
@@ -7954,7 +8113,7 @@ async function renderInvoiceDetail(root, invoiceId) {
          here, instead of having to scroll past the entire invoice doc to
          find it. The existing card lower on the page still renders for the
          workflow context. -->
-    ${['approved_ops','approved_sr'].includes(invoice.status) && (
+    ${readyToSendToAp(invoice) && (
         invoice.user_id === me.id ||
         ['sr_manager','pm'].includes(me.role) ||
         (me.role === 'ops_manager' && isManagerView)
@@ -7963,12 +8122,12 @@ async function renderInvoiceDetail(root, invoiceId) {
         <div class="flex between" style="align-items: center; gap: 12px;">
           <div style="flex: 1; min-width: 0;">
             <div style="font-size: 13px; font-weight: 700; color: var(--ic-green-deep);">
-              ✅ ${invoice.status === 'approved_sr' ? 'Sr Mgr countersigned — ready for AP' : 'Ops Mgr approved — ready for AP'}
+              ✅ ${invoice.status === 'approved_sr' ? 'Approved — verify & send to AP' : 'Ops Mgr approved — verify & send to AP'}
             </div>
             <div style="font-size: 12px; color: var(--ink-2); margin-top: 4px;">
               ${invoice.user_id === me.id
-                ? 'Send this invoice straight to Accounts Payable — we generate the PDF and email it for you.'
-                : 'Hand-off ready. Tap to send the PDF to AP.'}
+                ? 'Review the details below, then send to Accounts Payable — we generate the PDF and email it for you.'
+                : 'Hand-off ready. Verify the details, then send the PDF to AP.'}
             </div>
           </div>
           <button class="btn btn-warn" id="sendToApBtnTop" style="flex-shrink: 0;">📧 Send to AP →</button>
@@ -8490,17 +8649,17 @@ async function renderInvoiceDetail(root, invoiceId) {
       </div>
     ` : ''}
 
-    ${['approved_ops','approved_sr'].includes(invoice.status) && (
+    ${readyToSendToAp(invoice) && (
         invoice.user_id === me.id ||
         ['sr_manager','pm'].includes(me.role) ||
         (me.role === 'ops_manager' && isManagerView)
       ) ? `
         <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-orange); padding: 16px; background: #fff8f0;">
-          <strong>✅ ${invoice.status === 'approved_sr' ? 'Sr Mgr countersigned — ready for AP' : 'Ops Mgr approved — ready for AP'}</strong>
+          <strong>✅ ${invoice.status === 'approved_sr' ? 'Approved — verify & send to AP' : 'Ops Mgr approved — verify & send to AP'}</strong>
           <p class="help" style="margin: 6px 0 12px;">
-            ${invoice.status === 'approved_ops'
-              ? 'Senior Manager review is optional. Send to AP now, or wait for Sr Mgr countersign if your team requires it.'
-              : 'All approvals captured. Sending generates a PDF, attaches it to this invoice, and emails it to AP.'}
+            ${invoice.user_id === me.id
+              ? 'This invoice is approved and ready. Verify the details above, then send it to Accounts Payable — we generate the PDF and email it.'
+              : 'Approval is complete. Verify the details, then send: we generate a PDF, attach it to this invoice, and email it to AP.'}
           </p>
           <div class="actions">
             <button class="btn btn-warn" id="sendToApBtn">📧 Send to AP</button>
@@ -8762,26 +8921,45 @@ async function renderInvoiceDetail(root, invoiceId) {
 }
 
 function trailFor(inv) {
-  // v0.65 — Sr Mgr approval is REQUIRED (no longer optional). Escalation is
-  // shown distinctly and never counts as an Ops approval.
+  // v0.67 — Ops approval is the FINAL approval in the standard tech-labor flow:
+  //   Submitted → Ops Manager approved → Sent to AP
+  // The Senior Manager step is no longer part of the normal path; it appears
+  // only when an Ops Mgr ESCALATED the invoice for an optional second look (the
+  // escalation safety valve). We track the lifecycle up to the AP hand-off only.
   const escalated   = !!inv.escalated_at;
   const opsApproved = !!inv.approved_ops_at;
+  const srApproved  = !!inv.approved_sr_at;
+  const sent        = inv.status === 'sent_ap';
+  // Cleared for the tech to send once approval is complete: ops-approved
+  // (normal) or Sr Mgr-countersigned (escalated), and not yet sent.
+  const readyToSend = !sent && (
+    inv.status === 'queued_ap' ||
+    inv.status === 'approved_sr' ||
+    (inv.status === 'approved_ops' && !escalated)
+  );
+
   const steps = [
     { who: 'Submitted', done: !!inv.submitted_at, when: inv.submitted_at },
     {
       who: opsApproved ? 'Ops Manager approved' : (escalated ? 'Escalated to Sr Mgr by Ops' : 'Ops Manager review'),
-      done: opsApproved || escalated || ['approved_ops','approved_sr','queued_ap','sent_ap'].includes(inv.status),
+      done: opsApproved || ['approved_ops','approved_sr','queued_ap','sent_ap'].includes(inv.status),
       cur: inv.status === 'submitted',
       when: inv.approved_ops_at || inv.escalated_at,
     },
-    {
-      who: 'Senior Manager approval',
-      done: ['approved_sr','queued_ap','sent_ap'].includes(inv.status),
-      cur: inv.status === 'approved_ops',
-      when: inv.approved_sr_at,
-    },
-    { who: 'Sent to AP', done: inv.status === 'sent_ap', cur: ['queued_ap','approved_sr'].includes(inv.status), when: inv.sent_to_ap_at },
   ];
+
+  // Escalation valve — only surfaced when the invoice was escalated to Sr Mgr.
+  if (escalated) {
+    steps.push({
+      who: 'Sr Mgr review (escalated)',
+      done: srApproved || ['approved_sr','queued_ap','sent_ap'].includes(inv.status),
+      cur: !srApproved && inv.status === 'approved_ops',   // awaiting Sr Mgr countersign
+      when: inv.approved_sr_at,
+    });
+  }
+
+  steps.push({ who: 'Sent to AP', done: sent, cur: readyToSend, when: inv.sent_to_ap_at });
+
   return `
     ${steps.map((s, i) => `
       <div class="trail-step ${s.done ? 'done' : (s.cur ? 'cur' : '')}">

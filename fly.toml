@@ -3,11 +3,11 @@
 # NOTE: `app` must be globally unique across all of Fly. If "otg-fieldcost" is
 # taken, change it (e.g. add your initials) OR just run `fly launch` and let it
 # pick a name — it will rewrite this line for you.
-app = "otg-fieldcost"
+app = "breadapp"
 
 # Pick a region close to your users. `fly platform regions` lists all of them.
 # iad = Ashburn, Virginia (US East). sjc = San Jose (US West).
-primary_region = "iad"
+primary_region = "lax"
 
 [build]
 
@@ -22,7 +22,7 @@ primary_region = "iad"
 # Persistent disk. Everything the app must keep — the SQLite database
 # (data/otg.db) AND uploaded receipts/PDFs (data/receipts/) — lives here and
 # survives deploys, restarts, and machine sleep.
-# Create it once with:  fly volume create otg_data --size 1 --region iad
+# Create it once with:  fly volume create otg_data --size 1 --region lax
 [mounts]
   source = "otg_data"
   destination = "/app/data"

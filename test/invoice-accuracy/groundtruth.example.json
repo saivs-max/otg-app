@@ -1,0 +1,30 @@
+{
+  "_note": "Ground truth established by reading pdf-parse text of each fixture. gt_total=null means the true total is not cleanly present in the extractable text (multi-page/scanned). parser_total_invalid=true marks cases where the parser emitted a number verified to be a non-total artifact (phone area code, street number, page number).",
+  "inv46":            { "type":"vendor",     "gt_total":426.05,  "vendor_name":"Kept Companies, Inc.", "invoice_number":"X-D173581" },
+  "inv50":            { "type":"vendor",     "gt_total":437.24,  "vendor_name":"Kept Companies, Inc.", "invoice_number":"X-D173580" },
+  "inv57":            { "type":"vendor",     "gt_total":381.63,  "vendor_name":"Kept Companies, Inc.", "invoice_number":"X-D175107" },
+  "inv58":            { "type":"vendor",     "gt_total":388.73,  "vendor_name":"Kept Companies, Inc.", "invoice_number":"X-D175108" },
+  "kept_xd112217":    { "type":"vendor",     "gt_total":535.00,  "vendor_name":"Kept Companies, Inc.", "invoice_number":"X-D112217" },
+  "kept_xd115055":    { "type":"vendor",     "gt_total":535.00,  "vendor_name":"Kept Companies, Inc.", "invoice_number":"X-D115055" },
+  "kept_xd115056":    { "type":"vendor",     "gt_total":535.00,  "vendor_name":"Kept Companies, Inc.", "invoice_number":"X-D115056" },
+  "kept_xd117208":    { "type":"vendor",     "gt_total":220.00,  "vendor_name":"Kept Companies, Inc.", "invoice_number":"X-D117208" },
+  "kept_xk198051":    { "type":"vendor",     "gt_total":750.60,  "vendor_name":"Kept Companies, Inc.", "invoice_number":"x-K198051" },
+
+  "sbot_camp0032":    { "type":"contractor", "gt_total":1274.50, "invoice_number":"0032" },
+  "sbot_halas0003":   { "type":"contractor", "gt_total":1084.40, "invoice_number":"0003" },
+  "sbot_moore0009":   { "type":"contractor", "gt_total":600.00,  "invoice_number":"0009" },
+  "sbot_rhames0007":  { "type":"contractor", "gt_total":492.20,  "invoice_number":"0007" },
+  "sbot_warner0082":  { "type":"contractor", "gt_total":3451.01, "invoice_number":"0082" },
+  "scan_inv44":       { "type":"contractor", "gt_total":4716.89, "invoice_number":"0045" },
+  "sbot_younan":      { "type":"contractor", "gt_total":600.00,  "invoice_number":"0021" },
+  "inv62":            { "type":"contractor", "gt_total":4364.10, "invoice_number":"0023", "note":"SUBTOTAL 3340.00 + Mileage 1024.10 = TOTAL 4364.10" },
+
+  "sbot_camp0027":    { "type":"contractor", "gt_total":null, "artifact_value":1,   "parser_total_note":"baseline parser=1 from 'Page 1 of'" },
+  "sbot_halas0004":   { "type":"contractor", "gt_total":null, "artifact_value":267, "parser_total_note":"baseline parser=267 from phone 267-524-6090" },
+  "scan_inv6":        { "type":"contractor", "gt_total":null, "artifact_value":950, "parser_total_note":"baseline parser=950 from address '950 Seven Hills Dr'" },
+  "scan_inv42":       { "type":"contractor", "gt_total":null, "artifact_value":950, "parser_total_note":"baseline parser=950 from address '950 Seven Hills Dr'" },
+  "scan_inv13":       { "type":"contractor", "gt_total":null, "artifact_value":413, "parser_total_note":"baseline parser=413 from phone 413-726-8985" },
+
+  "scan_karl0009":    { "type":"contractor", "gt_total":null, "parser_total_note":"parser=null (missed)" },
+  "sbot_camp0033":    { "type":"scanned",    "gt_total":null, "parser_total_note":"image-only PDF, 0 chars extracted" }
+}

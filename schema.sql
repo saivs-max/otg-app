@@ -176,6 +176,11 @@ CREATE TABLE IF NOT EXISTS time_entries (
   gps_lng_out       REAL,
   gps_accuracy_out  REAL,
   invoice_id        INTEGER REFERENCES invoices(id),
+  -- v0.67 — MaintainX sync provenance. 'app' = worker-entered (source of truth
+  -- for labor); 'maintainx_sync' = labor imported from MaintainX, idempotent
+  -- via external_ref. See lib/maintainx/labor.js.
+  source            TEXT    DEFAULT 'app',
+  external_ref      TEXT,
   created_at        TEXT    DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -421,4 +426,42 @@ CREATE TABLE IF NOT EXISTS work_types (
   archived_by  INTEGER REFERENCES users(id)
 );
 CREATE INDEX IF NOT EXISTS idx_work_types_active ON work_types(archived_at);
+
+-- v0.67 — MaintainX work-order sync (per-worker pull + labor import).
+-- Each worker connects their own MaintainX account; the access token is stored
+-- encrypted (AES-256-GCM) and never returned to the client. See lib/maintainx/.
+CREATE TABLE IF NOT EXISTS user_integrations (
+  id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id                 INTEGER NOT NULL REFERENCES users(id),
+  provider                TEXT    NOT NULL DEFAULT 'maintainx',
+  mx_user_id              TEXT,                       -- assignee id used to scope the worker's WOs
+  mx_org_id               TEXT,
+  access_token_enc        TEXT    NOT NULL,           -- AES-256-GCM ciphertext; never returned
+  token_type              TEXT    DEFAULT 'api_key',  -- 'api_key' | 'demo'
+  status                  TEXT    DEFAULT 'active' CHECK (status IN ('active','needs_reauth','disabled')),
+  last_sync_at            TEXT,
+  last_error              TEXT,
+  connected_at            TEXT    DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, provider)
+);
+
+-- Per-WO sync metadata + labor reconciliation state. PK on (provider,
+-- mx_workorder_id) gives upsert-by-MaintainX-id idempotency.
+CREATE TABLE IF NOT EXISTS wo_sync_state (
+  work_order_id     INTEGER REFERENCES work_orders(id),
+  provider          TEXT    NOT NULL DEFAULT 'maintainx',
+  mx_workorder_id   TEXT    NOT NULL,
+  mx_sequential_id  INTEGER,
+  mx_status         TEXT,
+  mx_updated_at     TEXT,
+  last_pulled_at    TEXT,
+  last_pushed_at    TEXT,                             -- reserved for the deferred writeback phase
+  labor_direction   TEXT,                             -- 'pull' | 'app_wins' | 'none'
+  labor_minutes     INTEGER,
+  labor_synced_at   TEXT,
+  content_hash      TEXT,
+  PRIMARY KEY (provider, mx_workorder_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_integrations_user ON user_integrations(user_id);
+CREATE INDEX IF NOT EXISTS idx_wo_sync_state_wo        ON wo_sync_state(work_order_id);
 

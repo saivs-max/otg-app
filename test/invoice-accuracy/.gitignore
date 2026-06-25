@@ -1,0 +1,6 @@
+# Never commit real invoices or local run artifacts
+fixtures/
+*.tsv
+report*.json
+score*.txt
+groundtruth.json

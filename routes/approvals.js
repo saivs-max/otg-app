@@ -67,6 +67,32 @@ function teamTechIds(db, managerUserId) {
     .all(managerUserId).map(r => r.tech_user_id);
 }
 
+// v0.67 — Ops approval is now the FINAL approval gate in the tech-labor flow.
+// Once a tech-labor invoice clears approval (Ops approval in the normal path, or
+// a Sr Mgr countersign on an escalated invoice), the technician owns the last
+// step: verify the invoice and send it to Accounts Payable. We record that as a
+// notification row so it surfaces on the tech's Invoices screen and in the
+// (mocked) outbound-email log. We track the lifecycle only up to the AP
+// hand-off, not the downstream payment status. Best-effort: a notify failure
+// must never block the approval transaction.
+function notifyTechVerifyAndSend(db, { invoice, approverUserId }) {
+  try {
+    const tech = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(invoice.user_id);
+    if (!tech) return;
+    const approver = db.prepare("SELECT name FROM users WHERE id = ?").get(approverUserId);
+    const subject = `Invoice ${invoice.invoice_number} approved — verify & send to AP`;
+    const body = `Your invoice ${invoice.invoice_number} was approved by ${approver?.name || 'your manager'}. `
+      + `Please review the details and send it to Accounts Payable from the invoice screen.`;
+    db.prepare(`
+      INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, status)
+      VALUES ('invoice_approved_for_ap', ?, ?, ?, ?, ?, 'logged')
+    `).run(invoice.id, approverUserId, tech.email || null, subject, body);
+    console.log(`🔔 [mock notify] To tech ${tech.email || tech.id} · ${subject}`);
+  } catch (e) {
+    console.error('notifyTechVerifyAndSend failed:', e.message);
+  }
+}
+
 module.exports = (db) => {
 
   // ===== Team management =====
@@ -173,7 +199,10 @@ module.exports = (db) => {
 
   // ===== Approval queue =====
   // Ops Mgr sees: invoices in 'submitted' state from techs on their team.
-  // Sr Mgr / PM sees: invoices in 'approved_ops' state (every invoice flows through).
+  // Sr Mgr / PM sees: only invoices the Ops Mgr ESCALATED for a secondary look
+  // (v0.67 — Ops approval is final in the normal flow, so non-escalated
+  // approved_ops invoices go straight to the tech to send to AP and no longer
+  // sit in the Sr Mgr queue), plus all submitted vendor invoices.
   router.get('/approvals/queue', (req, res) => {
     const userId = Number(req.header('x-user-id'));
     const me = getMe(db, userId);
@@ -198,11 +227,13 @@ module.exports = (db) => {
         ORDER BY i.submitted_at ASC
       `).all(...techIds);
     } else {
-      // Sr Mgr / PM: every approved_ops tech invoice + every submitted vendor invoice
+      // Sr Mgr / PM: only ESCALATED approved_ops tech invoices (optional second
+      // look) + every submitted vendor invoice. Non-escalated approved_ops
+      // invoices are final and belong to the tech's send-to-AP queue.
       rows = db.prepare(`
         SELECT i.*, u.name AS tech_name, u.worker_type AS tech_worker_type
         FROM invoices i JOIN users u ON u.id = i.user_id
-        WHERE (i.status = 'approved_ops')
+        WHERE (i.status = 'approved_ops' AND i.escalated_at IS NOT NULL)
            OR (i.status = 'submitted' AND i.invoice_type = 'vendor')
         ORDER BY i.escalated_at IS NULL, i.submitted_at ASC
       `).all();
@@ -281,6 +312,8 @@ module.exports = (db) => {
       `).run(now, userId, id);
       if (r.changes === 0) return res.status(409).json({ error: 'invoice state changed — refresh and retry' });
       logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: 'approve_ops' });
+      // v0.67 — Ops approval is final: hand off to the tech to verify & send to AP.
+      notifyTechVerifyAndSend(db, { invoice: inv, approverUserId: userId });
       return res.json(db.prepare("SELECT * FROM invoices WHERE id = ?").get(id));
     }
 
@@ -296,6 +329,9 @@ module.exports = (db) => {
       `).run(now, userId, id);
       if (r.changes === 0) return res.status(409).json({ error: 'invoice state changed — refresh and retry' });
       logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: 'approve_sr' });
+      // v0.67 — Final approval cleared on an escalated invoice: same hand-off —
+      // notify the tech to verify & send to AP.
+      notifyTechVerifyAndSend(db, { invoice: inv, approverUserId: userId });
       return res.json(db.prepare("SELECT * FROM invoices WHERE id = ?").get(id));
     }
 

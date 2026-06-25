@@ -8,6 +8,8 @@
   },
   "scripts": {
     "start": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env server.js",
+    "test:invoices": "node test/invoice-accuracy/run-accuracy.js",
+    "test:maintainx": "node --experimental-sqlite --no-warnings=ExperimentalWarning test/maintainx-sync/run.js && node --experimental-sqlite --no-warnings=ExperimentalWarning test/maintainx-sync/http-smoke.js",
     "seed": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env seed.js",
     "reset": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed.js",
     "seed:demo": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed-demo.js",
@@ -15,6 +17,7 @@
     "seed:director": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed-director-demo.js",
     "seed:unplanned": "npm run seed:demo && node --experimental-sqlite --no-warnings=ExperimentalWarning tag-unplanned-demo.js",
     "import-csv": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env import-csv.js",
+    "create-admin": "node --experimental-sqlite --no-warnings=ExperimentalWarning create-admin.js",
     "build:web": "cd redesign/react-app && npm install --no-audit --no-fund && npm run build:web"
   },
   "dependencies": {

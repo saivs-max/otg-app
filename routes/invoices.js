@@ -6,6 +6,7 @@ const rulesEvaluator = require('./rules');
 const { extractFromPdfBuffer } = require('../lib/pdfExtractor');
 const { importExtractedSummary } = require('../lib/pdfImporter');
 const { extractVendorPdf }       = require('../lib/vendorPdfExtractor');
+const { validateInvoice }        = require('../lib/invoiceValidation');
 const { generateInvoicePdf } = require('../lib/invoicePdf');
 
 module.exports = (db) => {
@@ -565,13 +566,20 @@ module.exports = (db) => {
         try {
           extractionResult = await extractFromPdfBuffer(buf);
           if (extractionResult.ok) {
+            // Validate the extraction BEFORE anything auto-posts. needs_review
+            // parses (scanned PDF, missing/suspect total, line items that don't
+            // reconcile) are stored for manual review but NOT auto-imported, so
+            // a bad parse can't reach the ledger. See lib/invoiceValidation.js.
+            const validation = validateInvoice({
+              kind: 'contractor', extraction: extractionResult, text: extractionResult.text });
+            extractionResult.validation = validation;
             db.prepare(`
               UPDATE invoices
               SET extracted_text = ?, extracted_summary = ?, extracted_at = ?
               WHERE id = ?
             `).run(
               extractionResult.text,
-              JSON.stringify(extractionResult.summary),
+              JSON.stringify({ ...extractionResult.summary, _validation: validation }),
               new Date().toISOString(),
               inv.id
             );
@@ -592,14 +600,22 @@ module.exports = (db) => {
               inv.period_start = pdfPeriod.start;
               inv.period_end   = pdfPeriod.end;
             }
-            // Auto-import line items, mileage, and tolls into the draft.
-            try {
-              const importRes = importExtractedSummary(db, inv, extractionResult.summary);
-              extractionResult.import = importRes;
+            // Auto-import line items, mileage, and tolls into the draft — but
+            // ONLY when validation passed. Held parses wait for manual review;
+            // the manager can fix fields and re-run POST /invoices/:id/import-pdf.
+            if (validation.needs_review) {
               logAudit(db, { entity_type: 'invoices', entity_id: inv.id, user_id: userId,
-                             action: 'pdf_auto_import', details: importRes });
-            } catch (e) {
-              console.error('PDF auto-import failed:', e.message);
+                             action: 'pdf_held_for_review',
+                             details: { confidence: validation.confidence, issues: validation.issues } });
+            } else {
+              try {
+                const importRes = importExtractedSummary(db, inv, extractionResult.summary);
+                extractionResult.import = importRes;
+                logAudit(db, { entity_type: 'invoices', entity_id: inv.id, user_id: userId,
+                               action: 'pdf_auto_import', details: importRes });
+              } catch (e) {
+                console.error('PDF auto-import failed:', e.message);
+              }
             }
           }
         } catch (e) {
@@ -614,8 +630,9 @@ module.exports = (db) => {
 
     const computed = computeInvoice(inv.id);
     if (extractionResult?.ok) {
-      computed.extracted = extractionResult.summary;
-      computed.import    = extractionResult.import;
+      computed.extracted  = extractionResult.summary;
+      computed.import     = extractionResult.import;
+      computed.validation = extractionResult.validation; // {confidence, needs_review, issues}
     }
     res.json(stripFlagsForTech(computed, userId));
   });
@@ -1219,6 +1236,12 @@ module.exports = (db) => {
           pdfBuf = Buffer.from(attachment.data_b64, 'base64');
           const r = await extractVendorPdf(pdfBuf);
           if (r.ok) {
+            // Validation gate. Vendor invoices already require a manual submit,
+            // so this never blocks auto-posting (there isn't any) — it surfaces
+            // issues (scanned PDF, total mismatch, line items that don't
+            // reconcile to the subtotal) on the preview so the Ops Mgr can catch
+            // them before submitting. See lib/invoiceValidation.js.
+            const validation = validateInvoice({ kind: 'vendor', extraction: r, text: r.text });
             extractedVendor = {
               vendor_name:           r.vendor_name,
               vendor_invoice_number: r.vendor_invoice_number,
@@ -1226,6 +1249,7 @@ module.exports = (db) => {
               total:                 r.total,
               line_items:            r.line_items || [],
               extracted_text:        r.extracted_text,
+              validation,
             };
             // Fill blanks from extraction. Anything the user typed wins.
             vendor_name           = vendor_name           || r.vendor_name;
@@ -1341,6 +1365,7 @@ module.exports = (db) => {
           vendor_invoice_date:   extractedVendor.vendor_invoice_date,
           total:                 extractedVendor.total,
           line_items:            extractedVendor.line_items || [],
+          _validation:           extractedVendor.validation,
         }),
         new Date().toISOString(),
         invoiceId

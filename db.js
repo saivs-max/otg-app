@@ -96,6 +96,11 @@ function ensureSchema(db) {
   // four line-item tables so ops managers can mark individual items as
   // wasted_labour, ad_hoc, or unexpected without changing any existing rows.
   migrateUnplannedColumns(db);
+  // v0.67 — MaintainX per-worker work-order sync. The new tables
+  // (user_integrations, wo_sync_state) are created by schema.sql; here we add
+  // labor-provenance columns to the existing time_entries table plus the
+  // idempotency index that keeps re-syncs from duplicating imported labor.
+  migrateMaintainXSync(db);
 }
 
 // v0.63 — Unplanned tagging. Tags are stored as a JSON array so one item can
@@ -498,6 +503,18 @@ function migrateAddColumn(db, table, column, type) {
     try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`); }
     catch (_) { /* column may have been added concurrently */ }
   }
+}
+
+// v0.67 — MaintainX sync: provenance columns on time_entries + an idempotency
+// index. Tables themselves live in schema.sql (CREATE TABLE IF NOT EXISTS).
+function migrateMaintainXSync(db) {
+  migrateAddColumn(db, 'time_entries', 'source',       "TEXT DEFAULT 'app'");
+  migrateAddColumn(db, 'time_entries', 'external_ref', 'TEXT');
+  // One imported entry per (source, external_ref): re-syncing updates in place
+  // rather than stacking duplicate labor. Partial index — only synced rows.
+  try {
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_time_entries_extref ON time_entries(source, external_ref) WHERE external_ref IS NOT NULL");
+  } catch (_) { /* partial-index unsupported on very old SQLite — non-fatal */ }
 }
 
 // ---------- shared business helpers ----------

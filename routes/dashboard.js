@@ -1233,14 +1233,35 @@ function buildCostTrackerRows(db, req) {
     ORDER BY w.scheduled_date, w.id
   `).all(...params);
 
+  // v0.66.1 — "Act Travel" now reconciles the tracker to the invoice / AP
+  // pipeline total. It carries BOTH drive-time labor (mode='drive', priced at
+  // the tech's hourly rate exactly as the invoice does) AND every non-labor
+  // expense line (mileage / tolls / parking + 'other' / 'vendor' / misc).
+  // Previously it summed only four travel expense categories, so drive labor
+  // and any 'other'/'vendor' expense were silently dropped from Act Total —
+  // that's why a $472 store could show as $115 in the tracker. This mirrors
+  // buildSubmittedApprovedInvoicesByStore:
+  //   visit_total = work-labor + drive-labor + (expenses NOT IN 'labor','drive')
   const travelByWo = {};
-  const tRows = db.prepare(`
-    SELECT work_order_id, COALESCE(SUM(amount), 0) AS travel
+  const driveRows = db.prepare(`
+    SELECT t.work_order_id AS wo, COALESCE(SUM(
+      CASE WHEN t.clock_out IS NOT NULL AND t.mode = 'drive'
+           THEN (julianday(t.clock_out) - julianday(t.clock_in)) * 24 * COALESCE(u.hourly_rate, 40)
+           ELSE 0 END
+    ), 0) AS drive
+    FROM time_entries t
+    LEFT JOIN users u ON u.id = t.user_id
+    WHERE t.work_order_id IS NOT NULL
+    GROUP BY t.work_order_id
+  `).all();
+  for (const r of driveRows) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.drive;
+  const nonLaborExpRows = db.prepare(`
+    SELECT work_order_id AS wo, COALESCE(SUM(amount), 0) AS exp
     FROM expenses
-    WHERE category IN ('mileage','tolls','travel','parking') AND work_order_id IS NOT NULL
+    WHERE category NOT IN ('labor','drive') AND work_order_id IS NOT NULL
     GROUP BY work_order_id
   `).all();
-  for (const r of tRows) travelByWo[r.work_order_id] = r.travel;
+  for (const r of nonLaborExpRows) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.exp;
 
   const monthName = (iso) => {
     if (!iso) return '';

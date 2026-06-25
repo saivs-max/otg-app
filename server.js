@@ -80,6 +80,7 @@ app.use('/api', require('./routes/corpcard')(db));
 app.use('/api', require('./routes/category_rules')(db));
 app.use('/api', require('./routes/work_types')(db));
 app.use('/api', require('./routes/unplanned')(db));   // v0.63 — unplanned/wasted-labour tagging
+app.use('/api', require('./routes/integrations')(db)); // v0.67 — MaintainX per-worker WO sync
 
 // Health check
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
