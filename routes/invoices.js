@@ -41,6 +41,25 @@ module.exports = (db) => {
     return { ok: false, error: 'not allowed on this invoice', status: 403 };
   }
 
+  // v0.67.1 (security) — Self-service invoice creation is for FIELD TECHNICIANS
+  // only. A tech_labor invoice's payee is its user_id, so letting a manager / PM
+  // create one for themselves mints an invoice payable to an approver — a
+  // segregation-of-duties hole (they could then submit → escalate → send-to-ap
+  // it with no second party). Managers file on a tech's behalf via
+  // POST /invoices/upload, which already enforces a technician payee (see below).
+  // Returns the user row, or null after sending the 401/403 response.
+  function requireSelfInvoiceTech(req, res) {
+    const userId = Number(req.header('x-user-id'));
+    if (!userId) { res.status(401).json({ error: 'no user selected' }); return null; }
+    const me = db.prepare("SELECT id, role FROM users WHERE id = ?").get(userId);
+    if (!me) { res.status(401).json({ error: 'no user selected' }); return null; }
+    if (me.role !== 'technician') {
+      res.status(403).json({ error: 'only technicians can create invoices for their own work — managers file on a technician’s behalf via upload' });
+      return null;
+    }
+    return me;
+  }
+
   // Find or create the draft invoice covering a specific week. If `forDate` is null,
   // uses the current week. Always attaches any orphaned time/expenses falling in that week.
   function ensureDraftForWeek(userId, forDate) {
@@ -385,8 +404,10 @@ module.exports = (db) => {
 
   // GET /api/invoices/current  → current-week draft (creates if needed)
   router.get('/invoices/current', (req, res) => {
-    const userId = Number(req.header('x-user-id'));
-    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    // v0.67.1 — technician-only: a "current draft" is a self-invoice (payee =
+    // caller). Managers/PMs are approvers, not payees, and have no own draft.
+    const me = requireSelfInvoiceTech(req, res); if (!me) return;
+    const userId = me.id;
     const inv = ensureCurrentDraft(userId);
     res.json(stripFlagsForTech(computeInvoice(inv.id), userId));
   });
@@ -779,8 +800,10 @@ module.exports = (db) => {
   // Already-attached entries are left alone so we never steal from a submitted
   // invoice; if you re-run the same period, only new orphans get pulled in.
   router.post('/invoices/custom-period', (req, res) => {
-    const userId = Number(req.header('x-user-id'));
-    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    // v0.67.1 — technician-only self-create (payee = caller). See
+    // requireSelfInvoiceTech: managers use POST /invoices/upload on a tech's behalf.
+    const me = requireSelfInvoiceTech(req, res); if (!me) return;
+    const userId = me.id;
 
     const { period_start, period_end, work_order_ids } = req.body || {};
     if (!period_start || !period_end) return res.status(400).json({ error: 'period_start and period_end required (YYYY-MM-DD)' });
@@ -852,8 +875,10 @@ module.exports = (db) => {
   // Creates (or returns) a draft invoice for the week containing the given date.
   // Used for retroactive entries — tech can backfill an old week and submit it.
   router.post('/invoices/for-week', (req, res) => {
-    const userId = Number(req.header('x-user-id'));
-    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    // v0.67.1 — technician-only self-create (payee = caller). See
+    // requireSelfInvoiceTech: managers use POST /invoices/upload on a tech's behalf.
+    const me = requireSelfInvoiceTech(req, res); if (!me) return;
+    const userId = me.id;
     const date = (req.body.week_of || '').trim();
     if (!date) return res.status(400).json({ error: 'week_of (YYYY-MM-DD) required' });
     const d = new Date(date);
