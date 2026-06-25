@@ -466,3 +466,34 @@ CREATE TABLE IF NOT EXISTS wo_sync_state (
 CREATE INDEX IF NOT EXISTS idx_user_integrations_user ON user_integrations(user_id);
 CREATE INDEX IF NOT EXISTS idx_wo_sync_state_wo        ON wo_sync_state(work_order_id);
 
+-- v0.68 — "Add work orders to an already-submitted week" requests.
+--
+-- Once a tech submits a week's invoice it locks (only drafts are editable). If
+-- the tech later realizes they need to bill additional work orders for that same
+-- week, they file a request against the locked invoice. The Ops Manager (the
+-- tech's team manager, or a Sr Mgr / PM) decides:
+--   • DENIED   → the request is returned to the tech with a reason + notification;
+--                the original invoice is untouched.
+--   • APPROVED → a NEW supplemental draft invoice is generated for the SAME week
+--                (new_invoice_id) pre-seeded with the requested work orders; the
+--                tech is notified with a link to finish + submit it.
+-- One pending request per invoice at a time (enforced in the route layer).
+CREATE TABLE IF NOT EXISTS wo_addition_requests (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  invoice_id      INTEGER NOT NULL REFERENCES invoices(id),  -- the locked invoice this is against
+  user_id         INTEGER NOT NULL REFERENCES users(id),     -- the technician requesting
+  period_start    TEXT    NOT NULL,                          -- copied from the invoice for convenience
+  period_end      TEXT    NOT NULL,
+  requested_wos   TEXT,                                      -- raw ticket list the tech entered (audit/display)
+  note            TEXT,                                      -- tech's explanation of what's being added
+  status          TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','denied')),
+  decided_by      INTEGER REFERENCES users(id),              -- manager who approved/denied
+  decided_at      TEXT,
+  decision_reason TEXT,                                      -- required on denial; optional note on approval
+  new_invoice_id  INTEGER REFERENCES invoices(id),           -- supplemental invoice minted on approval
+  created_at      TEXT    DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_woadd_invoice ON wo_addition_requests(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_woadd_user    ON wo_addition_requests(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_woadd_status  ON wo_addition_requests(status);
+

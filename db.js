@@ -105,6 +105,9 @@ function ensureSchema(db) {
   // labor-provenance columns to the existing time_entries table plus the
   // idempotency index that keeps re-syncs from duplicating imported labor.
   migrateMaintainXSync(db);
+  // v0.68 — "Add work orders to an already-submitted week" requests. The
+  // wo_addition_requests table is created by schema.sql above (CREATE TABLE IF
+  // NOT EXISTS, applied on every boot); no column migration is needed.
 }
 
 // v0.63 — Unplanned tagging. Tags are stored as a JSON array so one item can

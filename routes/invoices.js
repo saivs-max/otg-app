@@ -1074,6 +1074,382 @@ module.exports = (db) => {
     res.json(stripFlagsForTech({ ...computed, invoice: { ...computed.invoice, status: 'submitted', submitted_at: now }}, userId));
   });
 
+  // ════════════════════════════════════════════════════════════════════════
+  // v0.68 — "Add work orders to an already-submitted week" requests.
+  // ------------------------------------------------------------------------
+  // Once a week's invoice is submitted it locks (only drafts are editable). If
+  // the tech later needs to bill extra work orders for that SAME week, they file
+  // a request against the locked invoice; the Ops Mgr (team) — or a Sr Mgr / PM
+  // — decides:
+  //   • DENY    → request returned to the tech with a reason + notification;
+  //               the original invoice is left untouched.
+  //   • APPROVE → a NEW supplemental DRAFT invoice is minted for the same week,
+  //               pre-seeded with the requested work orders (and any orphan
+  //               time/expenses for them swept in); the tech is notified with a
+  //               link to finish + submit it.
+  // ════════════════════════════════════════════════════════════════════════
+
+  // Invoice statuses where the invoice is locked to the tech (past draft) and is
+  // therefore a candidate for an add-work-orders request. A 'rejected' invoice
+  // is reverted to 'draft' by the reject route, so it's editable directly.
+  const LOCKED_INVOICE_STATUSES = ['submitted','in_review','approved_ops','approved_sr','queued_ap','sent_ap'];
+
+  // Parse free-form ticket input ("12816, MX-RPR-97461873\n12827") into distinct
+  // ticket tokens. Accepts canonical external_ids or bare numbers.
+  function parseTicketTokens(text) {
+    const out = [], seen = new Set();
+    for (const raw of String(text || '').split(/[\s,;]+/)) {
+      const tok = raw.trim();
+      if (!tok) continue;
+      const key = tok.toUpperCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(tok);
+    }
+    return out;
+  }
+
+  // Find (or create) a work order for a tech-entered ticket token and make sure
+  // it's assigned to the tech. Mirrors POST /invoices/:id/link-wo, but the tech
+  // needn't know the source system: we match an existing WO by canonical id /
+  // trailing ticket / source_ticket_id, and only mint a placeholder (defaulting
+  // to MaintainX) when nothing matches.
+  function resolveWoForTech(token, techUserId, actorUserId) {
+    const t = String(token).trim();
+    let wo = db.prepare("SELECT * FROM work_orders WHERE external_id = ?").get(t)
+      || db.prepare("SELECT * FROM work_orders WHERE external_id LIKE ?").get(`%-${t}`)
+      || db.prepare("SELECT * FROM work_orders WHERE source_ticket_id = ?").get(t);
+    if (wo) {
+      if (wo.assigned_user_id !== techUserId) {
+        db.prepare("UPDATE work_orders SET assigned_user_id = ? WHERE id = ?").run(techUserId, wo.id);
+      }
+      return { wo, created: false };
+    }
+    // Mint a placeholder. Default to MaintainX (matches link-wo's default for
+    // short/ambiguous ids); the tech/manager can refine details later.
+    const ticketDigits = t.replace(/[^0-9]/g, '') || t;
+    let external_id = /^[A-Za-z]{2}-/.test(t) ? t : `MX-MNT-${ticketDigits}`;
+    if (db.prepare("SELECT 1 FROM work_orders WHERE external_id = ?").get(external_id)) {
+      external_id = `${external_id}-${Date.now()}`;
+    }
+    const r = db.prepare(`
+      INSERT INTO work_orders
+        (external_id, source_system, source_ticket_id, work_type, store_name, cart_count, status, assigned_user_id)
+      VALUES (?, 'maintainx', ?, 'maintenance', '(added via week-supplement request — refine details)', 1, 'in_progress', ?)
+    `).run(external_id, ticketDigits, techUserId);
+    const created = db.prepare("SELECT * FROM work_orders WHERE id = ?").get(r.lastInsertRowid);
+    logAudit(db, { entity_type: 'work_orders', entity_id: created.id, user_id: actorUserId,
+                   action: 'created_from_wo_addition', details: { token: t } });
+    return { wo: created, created: true };
+  }
+
+  // Notify the tech's Ops Manager(s) that a request was filed (mock email + the
+  // notifications audit log; the request also surfaces in their queue). Best-effort.
+  function notifyManagersOfRequest({ invoice, request, techUserId }) {
+    try {
+      const mgrs = db.prepare(`
+        SELECT u.id, u.email FROM manager_team mt JOIN users u ON u.id = mt.manager_user_id
+        WHERE mt.tech_user_id = ?
+      `).all(techUserId);
+      const tech = db.prepare("SELECT name FROM users WHERE id = ?").get(techUserId);
+      const subject = `Work-order addition requested · week ${invoice.period_start} → ${invoice.period_end}`;
+      const body = `${tech?.name || 'A technician'} asked to add work orders to invoice ${invoice.invoice_number} (already ${invoice.status}). `
+        + `Requested: ${request.requested_wos}.` + (request.note ? ` Note: ${request.note}` : '');
+      for (const m of mgrs) {
+        db.prepare(`
+          INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, status)
+          VALUES ('wo_addition_requested', ?, ?, ?, ?, ?, 'logged')
+        `).run(invoice.id, techUserId, m.email || null, subject, body);
+      }
+      console.log(`🔔 [mock notify] WO-addition request on ${invoice.invoice_number} → ${mgrs.length} manager(s)`);
+    } catch (e) {
+      console.error('notifyManagersOfRequest failed:', e.message);
+    }
+  }
+
+  // Notify the tech of the manager's decision. On approval the notification
+  // points at the NEW supplemental invoice; on denial, at the original. Best-effort.
+  function notifyTechOfDecision({ request, decided, approverUserId, approverName, reason, newInvoiceId, newInvoiceNumber }) {
+    try {
+      const tech = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(request.user_id);
+      if (!tech) return;
+      let kind, subject, body, invoiceId;
+      if (decided === 'approved') {
+        kind = 'wo_addition_approved'; invoiceId = newInvoiceId;
+        subject = `Work orders approved — new invoice ${newInvoiceNumber}`;
+        body = `Your request to add work orders for the week of ${request.period_start} → ${request.period_end} was approved by ${approverName || 'your manager'}. `
+          + `A new invoice (${newInvoiceNumber}) was created for that week with the requested work orders — open it to add hours/expenses and submit.`;
+      } else {
+        kind = 'wo_addition_denied'; invoiceId = request.invoice_id;
+        subject = `Work-order addition not approved`;
+        body = `Your request to add work orders for the week of ${request.period_start} → ${request.period_end} was not approved by ${approverName || 'your manager'}.`
+          + (reason ? ` Reason: ${reason}` : '');
+      }
+      db.prepare(`
+        INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'logged')
+      `).run(kind, invoiceId || null, approverUserId || null, tech.email || null, subject, body);
+      console.log(`🔔 [mock notify] To tech ${tech.email || tech.id} · ${subject}`);
+    } catch (e) {
+      console.error('notifyTechOfDecision failed:', e.message);
+    }
+  }
+
+  // POST /api/invoices/:id/request-additional-wos  { wos, note? }
+  // The owning technician asks to add work orders to a week that's already
+  // submitted/locked. Creates a 'pending' request for the Ops Mgr to decide.
+  router.post('/invoices/:id/request-additional-wos', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    const id = Number(req.params.id);
+    const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(id);
+    if (!inv) return res.status(404).json({ error: 'invoice not found' });
+    // Only the owning technician can ask to add work orders to their own week.
+    if (inv.user_id !== userId) {
+      return res.status(403).json({ error: 'only the invoice owner can request to add work orders' });
+    }
+    if (inv.invoice_type === 'vendor') {
+      return res.status(400).json({ error: 'work-order additions apply to tech-labor invoices only' });
+    }
+    if (!LOCKED_INVOICE_STATUSES.includes(inv.status)) {
+      return res.status(409).json({ error: `this invoice is ${inv.status} — just edit it directly and add the work orders` });
+    }
+    const body = req.body || {};
+    const wosRaw = String(body.wos ?? body.work_orders ?? '').trim();
+    const note   = String(body.note ?? '').trim();
+    if (!wosRaw) return res.status(400).json({ error: 'list at least one work order (ticket # or WO id)' });
+    if (wosRaw.length > 2000) return res.status(400).json({ error: 'work-order list too long (max 2000 chars)' });
+    if (note.length > 2000)   return res.status(400).json({ error: 'note too long (max 2000 chars)' });
+    const tokens = parseTicketTokens(wosRaw);
+    if (!tokens.length) return res.status(400).json({ error: 'could not read any work-order references from your input' });
+
+    // One open request per invoice at a time.
+    const open = db.prepare("SELECT id FROM wo_addition_requests WHERE invoice_id = ? AND status = 'pending'").get(id);
+    if (open) return res.status(409).json({ error: 'there is already a pending add-work-orders request for this invoice' });
+
+    const r = db.prepare(`
+      INSERT INTO wo_addition_requests (invoice_id, user_id, period_start, period_end, requested_wos, note, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending')
+    `).run(id, userId, inv.period_start, inv.period_end, wosRaw, note || null);
+    const reqId = r.lastInsertRowid;
+
+    logAudit(db, { entity_type: 'wo_addition_requests', entity_id: reqId, user_id: userId,
+                   action: 'request_additional_wos', details: { invoice_id: id, tokens } });
+    notifyManagersOfRequest({ invoice: inv, request: { requested_wos: wosRaw, note }, techUserId: userId });
+
+    res.json(db.prepare("SELECT * FROM wo_addition_requests WHERE id = ?").get(reqId));
+  });
+
+  // GET /api/invoices/:id/addition-requests — requests filed against an invoice,
+  // newest first. Visible to the owning tech and to managers who can act on it.
+  router.get('/invoices/:id/addition-requests', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    const id = Number(req.params.id);
+    const perm = canActOnInvoice(id, userId);
+    if (!perm.ok) return res.status(perm.status || 403).json({ error: perm.error });
+    const rows = db.prepare(`
+      SELECT wr.*, ni.invoice_number AS new_invoice_number, ni.status AS new_invoice_status,
+             du.name AS decided_by_name
+      FROM wo_addition_requests wr
+      LEFT JOIN invoices ni ON ni.id = wr.new_invoice_id
+      LEFT JOIN users    du ON du.id = wr.decided_by
+      WHERE wr.invoice_id = ?
+      ORDER BY wr.created_at DESC
+    `).all(id);
+    res.json(rows);
+  });
+
+  // GET /api/addition-requests/mine — the caller's own requests across invoices,
+  // newest first. Powers the tech's "request decided" notification banner.
+  router.get('/addition-requests/mine', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    const rows = db.prepare(`
+      SELECT wr.*, oi.invoice_number AS source_invoice_number,
+             ni.invoice_number AS new_invoice_number, ni.status AS new_invoice_status,
+             du.name AS decided_by_name
+      FROM wo_addition_requests wr
+      JOIN invoices oi      ON oi.id = wr.invoice_id
+      LEFT JOIN invoices ni ON ni.id = wr.new_invoice_id
+      LEFT JOIN users    du ON du.id = wr.decided_by
+      WHERE wr.user_id = ?
+      ORDER BY wr.created_at DESC
+      LIMIT 50
+    `).all(userId);
+    res.json(rows);
+  });
+
+  // GET /api/addition-requests/queue — pending requests this manager can act on.
+  // Ops Mgr: requests from techs on their team. Sr Mgr / PM: all pending.
+  router.get('/addition-requests/queue', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    const me = userId ? db.prepare("SELECT id, role FROM users WHERE id = ?").get(userId) : null;
+    if (!me) return res.status(401).json({ error: 'no user selected' });
+    if (!['ops_manager','sr_manager','pm'].includes(me.role)) {
+      return res.status(403).json({ error: 'manager role required' });
+    }
+    let rows;
+    if (me.role === 'ops_manager') {
+      const techIds = db.prepare("SELECT tech_user_id FROM manager_team WHERE manager_user_id = ?")
+        .all(userId).map(r => r.tech_user_id);
+      if (!techIds.length) return res.json([]);
+      const ph = techIds.map(() => '?').join(',');
+      rows = db.prepare(`
+        SELECT wr.*, u.name AS tech_name, i.invoice_number AS source_invoice_number, i.status AS source_status
+        FROM wo_addition_requests wr
+        JOIN users u    ON u.id = wr.user_id
+        JOIN invoices i ON i.id = wr.invoice_id
+        WHERE wr.status = 'pending' AND wr.user_id IN (${ph})
+        ORDER BY wr.created_at ASC
+      `).all(...techIds);
+    } else {
+      rows = db.prepare(`
+        SELECT wr.*, u.name AS tech_name, i.invoice_number AS source_invoice_number, i.status AS source_status
+        FROM wo_addition_requests wr
+        JOIN users u    ON u.id = wr.user_id
+        JOIN invoices i ON i.id = wr.invoice_id
+        WHERE wr.status = 'pending'
+        ORDER BY wr.created_at ASC
+      `).all();
+    }
+    res.json(rows);
+  });
+
+  // POST /api/addition-requests/:reqId/approve  { note? }
+  // Ops Mgr (team) / Sr Mgr / PM. Mints a supplemental draft invoice for the
+  // same week pre-seeded with the requested work orders, then notifies the tech.
+  router.post('/addition-requests/:reqId/approve', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    const me = userId ? db.prepare("SELECT id, role, name FROM users WHERE id = ?").get(userId) : null;
+    if (!me) return res.status(401).json({ error: 'no user selected' });
+    if (!['ops_manager','sr_manager','pm'].includes(me.role)) {
+      return res.status(403).json({ error: 'manager role required' });
+    }
+    const reqId = Number(req.params.reqId);
+    const wr = db.prepare("SELECT * FROM wo_addition_requests WHERE id = ?").get(reqId);
+    if (!wr) return res.status(404).json({ error: 'request not found' });
+    if (wr.status !== 'pending') return res.status(409).json({ error: `request is ${wr.status}, not pending` });
+    if (wr.user_id === userId) return res.status(409).json({ error: 'you cannot decide your own request' });
+    if (me.role === 'ops_manager') {
+      const inTeam = db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, wr.user_id);
+      if (!inTeam) return res.status(403).json({ error: 'this technician is not on your team' });
+    }
+
+    const techUserId = wr.user_id;
+    const decisionNote = String((req.body && req.body.note) || '').trim() || null;
+
+    // Race-safe claim FIRST so concurrent approvals can't both mint invoices.
+    const now = new Date().toISOString();
+    const claim = db.prepare(`
+      UPDATE wo_addition_requests
+      SET status = 'approved', decided_by = ?, decided_at = ?, decision_reason = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(userId, now, decisionNote, reqId);
+    if (claim.changes === 0) return res.status(409).json({ error: 'request was already decided — refresh and retry' });
+
+    let newInvId, num, resolved = [];
+    try {
+      // 1) Mint a supplemental draft invoice for the SAME week (suffixed number).
+      const baseNum = invoiceNumber(techUserId, wr.period_end);
+      const used = new Set(db.prepare("SELECT invoice_number FROM invoices WHERE user_id = ? AND invoice_number LIKE ?")
+        .all(techUserId, `${baseNum}%`).map(r => r.invoice_number));
+      num = baseNum;
+      for (let code = 'A'.charCodeAt(0); used.has(num); code++) {
+        if (code > 'Z'.charCodeAt(0)) { num = `${baseNum}-${Date.now()}`; break; }
+        num = `${baseNum}-${String.fromCharCode(code)}`;
+      }
+      const supRes = db.prepare(`
+        INSERT INTO invoices (invoice_number, user_id, period_start, period_end, status, total, origin, created_by, notes)
+        VALUES (?, ?, ?, ?, 'draft', 0, 'tech_self', ?, ?)
+      `).run(num, techUserId, wr.period_start, wr.period_end, techUserId,
+             `Supplemental · added work orders for ${wr.period_start} → ${wr.period_end} (request #${reqId}, approved by ${me.name || 'manager'})`);
+      newInvId = supRes.lastInsertRowid;
+
+      // 2) Resolve each requested WO (find-or-create + assign to tech), then
+      //    sweep any orphan time/expenses for them in the week into the new draft.
+      const woIds = [];
+      for (const tok of parseTicketTokens(wr.requested_wos)) {
+        try {
+          const { wo, created } = resolveWoForTech(tok, techUserId, userId);
+          woIds.push(wo.id);
+          resolved.push({ token: tok, external_id: wo.external_id, created });
+        } catch (e) {
+          resolved.push({ token: tok, error: e.message });
+        }
+      }
+      if (woIds.length) {
+        const ph = woIds.map(() => '?').join(',');
+        db.prepare(`
+          UPDATE time_entries SET invoice_id = ?
+          WHERE user_id = ? AND invoice_id IS NULL AND clock_out IS NOT NULL
+            AND date(clock_in) BETWEEN ? AND ? AND work_order_id IN (${ph})
+        `).run(newInvId, techUserId, wr.period_start, wr.period_end, ...woIds);
+        db.prepare(`
+          UPDATE expenses SET invoice_id = ?
+          WHERE user_id = ? AND invoice_id IS NULL
+            AND date(expense_date) BETWEEN ? AND ? AND work_order_id IN (${ph})
+        `).run(newInvId, techUserId, wr.period_start, wr.period_end, ...woIds);
+      }
+
+      db.prepare("UPDATE wo_addition_requests SET new_invoice_id = ? WHERE id = ?").run(newInvId, reqId);
+    } catch (e) {
+      // Revert the claim so the manager can retry; nothing was returned to the client yet.
+      db.prepare("UPDATE wo_addition_requests SET status='pending', decided_by=NULL, decided_at=NULL, decision_reason=NULL, new_invoice_id=NULL WHERE id = ?").run(reqId);
+      console.error('approve wo-addition failed:', e.message);
+      return res.status(500).json({ error: 'could not create the supplemental invoice — please retry' });
+    }
+
+    logAudit(db, { entity_type: 'wo_addition_requests', entity_id: reqId, user_id: userId,
+                   action: 'approve_wo_addition', details: { new_invoice_id: newInvId, resolved } });
+    notifyTechOfDecision({ request: wr, decided: 'approved', approverUserId: userId,
+                           approverName: me.name, newInvoiceId: newInvId, newInvoiceNumber: num });
+
+    res.json({
+      ok: true,
+      request: db.prepare("SELECT * FROM wo_addition_requests WHERE id = ?").get(reqId),
+      new_invoice: { id: newInvId, invoice_number: num, period_start: wr.period_start, period_end: wr.period_end },
+      work_orders: resolved,
+    });
+  });
+
+  // POST /api/addition-requests/:reqId/deny  { reason }
+  // Ops Mgr (team) / Sr Mgr / PM. Returns the request to the tech with a reason.
+  router.post('/addition-requests/:reqId/deny', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    const me = userId ? db.prepare("SELECT id, role, name FROM users WHERE id = ?").get(userId) : null;
+    if (!me) return res.status(401).json({ error: 'no user selected' });
+    if (!['ops_manager','sr_manager','pm'].includes(me.role)) {
+      return res.status(403).json({ error: 'manager role required' });
+    }
+    const reqId = Number(req.params.reqId);
+    const wr = db.prepare("SELECT * FROM wo_addition_requests WHERE id = ?").get(reqId);
+    if (!wr) return res.status(404).json({ error: 'request not found' });
+    if (wr.status !== 'pending') return res.status(409).json({ error: `request is ${wr.status}, not pending` });
+    if (wr.user_id === userId) return res.status(409).json({ error: 'you cannot decide your own request' });
+    if (me.role === 'ops_manager') {
+      const inTeam = db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, wr.user_id);
+      if (!inTeam) return res.status(403).json({ error: 'this technician is not on your team' });
+    }
+    const reason = String((req.body && req.body.reason) || '').trim();
+    if (reason.length < 5) return res.status(400).json({ error: 'a reason is required (min 5 chars)' });
+    if (reason.length > 2000) return res.status(400).json({ error: 'reason too long (max 2000 chars)' });
+
+    const now = new Date().toISOString();
+    const upd = db.prepare(`
+      UPDATE wo_addition_requests
+      SET status = 'denied', decided_by = ?, decided_at = ?, decision_reason = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(userId, now, reason, reqId);
+    if (upd.changes === 0) return res.status(409).json({ error: 'request was already decided — refresh and retry' });
+
+    logAudit(db, { entity_type: 'wo_addition_requests', entity_id: reqId, user_id: userId,
+                   action: 'deny_wo_addition', details: { reason } });
+    notifyTechOfDecision({ request: wr, decided: 'denied', approverUserId: userId, approverName: me.name, reason });
+
+    res.json({ ok: true, request: db.prepare("SELECT * FROM wo_addition_requests WHERE id = ?").get(reqId) });
+  });
+
   // ============================================================
   // POST /api/invoices/:id/send-to-ap   { ap_email? }
   // ------------------------------------------------------------

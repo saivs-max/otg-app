@@ -3672,8 +3672,132 @@ async function renderMap(root) {
 // OPS MANAGER / SR MANAGER VIEWS
 // ============================================================
 
+// v0.68 — Pending "add work orders to a submitted week" requests, shown at the
+// top of the Ops Mgr / Sr Mgr approval queue with approve/deny actions.
+function addReqSectionHTML(addReqs) {
+  if (!addReqs || !addReqs.length) return '';
+  return `
+    <div class="card" style="margin-bottom:14px;border-left:4px solid var(--ic-orange);background:#fff8f0;">
+      <div class="section-title" style="margin-top:0;">＋ Add-work-order requests (${addReqs.length})</div>
+      <p class="help" style="margin:0 0 10px;">A technician asked to add work orders to a week they already submitted. Approve to generate a new supplemental invoice for that week, or deny with a reason — either way the tech is notified.</p>
+      ${addReqs.map(rq => `
+        <div class="card" style="background:#fff;margin-bottom:10px;">
+          <div style="font-weight:700;">${escapeHTML(rq.tech_name || 'Technician')}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px;">${escapeHTML(rq.source_invoice_number || '')} · week ${fmtDate(rq.period_start)} → ${fmtDate(rq.period_end)}</div>
+          <div style="font-size:13px;margin-top:6px;"><strong>Work orders:</strong> ${escapeHTML(rq.requested_wos || '')}</div>
+          ${rq.note ? `<div style="font-size:12px;color:var(--ink-2);margin-top:4px;">📝 ${escapeHTML(rq.note)}</div>` : ''}
+          <div class="actions" style="margin-top:10px;flex-wrap:wrap;">
+            <button class="btn btn-danger btn-sm" data-addreq-deny="${rq.id}">Deny</button>
+            <button class="btn btn-primary btn-sm" data-addreq-approve="${rq.id}">Approve &amp; create invoice</button>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function wireAddReqButtons() {
+  $$('[data-addreq-approve]').forEach(b => b.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!confirm('Approve this request? A new supplemental invoice will be created for that week with the requested work orders.')) return;
+    b.disabled = true;
+    try {
+      const r = await api(`/addition-requests/${b.dataset.addreqApprove}/approve`, { method: 'POST' });
+      toast(`Approved ✓ — created ${r.new_invoice?.invoice_number || 'new invoice'}`, 'ok');
+      goto('queue');
+    } catch (err) { b.disabled = false; toast(err.message, 'err'); }
+  }));
+  $$('[data-addreq-deny]').forEach(b => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const id = b.dataset.addreqDeny;
+    showSheet(`
+      <h3>Deny add-work-orders request?</h3>
+      <p class="help">The technician will get this reason and a notification.</p>
+      <span class="label">Reason (required, min 5 chars)</span>
+      <textarea class="field" id="denyReason" rows="4" placeholder="e.g., These WOs belong to next week — file them on that invoice instead."></textarea>
+      <div class="actions">
+        <button class="btn btn-ghost" data-act="sheet-close">Cancel</button>
+        <button class="btn btn-danger" id="confirmDeny">Deny &amp; notify tech</button>
+      </div>
+    `, {
+      onMount: (wrap) => {
+        $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
+        $('#confirmDeny', wrap).addEventListener('click', async () => {
+          const reason = $('#denyReason', wrap).value.trim();
+          if (reason.length < 5) return toast('Add a reason (at least 5 chars)', 'err');
+          try {
+            await api(`/addition-requests/${id}/deny`, { method: 'POST', body: { reason } });
+            closeSheet();
+            toast('Denied · tech notified', 'ok');
+            goto('queue');
+          } catch (e2) { toast(e2.message, 'err'); }
+        });
+      }
+    });
+  }));
+}
+
+// v0.68 — One add-WO request row as the tech sees it (status + decision detail).
+function addReqStatusHTML(rq) {
+  const badge = rq.status === 'approved'
+    ? `<span class="badge" style="background:var(--ok-bg,#e8f6ea);color:var(--ic-green-deep);font-weight:700;">Approved</span>`
+    : rq.status === 'denied'
+    ? `<span class="badge" style="background:var(--err-bg);color:var(--err-fg);font-weight:700;">Not approved</span>`
+    : `<span class="badge" style="background:var(--ic-cream);color:var(--ic-green-deep);font-weight:700;">Pending review</span>`;
+  return `
+    <div class="card" style="background:#fafafa;margin-bottom:8px;">
+      <div class="flex between" style="align-items:center;">
+        <span style="font-size:12px;color:var(--muted);">${new Date(rq.created_at).toLocaleDateString()}</span>
+        ${badge}
+      </div>
+      <div style="font-size:13px;margin-top:4px;"><strong>WOs:</strong> ${escapeHTML(rq.requested_wos || '')}</div>
+      ${rq.note ? `<div style="font-size:12px;color:var(--ink-2);margin-top:2px;">📝 ${escapeHTML(rq.note)}</div>` : ''}
+      ${rq.status === 'approved' && rq.new_invoice_id ? `
+        <div style="margin-top:8px;font-size:13px;">✅ New invoice created: <a href="#" data-go-inv="${rq.new_invoice_id}"><strong>${escapeHTML(rq.new_invoice_number || ('#'+rq.new_invoice_id))}</strong></a> — open it to add hours/expenses and submit.</div>
+      ` : ''}
+      ${rq.status === 'denied' ? `
+        <div style="margin-top:8px;font-size:13px;color:var(--err-fg);">✗ Not approved${rq.decided_by_name ? ' by ' + escapeHTML(rq.decided_by_name) : ''}.${rq.decision_reason ? ' Reason: ' + escapeHTML(rq.decision_reason) : ''}</div>
+      ` : ''}
+    </div>
+  `;
+}
+
+// v0.68 — Tech sheet: file a request to add work orders to a locked week.
+function openRequestAddWoSheet(invoice) {
+  showSheet(`
+    <h3>Request to add work orders</h3>
+    <p class="help">Week of ${fmtDate(invoice.period_start)} → ${fmtDate(invoice.period_end)}. List the work orders you need to add (ticket #s or WO IDs — comma or new-line separated). Your Ops Manager reviews this; if approved, a new invoice is created for this week with these work orders.</p>
+    <span class="label">Work orders to add</span>
+    <textarea class="field" id="addWoList" rows="3" placeholder="e.g. 12816, 12827   or   MX-RPR-97461873"></textarea>
+    <span class="label" style="margin-top:10px;">Note for your manager (optional)</span>
+    <textarea class="field" id="addWoNote" rows="2" placeholder="e.g. Two extra stores I covered Friday that weren't on the original invoice."></textarea>
+    <div class="actions">
+      <button class="btn btn-ghost" data-act="sheet-close">Cancel</button>
+      <button class="btn btn-primary" id="addWoSubmit">Send request</button>
+    </div>
+  `, {
+    onMount: (wrap) => {
+      $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
+      $('#addWoSubmit', wrap).addEventListener('click', async () => {
+        const wos = $('#addWoList', wrap).value.trim();
+        const note = $('#addWoNote', wrap).value.trim();
+        if (!wos) return toast('List at least one work order', 'err');
+        try {
+          await api(`/invoices/${invoice.id}/request-additional-wos`, { method: 'POST', body: { wos, note: note || undefined } });
+          closeSheet();
+          toast('Request sent ✓ — your Ops Manager will review it', 'ok');
+          goto('invDetail', invoice.id);
+        } catch (e) { toast(e.message, 'err'); }
+      });
+    }
+  });
+}
+
 async function renderApprovalQueue(root) {
-  const queue = await api('/approvals/queue');
+  const [queue, addReqs] = await Promise.all([
+    api('/approvals/queue'),
+    api('/addition-requests/queue').catch(() => []),
+  ]);
   // CTA at the top: two buckets — backfill a tech's invoice OR file a 3rd-party vendor invoice.
   const uploadCard = `
     <div class="card" style="background: var(--ic-cream); border: 0; padding: 14px; margin-bottom: 14px;">
@@ -3699,14 +3823,17 @@ async function renderApprovalQueue(root) {
   if (!queue.length) {
     root.innerHTML = `
       ${role === 'ops_manager' ? uploadCard : ''}
+      ${addReqSectionHTML(addReqs)}
+      ${addReqs.length ? '' : `
       <div class="empty">
         <div class="big">✓</div>
         Nothing in the queue right now.<br/>
         <span style="font-size: 12px;">Invoices ${escapeHTML(subjectLabel)} will appear here.</span>
-      </div>
+      </div>`}
     `;
-    if (role === 'ops_manager') $('#uploadInvBtn').addEventListener('click', openUploadInvoiceSheet);
+    if (role === 'ops_manager') $('#uploadInvBtn')?.addEventListener('click', openUploadInvoiceSheet);
     $('#vendorInvBtn')?.addEventListener('click', openVendorInvoiceSheet);
+    wireAddReqButtons();
     return;
   }
 
@@ -3718,6 +3845,7 @@ async function renderApprovalQueue(root) {
 
   root.innerHTML = `
     ${role === 'ops_manager' ? uploadCard : ''}
+    ${addReqSectionHTML(addReqs)}
     <div class="card" style="background: var(--ic-green-deep); color: #fff; border: 0;">
       <div class="flex between" style="align-items: center;">
         <div>
@@ -3776,6 +3904,7 @@ async function renderApprovalQueue(root) {
   $$('.card.tap[data-inv]').forEach(c => c.addEventListener('click', () => goto('invDetail', Number(c.dataset.inv))));
   $('#uploadInvBtn')?.addEventListener('click', openUploadInvoiceSheet);
   $('#vendorInvBtn')?.addEventListener('click', openVendorInvoiceSheet);
+  wireAddReqButtons();
 }
 
 // ---- VENDOR INVOICE UPLOAD (v0.36, manager-only) ----
@@ -7715,7 +7844,18 @@ async function renderSettings(root) {
 // Single tab consolidating: this-week's draft (prominent at top with quick action),
 // + New Invoice CTA, then the complete log of all other invoices.
 async function renderMine(root) {
-  const all = await api('/invoices');
+  const [all, myAddReqs] = await Promise.all([
+    api('/invoices'),
+    api('/addition-requests/mine').catch(() => []),
+  ]);
+  // v0.68 — surface add-work-order requests: pending ones + anything decided in
+  // the last 14 days, so the tech sees the manager's decision (and the link to
+  // the new invoice on approval, or the reason on denial) right here.
+  const _addReqCutoff = Date.now() - 14 * 86400000;
+  const addReqNotices = (myAddReqs || []).filter(rq =>
+    rq.status === 'pending' ||
+    (rq.decided_at && new Date(rq.decided_at).getTime() >= _addReqCutoff)
+  );
   const thisWeekStart = (() => {
     const d = new Date();
     d.setDate(d.getDate() - (d.getDay() === 0 ? 6 : d.getDay() - 1));
@@ -7754,6 +7894,24 @@ async function renderMine(root) {
                 <span>${fmt$(inv.total)} →</span>
               </button>
             `).join('')}
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- v0.68 — Add-work-order request decisions (notification surface). -->
+      ${addReqNotices.length ? `
+        <div class="card" style="border-left: 4px solid var(--ic-orange); background: #fff8f0; padding: 14px; margin-bottom: 14px;">
+          <div style="font-weight: 700; font-size: 14px;">🔔 Add-work-order request${addReqNotices.length===1?'':'s'}</div>
+          <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px;">
+            ${addReqNotices.map(rq => {
+              if (rq.status === 'approved') {
+                return `<div style="font-size: 13px;">✅ Approved — new invoice <a href="#" data-go-inv="${rq.new_invoice_id}"><strong>${escapeHTML(rq.new_invoice_number || ('#'+rq.new_invoice_id))}</strong></a> created for ${fmtDate(rq.period_start)} → ${fmtDate(rq.period_end)}. Open it to add hours/expenses and submit.</div>`;
+              }
+              if (rq.status === 'denied') {
+                return `<div style="font-size: 13px; color: var(--err-fg);">✗ Not approved (week ${fmtDate(rq.period_start)} → ${fmtDate(rq.period_end)})${rq.decided_by_name ? ' · by ' + escapeHTML(rq.decided_by_name) : ''}.${rq.decision_reason ? ' Reason: ' + escapeHTML(rq.decision_reason) : ''}</div>`;
+              }
+              return `<div style="font-size: 13px; color: var(--ink-2);">⏳ Pending Ops Mgr review (week ${fmtDate(rq.period_start)} → ${fmtDate(rq.period_end)}) · WOs: ${escapeHTML(rq.requested_wos || '')}</div>`;
+            }).join('')}
           </div>
         </div>
       ` : ''}
@@ -7841,6 +7999,7 @@ async function renderMine(root) {
     $('#openCurrent')?.addEventListener('click', () => goto('invoice'));
     $('#openCurrentNew')?.addEventListener('click', () => goto('invoice'));
     $$('[data-send-inv]').forEach(b => b.addEventListener('click', () => goto('invDetail', Number(b.dataset.sendInv))));
+    $$('[data-go-inv]').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); goto('invDetail', Number(a.dataset.goInv)); }));
     $('#newInvBtn')?.addEventListener('click', openPastInvoiceSheet);
     $('#customInvBtn')?.addEventListener('click', openCustomPeriodSheet);
     $('#techUploadInvBtn')?.addEventListener('click', openTechUploadSheet);
@@ -8072,10 +8231,11 @@ function openPastInvoiceSheet() {
 async function renderInvoiceDetail(root, invoiceId) {
   if (!invoiceId) return goto('mine');
 
-  const [r, list, notices] = await Promise.all([
+  const [r, list, notices, addReqs] = await Promise.all([
     api(`/invoices/${invoiceId}`),
     api('/invoices').catch(() => []),    // managers may not have a personal invoice list
     api(`/invoices/${invoiceId}/notices`).catch(() => []),   // v0.64.3 — manager edit notices
+    api(`/invoices/${invoiceId}/addition-requests`).catch(() => []),   // v0.68 — add-WO requests
   ]);
   const { invoice, lines, summary, by_date = [], extracted = null, extracted_at = null, tech_user = null } = r;
   const me = STATE.user;
@@ -8085,6 +8245,26 @@ async function renderInvoiceDetail(root, invoiceId) {
   // invoice belongs to (not the viewer). When a manager opens a tech's
   // invoice, the header shows the tech's name/address — never the manager's.
   const billFrom = tech_user || me;
+
+  // v0.68 — "Add work orders to this already-submitted week". The owning tech
+  // can file a request on a locked (post-draft) tech-labor invoice; everyone who
+  // can see the invoice sees the request history + the manager's decision.
+  const canRequestAddWo = invoice.user_id === me.id
+    && invoice.invoice_type !== 'vendor'
+    && ['submitted','in_review','approved_ops','approved_sr','queued_ap','sent_ap'].includes(invoice.status);
+  const addWoCardHTML = (canRequestAddWo || (addReqs && addReqs.length)) ? `
+    <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-orange);">
+      <div class="section-title" style="margin-top: 0;">Add work orders to this week</div>
+      ${canRequestAddWo ? `
+        <p class="help" style="margin: 0 0 10px;">This invoice is already submitted, so it's locked. Missed some work orders for this week (${fmtDate(invoice.period_start)} → ${fmtDate(invoice.period_end)})? Request to add them — your Ops Manager reviews it, and if approved a new invoice is created for this same week with those work orders.</p>
+        <button class="btn btn-warn btn-block" id="reqAddWoBtn">＋ Request to add work orders</button>
+      ` : ''}
+      ${(addReqs && addReqs.length) ? `
+        <div class="section-title" style="font-size: 12px;">Requests</div>
+        ${addReqs.map(rq => addReqStatusHTML(rq)).join('')}
+      ` : ''}
+    </div>
+  ` : '';
 
   // prev/next ordering — newest first. v0.54: when the viewer is on a draft
   // ("open") invoice, scope the prev/next to other drafts the tech still has
@@ -8593,6 +8773,8 @@ async function renderInvoiceDetail(root, invoiceId) {
       <div class="trail">${trailFor(invoice)}</div>
     </div>
 
+    ${addWoCardHTML}
+
     ${invoice.status === 'draft' && extracted && invoice.invoice_type !== 'vendor'
        && (invoice.user_id === me.id || isManagerProxy || isManagerView)
        ? renderExtractedPanel(invoice, extracted, extracted_at, summary) : ''}
@@ -8957,6 +9139,10 @@ async function renderInvoiceDetail(root, invoiceId) {
 
   $('#sendToApBtn')?.addEventListener('click', () => openSendToApSheet(invoice));
   $('#sendToApBtnTop')?.addEventListener('click', () => openSendToApSheet(invoice));
+  // v0.68 — request to add work orders to this already-submitted week + open the
+  // supplemental invoice link once a request is approved.
+  $('#reqAddWoBtn')?.addEventListener('click', () => openRequestAddWoSheet(invoice));
+  $$('[data-go-inv]').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); goto('invDetail', Number(a.dataset.goInv)); }));
   // v0.45 — PDF download via secure download token
   $$('.pdf-download-btn').forEach(b => b.addEventListener('click', () => {
     downloadWithToken(`/api/invoices/${b.dataset.pdfId}/pdf`, '');
