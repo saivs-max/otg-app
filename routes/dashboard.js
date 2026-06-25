@@ -652,6 +652,7 @@ module.exports = (db) => {
       tech_names:         norm(b.tech_names),
       actual_labor:       b.actual_labor == null || b.actual_labor === '' ? null : Number(b.actual_labor),
       actual_travel:      b.actual_travel == null || b.actual_travel === '' ? null : Number(b.actual_travel),
+      actual_expenses:    b.actual_expenses == null || b.actual_expenses === '' ? null : Number(b.actual_expenses),
       service_delay:      norm(b.service_delay),
       has_third_party:    b.has_third_party == null ? null : (b.has_third_party ? 1 : 0),
       third_party_vendor: norm(b.third_party_vendor),
@@ -659,7 +660,7 @@ module.exports = (db) => {
       notes:              norm(b.notes),
     };
     // Validate numerics
-    for (const k of ['num_techs','actual_labor','actual_travel','third_party_cost']) {
+    for (const k of ['num_techs','actual_labor','actual_travel','actual_expenses','third_party_cost']) {
       if (fields[k] !== null && (!isFinite(fields[k]) || fields[k] < 0)) {
         return res.status(400).json({ error: `${k} must be a non-negative number` });
       }
@@ -686,7 +687,7 @@ module.exports = (db) => {
         UPDATE cost_tracker_overrides SET
           cost_reconciled = ?, pm_dri = ?, ops_manager = ?,
           num_techs = ?, tech_names = ?,
-          actual_labor = ?, actual_travel = ?,
+          actual_labor = ?, actual_travel = ?, actual_expenses = ?,
           service_delay = ?, has_third_party = ?, third_party_vendor = ?,
           third_party_cost = ?, notes = ?,
           updated_by = ?, updated_at = ?
@@ -694,7 +695,7 @@ module.exports = (db) => {
       `).run(
         fields.cost_reconciled, fields.pm_dri, fields.ops_manager,
         fields.num_techs, fields.tech_names,
-        fields.actual_labor, fields.actual_travel,
+        fields.actual_labor, fields.actual_travel, fields.actual_expenses,
         fields.service_delay, fields.has_third_party, fields.third_party_vendor,
         fields.third_party_cost, fields.notes,
         userId, now, woId,
@@ -703,13 +704,13 @@ module.exports = (db) => {
       db.prepare(`
         INSERT INTO cost_tracker_overrides
           (work_order_id, cost_reconciled, pm_dri, ops_manager, num_techs, tech_names,
-           actual_labor, actual_travel, service_delay, has_third_party, third_party_vendor,
+           actual_labor, actual_travel, actual_expenses, service_delay, has_third_party, third_party_vendor,
            third_party_cost, notes, updated_by, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         woId, fields.cost_reconciled, fields.pm_dri, fields.ops_manager,
         fields.num_techs, fields.tech_names,
-        fields.actual_labor, fields.actual_travel,
+        fields.actual_labor, fields.actual_travel, fields.actual_expenses,
         fields.service_delay, fields.has_third_party, fields.third_party_vendor,
         fields.third_party_cost, fields.notes, userId, now,
       );
@@ -892,7 +893,7 @@ function buildDashboardWorkbook(p, costRows = []) {
     'Cost Reconciled', 'Store (e.g., WF 30)', 'PM DRI', 'Ops Manager',
     'Service Type', '# of Carts', 'Service Month', 'Service Completion Date',
     'Caper # Techs', 'Caper Technician(s)',
-    'Actual Labor Cost (Caper)', 'Actual Travel Cost (Caper)',
+    'Actual Labor Cost (Caper)', 'Actual Travel Cost (Caper)', 'Actual Expenses (Caper)',
     'Service Delay',
     'Third Party Vendor', 'Actual Third Party Cost',
     'Actual Total (Caper + 3P)', 'Invoice', 'Notes',
@@ -912,6 +913,7 @@ function buildDashboardWorkbook(p, costRows = []) {
       r.tech_names || '',
       r.actual_labor != null ? +r.actual_labor.toFixed(2) : '',
       r.actual_travel != null ? +r.actual_travel.toFixed(2) : '',
+      r.actual_expenses != null ? +r.actual_expenses.toFixed(2) : '',
       r.service_delay || 'None',
       r.has_third_party ? 'Yes' : 'No',
       r.third_party_cost != null ? +r.third_party_cost.toFixed(2) : 0,
@@ -921,15 +923,16 @@ function buildDashboardWorkbook(p, costRows = []) {
     ]);
   }
   const ctmSheet = XLSX.utils.aoa_to_sheet(ctmRows);
-  // P column = SUM(K + L + O) — Actual Total. K=Actual Labor, L=Actual Travel, O=Actual 3P Cost.
+  // Q column = SUM(K + L + M + P) — Actual Total.
+  // K=Actual Labor, L=Actual Travel, M=Actual Expenses, P=Actual 3P Cost.
   for (let i = 0; i < costRows.length; i++) {
     const xr = i + 2;
-    setFormula(ctmSheet, `P${xr}`, `IF($B${xr}="","",SUM(IF($K${xr}="",0,$K${xr}),IF($L${xr}="",0,$L${xr}),IF($O${xr}="",0,$O${xr})))`);
+    setFormula(ctmSheet, `Q${xr}`, `IF($B${xr}="","",SUM(IF($K${xr}="",0,$K${xr}),IF($L${xr}="",0,$L${xr}),IF($M${xr}="",0,$M${xr}),IF($P${xr}="",0,$P${xr})))`);
   }
   ctmSheet['!cols'] = [
     { wch: 14 }, { wch: 20 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch:  8 },
     { wch: 12 }, { wch: 18 }, { wch: 11 }, { wch: 22 },
-    { wch: 18 }, { wch: 18 }, { wch: 13 },
+    { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 13 },
     { wch: 16 }, { wch: 18 }, { wch: 18 },
     { wch: 12 }, { wch: 30 },
   ];
@@ -1211,6 +1214,7 @@ function buildCostTrackerRows(db, req) {
       o.tech_names         AS o_tech_names,
       o.actual_labor       AS o_actual_labor,
       o.actual_travel      AS o_actual_travel,
+      o.actual_expenses    AS o_actual_expenses,
       o.service_delay      AS o_delay,
       o.has_third_party    AS o_has_3p,
       o.third_party_vendor AS o_3p_vendor,
@@ -1233,16 +1237,18 @@ function buildCostTrackerRows(db, req) {
     ORDER BY w.scheduled_date, w.id
   `).all(...params);
 
-  // v0.66.1 — "Act Travel" now reconciles the tracker to the invoice / AP
-  // pipeline total. It carries BOTH drive-time labor (mode='drive', priced at
-  // the tech's hourly rate exactly as the invoice does) AND every non-labor
-  // expense line (mileage / tolls / parking + 'other' / 'vendor' / misc).
-  // Previously it summed only four travel expense categories, so drive labor
-  // and any 'other'/'vendor' expense were silently dropped from Act Total —
-  // that's why a $472 store could show as $115 in the tracker. This mirrors
-  // buildSubmittedApprovedInvoicesByStore:
+  // v0.66.2 — Cost Tracker cost columns now mirror the invoice / AP pipeline
+  // total exactly, split three ways so each is auditable on its own:
+  //   Act Labor    = work-mode time            (priced at the tech's hourly rate)
+  //   Act Travel   = drive-mode time + travel expenses (mileage / tolls / parking / travel)
+  //   Act Expenses = every other expense line  (materials / 'other' / vendor / misc)
+  // Act Total = Labor + Travel + Expenses + 3P. Mirrors buildSubmittedApprovedInvoicesByStore:
   //   visit_total = work-labor + drive-labor + (expenses NOT IN 'labor','drive')
-  const travelByWo = {};
+  // Before v0.66.1 drive labor and non-travel expenses were dropped entirely —
+  // that's why a $472 store could show as $115 in the tracker.
+  const travelByWo  = {};
+  const expenseByWo = {};
+  // (a) drive-mode labor → Travel
   const driveRows = db.prepare(`
     SELECT t.work_order_id AS wo, COALESCE(SUM(
       CASE WHEN t.clock_out IS NOT NULL AND t.mode = 'drive'
@@ -1255,13 +1261,23 @@ function buildCostTrackerRows(db, req) {
     GROUP BY t.work_order_id
   `).all();
   for (const r of driveRows) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.drive;
-  const nonLaborExpRows = db.prepare(`
-    SELECT work_order_id AS wo, COALESCE(SUM(amount), 0) AS exp
+  // (b) travel-category expenses → Travel
+  const travelExpRows = db.prepare(`
+    SELECT work_order_id AS wo, COALESCE(SUM(amount), 0) AS amt
     FROM expenses
-    WHERE category NOT IN ('labor','drive') AND work_order_id IS NOT NULL
+    WHERE category IN ('mileage','tolls','travel','parking') AND work_order_id IS NOT NULL
     GROUP BY work_order_id
   `).all();
-  for (const r of nonLaborExpRows) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.exp;
+  for (const r of travelExpRows) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.amt;
+  // (c) everything else (non-labor, non-drive, non-travel) → Expenses
+  const otherExpRows = db.prepare(`
+    SELECT work_order_id AS wo, COALESCE(SUM(amount), 0) AS amt
+    FROM expenses
+    WHERE category NOT IN ('labor','drive','mileage','tolls','travel','parking')
+      AND work_order_id IS NOT NULL
+    GROUP BY work_order_id
+  `).all();
+  for (const r of otherExpRows) expenseByWo[r.wo] = (expenseByWo[r.wo] || 0) + r.amt;
 
   const monthName = (iso) => {
     if (!iso) return '';
@@ -1277,11 +1293,13 @@ function buildCostTrackerRows(db, req) {
   };
 
   return woRows.map(w => {
-    const computedLabor  = +w.actual_labor.toFixed(2);
-    const computedTravel = +(travelByWo[w.wo_id] || 0).toFixed(2);
+    const computedLabor    = +w.actual_labor.toFixed(2);
+    const computedTravel   = +(travelByWo[w.wo_id]  || 0).toFixed(2);
+    const computedExpenses = +(expenseByWo[w.wo_id] || 0).toFixed(2);
 
-    const actualLabor  = w.o_actual_labor  != null ? +(+w.o_actual_labor).toFixed(2)  : computedLabor;
-    const actualTravel = w.o_actual_travel != null ? +(+w.o_actual_travel).toFixed(2) : computedTravel;
+    const actualLabor    = w.o_actual_labor    != null ? +(+w.o_actual_labor).toFixed(2)    : computedLabor;
+    const actualTravel   = w.o_actual_travel   != null ? +(+w.o_actual_travel).toFixed(2)   : computedTravel;
+    const actualExpenses = w.o_actual_expenses != null ? +(+w.o_actual_expenses).toFixed(2) : computedExpenses;
     // v0.62.3 — fall back to work_orders.assigned_user_id (and its name) when
     // no time entries exist. Without this, a tech who marks a WO completed
     // without ever clocking in disappears from the Technicians column.
@@ -1314,22 +1332,24 @@ function buildCostTrackerRows(db, req) {
       tech_names:       techNames,
       actual_labor:     actualLabor,
       actual_travel:    actualTravel,
+      actual_expenses:  actualExpenses,
       service_delay:    ov(w.o_delay, 'None'),
       has_third_party:  has3p,
       third_party_vendor: ov(w.o_3p_vendor, ''),
       third_party_cost: tpCost,
-      actual_total:     +(actualLabor + actualTravel + tpCost).toFixed(2),
+      actual_total:     +(actualLabor + actualTravel + actualExpenses + tpCost).toFixed(2),
       invoice_link:     w.wo_ext || '',
       notes:            ov(w.o_notes, w.title || ''),
       // Flags so the UI can show edit-state badges & call attention to
       // rows that have NO actuals data at all (so Ops Mgrs know to fill in).
-      missing_data:     actualLabor === 0 && actualTravel === 0 && tpCost === 0,
+      missing_data:     actualLabor === 0 && actualTravel === 0 && actualExpenses === 0 && tpCost === 0,
       is_edited:        isEdited,
       computed: {
-        actual_labor:  computedLabor,
-        actual_travel: computedTravel,
-        num_techs:     w.num_techs || 0,
-        tech_names:    w.tech_names || '',
+        actual_labor:    computedLabor,
+        actual_travel:   computedTravel,
+        actual_expenses: computedExpenses,
+        num_techs:       w.num_techs || 0,
+        tech_names:      w.tech_names || '',
       },
     };
   });

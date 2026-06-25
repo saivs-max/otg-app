@@ -312,7 +312,8 @@ CREATE TABLE IF NOT EXISTS cost_tracker_overrides (
   num_techs            INTEGER,
   tech_names           TEXT,
   actual_labor         REAL,
-  actual_travel        REAL,
+  actual_travel        REAL,    -- drive-time labor + travel expenses (mileage/tolls/parking)
+  actual_expenses      REAL,    -- v0.66.2 — non-travel expenses (materials/'other'/vendor/misc)
   service_delay        TEXT,
   has_third_party      INTEGER, -- 0/1
   third_party_vendor   TEXT,

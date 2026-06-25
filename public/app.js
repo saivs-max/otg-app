@@ -3612,8 +3612,14 @@ async function renderApprovalQueue(root) {
     </div>
   `;
   const role  = STATE.user.role;
+  const isSrView = role === 'sr_manager' || role === 'pm';
+  // v0.67 — Sr Mgr / PM keep full visibility of every approved_ops invoice, but
+  // only escalated tech invoices + submitted vendor invoices still need their
+  // action; the rest are review-only (Ops approval is final).
+  const actionCount     = queue.filter(i => i.action_needed).length;
+  const reviewOnlyCount = queue.length - actionCount;
   const subjectLabel = role === 'ops_manager' ? 'submitted by your team' :
-                       role === 'sr_manager'  ? 'awaiting senior-manager sign-off' :
+                       isSrView               ? 'flowing through for your visibility' :
                                                 'awaiting sign-off';
 
   if (!queue.length) {
@@ -3641,8 +3647,9 @@ async function renderApprovalQueue(root) {
     <div class="card" style="background: var(--ic-green-deep); color: #fff; border: 0;">
       <div class="flex between" style="align-items: center;">
         <div>
-          <div class="label" style="color: #b5e8a3;">${escapeHTML(role === 'sr_manager' || role === 'pm' ? 'Pending Sr. Manager review (optional)' : 'Pending your approval')}</div>
+          <div class="label" style="color: #b5e8a3;">${escapeHTML(isSrView ? 'Invoices in review' : 'Pending your approval')}</div>
           <div style="font-size: 28px; font-weight: 800; margin-top: 4px;">${queue.length} <span style="font-size: 14px; font-weight: 500; color: #cde9c9;">invoice${queue.length===1?'':'s'}</span></div>
+          ${isSrView ? `<div style="font-size: 11px; color: #cde9c9; margin-top: 4px;">${actionCount} need your action · ${reviewOnlyCount} review-only</div>` : ''}
         </div>
         <div style="text-align: right;">
           <div class="label" style="color: #b5e8a3;">Queue value</div>
@@ -3666,6 +3673,9 @@ async function renderApprovalQueue(root) {
                 <div class="flex" style="align-items: center; gap: 8px; flex-wrap: wrap;">
                   <span style="font-weight: 700; font-size: 15px;">${escapeHTML(inv.tech_name)}</span>
                   ${hasFlags ? `<span class="badge" style="background: var(--err-bg); color: var(--err-fg); font-weight: 700;">⚠ ${inv.flag_count} flag${inv.flag_count===1?'':'s'}</span>` : ''}
+                  ${isSrView ? (inv.action_needed
+                    ? `<span class="badge" style="background: var(--ic-orange); color: #fff; font-weight: 700;">Action needed</span>`
+                    : `<span class="badge" style="background: var(--ic-cream); color: var(--ic-green-deep); font-weight: 700;">Review only</span>`) : ''}
                 </div>
                 <div style="font-size: 12px; color: var(--muted); margin-top: 4px;">${inv.invoice_number} · ${fmtDate(inv.period_start)} → ${fmtDate(inv.period_end)}</div>
                 ${hasFlags ? `
@@ -3674,7 +3684,7 @@ async function renderApprovalQueue(root) {
                     ${inv.flag_preview ? `<div style="margin-top: 4px; color: var(--ink-2); font-style: italic;">${escapeHTML(inv.flag_preview)}</div>` : ''}
                   </div>
                 ` : ''}
-                ${inv.escalated_at ? `<div style="font-size: 11px; color: var(--ic-orange); margin-top: 6px; font-weight: 600;">⤴ Escalated by Ops Mgr — Sr Mgr review (optional)</div>` : ''}
+                ${inv.escalated_at ? `<div style="font-size: 11px; color: var(--ic-orange); margin-top: 6px; font-weight: 600;">⤴ Escalated by Ops Mgr — needs your countersign</div>` : ''}
                 ${inv.notes ? `<div style="font-size: 12px; color: var(--warn-fg); margin-top: 6px;">📝 ${escapeHTML(inv.notes.slice(0, 120))}${inv.notes.length > 120 ? '…' : ''}</div>` : ''}
                 ${aging ? `<div style="font-size: 11px; color: var(--ic-orange); margin-top: 6px; font-weight: 600;">⏰ ${ageDays} days in queue</div>` : ''}
               </div>
@@ -5290,6 +5300,7 @@ async function renderCostTracker(root) {
                 <th style="padding: 6px 8px;">Technicians</th>
                 <th class="ts" data-sort="actual_labor"  style="padding: 6px 8px; cursor: pointer; text-align: right;">Act Labor${sortIco('actual_labor')}</th>
                 <th class="ts" data-sort="actual_travel" style="padding: 6px 8px; cursor: pointer; text-align: right;">Act Travel${sortIco('actual_travel')}</th>
+                <th class="ts" data-sort="actual_expenses" style="padding: 6px 8px; cursor: pointer; text-align: right;">Act Expenses${sortIco('actual_expenses')}</th>
                 <th style="padding: 6px 8px;">Delay</th>
                 <th style="padding: 6px 8px;">3P Vendor</th>
                 <th style="padding: 6px 8px; text-align: right;">3P Cost</th>
@@ -5327,6 +5338,7 @@ async function renderCostTracker(root) {
                     <td style="padding: 6px 8px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHTML(row.tech_names || '')}">${escapeHTML(row.tech_names || '—')}</td>
                     <td style="padding: 6px 8px; text-align: right;">${row.actual_labor  ? fmt$(row.actual_labor)  : '<span style="color: var(--muted);">—</span>'}</td>
                     <td style="padding: 6px 8px; text-align: right;">${row.actual_travel ? fmt$(row.actual_travel) : '<span style="color: var(--muted);">—</span>'}</td>
+                    <td style="padding: 6px 8px; text-align: right;">${row.actual_expenses ? fmt$(row.actual_expenses) : '<span style="color: var(--muted);">—</span>'}</td>
                     <td style="padding: 6px 8px; color: var(--muted);">${escapeHTML(row.service_delay || 'None')}</td>
                     <td style="padding: 6px 8px;">${row.has_third_party ? `${escapeHTML(row.third_party_vendor || 'Yes')}` : 'No'}</td>
                     <td style="padding: 6px 8px; text-align: right;">${row.third_party_cost ? fmt$(row.third_party_cost) : ''}</td>
@@ -5488,7 +5500,12 @@ function openCostTrackerEditSheet(woId, rows, onSaved) {
       <div style="flex:1;">
         <span class="label">Actual Travel ($)</span>
         <input class="field" id="ctEdTravel" type="number" min="0" step="0.01" value="${row.actual_travel != null ? row.actual_travel : ''}" placeholder="${row.computed?.actual_travel || 0}" />
-        <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Computed from expenses: ${fmt$(row.computed?.actual_travel || 0)}</div>
+        <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Drive time + travel: ${fmt$(row.computed?.actual_travel || 0)}</div>
+      </div>
+      <div style="flex:1;">
+        <span class="label">Actual Expenses ($)</span>
+        <input class="field" id="ctEdExpenses" type="number" min="0" step="0.01" value="${row.actual_expenses != null ? row.actual_expenses : ''}" placeholder="${row.computed?.actual_expenses || 0}" />
+        <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Materials / other: ${fmt$(row.computed?.actual_expenses || 0)}</div>
       </div>
     </div>
 
@@ -5560,6 +5577,7 @@ function openCostTrackerEditSheet(woId, rows, onSaved) {
           tech_names:         $('#ctEdTechNames',  wrap).value.trim(),
           actual_labor:       $('#ctEdLabor',      wrap).value === '' ? null : Number($('#ctEdLabor',  wrap).value),
           actual_travel:      $('#ctEdTravel',     wrap).value === '' ? null : Number($('#ctEdTravel', wrap).value),
+          actual_expenses:    $('#ctEdExpenses',   wrap).value === '' ? null : Number($('#ctEdExpenses', wrap).value),
           service_delay:      $('#ctEdDelay',      wrap).value,
           has_third_party:    has3p,
           third_party_vendor: has3p ? $('#ctEd3pVendor', wrap).value.trim() : null,
@@ -8617,24 +8635,38 @@ async function renderInvoiceDetail(root, invoiceId) {
 
     ${invoice.invoice_type !== 'vendor' && (
        (me.role === 'ops_manager' && invoice.status === 'submitted') ||
-       ((me.role === 'sr_manager' || me.role === 'pm') && invoice.status === 'approved_ops')
+       // v0.67 — Sr Mgr only acts on ESCALATED invoices (countersign). Ops
+       // approval is final for everything else, so the action card no longer
+       // appears for normal approved_ops invoices.
+       ((me.role === 'sr_manager' || me.role === 'pm') && invoice.status === 'approved_ops' && invoice.escalated_at)
       ) ? `
         <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-green); padding: 16px;">
-          <strong>${me.role === 'ops_manager' ? 'Ops Manager review' : 'Senior Manager sign-off'}</strong>
+          <strong>${me.role === 'ops_manager' ? 'Ops Manager review' : 'Senior Manager countersign'}</strong>
           <p class="help" style="margin: 6px 0 12px;">${me.role === 'ops_manager'
             ? (summary.flag_count > 0
                 ? 'This invoice has flagged lines. You can approve, reject, or escalate to Sr Mgr for secondary approval.'
                 : 'Approve to mark ready-for-AP, or reject back to the technician with a reason.')
-            : (invoice.escalated_at
-                ? 'This invoice was escalated by the Ops Manager — your countersign is required before it can be sent to AP.'
-                : 'Approve to confirm ready-for-AP, or reject back to the technician with a reason.')}</p>
+            : 'This invoice was escalated by the Ops Manager — your countersign is required before it can be sent to AP.'}</p>
           <div class="actions" style="flex-wrap: wrap;">
             <button class="btn btn-danger" id="rejectBtn">Reject</button>
             ${me.role === 'ops_manager' ? `
               <button class="btn btn-warn" id="escalateBtn">⤴ Escalate to Sr Mgr</button>
             ` : ''}
-            <button class="btn btn-primary" id="approveBtn">${me.role === 'ops_manager' ? 'Approve' : 'Approve invoice'}</button>
+            <button class="btn btn-primary" id="approveBtn">${me.role === 'ops_manager' ? 'Approve' : 'Countersign'}</button>
           </div>
+        </div>
+      ` : ''}
+
+    <!-- v0.67 — Sr Mgr review-only. Ops approval is final, so for a normal
+         (non-escalated) approved_ops invoice the Senior Manager keeps full
+         visibility but is NOT an approval gate — no action is required. -->
+    ${invoice.invoice_type !== 'vendor'
+      && (me.role === 'sr_manager' || me.role === 'pm')
+      && invoice.status === 'approved_ops'
+      && !invoice.escalated_at ? `
+        <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-green-deep); padding: 16px; background: var(--ic-cream);">
+          <strong>✅ Approved by Ops — no Sr Mgr sign-off required</strong>
+          <p class="help" style="margin: 6px 0 0;">Ops approval is final for this invoice. It's shown here for your visibility; the technician will verify and send it to AP. No action is needed from you.</p>
         </div>
       ` : ''}
 

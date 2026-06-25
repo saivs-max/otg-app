@@ -66,6 +66,10 @@ function ensureSchema(db) {
   migrateAddColumn(db, 'work_orders', 'wo_number',     'INTEGER');
   migrateAddColumn(db, 'work_orders', 'sub_wo_count',  'INTEGER');
   migrateAddColumn(db, 'work_orders', 'priority',      'TEXT');
+
+  // v0.66.2 — Cost Tracker splits Actual Expenses out of Actual Travel; the
+  // override table needs a column so manual edits to the new field persist.
+  migrateAddColumn(db, 'cost_tracker_overrides', 'actual_expenses', 'REAL');
   // v0.48 — Expensify export for FTE field techs. Contractors keep the
   // existing PDF→AP flow. Each invoice can be sent to Expensify once and
   // we track the resulting Expensify reportID + URL for re-opening it.
