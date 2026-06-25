@@ -14,7 +14,7 @@
 
 const express = require('express');
 const router  = express.Router();
-const { logAudit, sumHours } = require('../db');
+const { logAudit, sumHours, getPolicy } = require('../db');
 const rulesEvaluator = require('./rules');
 
 // v0.58 — Run the policy engine against every WO line on an invoice and
@@ -50,6 +50,7 @@ function computeFlagsForInvoice(db, invoiceId) {
   }
 
   const flags = [];
+  const policy = getPolicy(db);   // v0.70 — for baseline hours/10-carts enforcement
   for (const line of Object.values(byWO)) {
     const lineExpenses = expenses.filter(e => e.external_id === line.external_id);
     const lineFlags = rulesEvaluator.evaluate(db, line,
@@ -65,6 +66,10 @@ function computeFlagsForInvoice(db, invoiceId) {
     // (and live corp-card spend) and no-ops without line.work_order_id.
     const budgetFlags = rulesEvaluator.evaluateBudgets(db, line, lineExpenses);
     for (const f of budgetFlags) flags.push({ wo: line.external_id, store: line.store_name, ...f });
+    // v0.70 — baseline hours/10-carts overruns (suppressed where a custom hours
+    // rule already covers the work type), mirroring computeInvoice.
+    const baselineFlags = rulesEvaluator.evaluateBaselines(db, line, policy);
+    for (const f of baselineFlags) flags.push({ wo: line.external_id, store: line.store_name, ...f });
   }
   return flags;
 }

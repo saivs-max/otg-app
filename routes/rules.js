@@ -10,7 +10,7 @@
 
 const express = require('express');
 const router  = express.Router();
-const { logAudit, activeWorkTypes } = require('../db');
+const { logAudit, activeWorkTypes, getPolicy } = require('../db');
 
 const VALID_TYPES = new Set([
   'max_hours_per_shift','max_hours_per_day','max_drive_hours_per_day','max_miles_per_day',
@@ -306,5 +306,51 @@ module.exports.evaluateBudgets = (db, line, expenses) => {
     }
   }
 
+  return flags;
+};
+
+// v0.70 — Baseline hours-per-10-carts enforcement.
+//
+// The Policy page exposes one HOURS_PER_10_CARTS value per work type. Until now
+// that number was display-only — it fed the per-line "expected hours" label but
+// nothing flagged when actuals blew past it (the universal hours-overrun flag
+// was retired in v0.20, leaving the setting with no teeth). This re-connects it:
+// a WO line flags when its labor hrs / 10 carts exceeds the configured baseline
+// for its work type.
+//
+// Custom rules still win. To avoid double-flagging, the baseline is SUPPRESSED
+// for a work type whenever an active custom hours rule already governs it
+// (max_hours_per_10_carts / max_hours_per_wo / max_hours_per_cart, scoped to
+// that work type or universal) — the manager's explicit rule is the override.
+module.exports.evaluateBaselines = (db, line, policy) => {
+  const flags = [];
+  if (!line) return flags;
+  const carts = line.cart_count || 0;
+  if (carts <= 0) return flags;                    // hrs/10-carts ratio is undefined without carts
+  const wt = line.work_type;
+  if (!wt) return flags;
+
+  const pol = policy || getPolicy(db);
+  const baseline = pol && pol.HOURS_PER_10_CARTS ? pol.HOURS_PER_10_CARTS[wt] : undefined;
+  if (!(baseline > 0)) return flags;               // no baseline configured for this work type
+
+  // Suppress when a custom hours rule already covers this work type.
+  const covered = db.prepare(`
+    SELECT 1 FROM custom_rules
+     WHERE active = 1
+       AND rule_type IN ('max_hours_per_10_carts','max_hours_per_wo','max_hours_per_cart')
+       AND (work_type_filter IS NULL OR work_type_filter = ?)
+     LIMIT 1
+  `).get(wt);
+  if (covered) return flags;
+
+  const actual = (line.labor_hours || 0) / (carts / 10);   // hrs per 10 carts
+  if (actual > baseline) {
+    flags.push({
+      rule: 'baseline_hours_per_10_carts',
+      severity: 'flag',
+      message: `${actual.toFixed(2)} hrs / 10 carts on ${line.external_id} (${(line.labor_hours||0).toFixed(2)} hrs / ${carts} carts) exceeds the ${wt} policy baseline of ${baseline} hrs / 10 carts`,
+    });
+  }
   return flags;
 };

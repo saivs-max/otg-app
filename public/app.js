@@ -2634,7 +2634,7 @@ function renderPolicyEditor(pol) {
         </div>
         <div style="flex: 1;"></div>
       </div>
-      <p class="help" style="margin-top: 4px;">Hours-overrun thresholds are now configured below as <strong>custom rules</strong> — set per work type and cart count for full control.</p>
+      <p class="help" style="margin-top: 4px;">Hours-overrun thresholds come from the <strong>per-work-type baselines</strong> below (enforced automatically) plus any <strong>custom rules</strong> for finer per-cart-count control. A custom hours rule overrides the baseline for that work type.</p>
 
       <span class="label">Meal eligibility — minimum trip hours${isOver('policy_meal_trip_min_hours')}</span>
       <input class="field" id="pol_meal_min" type="number" step="0.5" min="0" value="${e.MEAL_TRIP_MIN_HOURS}" />
@@ -2644,8 +2644,8 @@ function renderPolicyEditor(pol) {
       <input class="field" id="pol_ap_email" type="email" value="${escapeHTML(e.AP_EMAIL || '')}" placeholder="ap@instacart.com" />
       <div class="help" style="margin-top: -8px;">Default destination for the &quot;Send to AP&quot; action. Each send can override this.</div>
 
-      <div style="font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin: 18px 0 8px; font-weight: 600;">Expected hours per 10 carts by work type</div>
-      <p class="help" style="margin: 0 0 10px;">Used as a baseline reference for invoice expectations. Hard limits are configured below as custom rules.</p>
+      <div style="font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin: 18px 0 8px; font-weight: 600;">Max hours per 10 carts by work type</div>
+      <p class="help" style="margin: 0 0 10px;">Enforced as the default cap per work type — a WO line flags when its actual hrs / 10 carts exceeds this. Add a custom rule below to override the baseline for a specific work type or cart-count band.</p>
       <div class="flex gap-12">
         <div style="flex: 1;">
           <span class="label">Deployment <span style="color:var(--muted);font-weight:400">(hrs / 10 carts)</span>${isOver('policy_hours_per_10_carts_deployment')}</span>

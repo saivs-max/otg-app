@@ -255,6 +255,11 @@ module.exports = (db) => {
       // pulled live from corp_card_expenses, since it never lives on invoices.
       const budgetFlags = rulesEvaluator.evaluateBudgets(db, w, w.expenses);
       w.flags.push(...budgetFlags);
+      // v0.70 — Baseline hours/10-carts enforcement. The per-work-type policy
+      // baseline (Policy page) now flags overruns directly, except where a custom
+      // hours rule already governs this work type (see evaluateBaselines).
+      const baselineFlags = rulesEvaluator.evaluateBaselines(db, w, POL);
+      w.flags.push(...baselineFlags);
     }
 
     // ===== By-date breakdown (AP requirement) =====
@@ -807,7 +812,10 @@ module.exports = (db) => {
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: 'mgr_edit',
                    details: { fields: Object.keys(req.body || {}) } });
 
-    res.json(computeInvoice(id));
+    // v0.70 — strip policy flags for non-managers. The owning tech can edit their
+    // own draft header here (canActOnInvoice allows the owner), so this response
+    // must go through the same manager-only flag gate as every other path.
+    res.json(stripFlagsForTech(computeInvoice(id), userId));
   });
 
   // POST /api/invoices/custom-period
