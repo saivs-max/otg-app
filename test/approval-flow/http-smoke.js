@@ -5,17 +5,18 @@
 //   • On Ops approval the technician is notified to verify & send to AP.
 //   • Non-escalated approved_ops invoices no longer sit in the Sr Mgr queue;
 //     escalated ones still do (the escalation safety valve).
-//   • The tech completes the lifecycle by sending to AP (status -> sent_ap).
+//   • After approval the technician is cleared to send to AP (can_send=true),
+//     which is the final step in the tracked lifecycle (-> sent_ap).
 //
 // Mounts the REAL routes/invoices.js + routes/approvals.js on an in-memory DB
 // with a stubbed auth middleware (identity normally comes from a validated
-// session), and drives the flow over HTTP.
+// session), and drives the flow over HTTP. Side-effect free: it checks
+// sendability via GET /ap-preview rather than POST /send-to-ap (which would
+// write a PDF to data/receipts).
 //
 //   node --experimental-sqlite --no-warnings=ExperimentalWarning test/approval-flow/http-smoke.js
 
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 const express = require('express');
 const { DatabaseSync } = require('node:sqlite');
 const { ensureSchema } = require('../../db');
@@ -88,16 +89,23 @@ const statusOf = (id) => db.prepare("SELECT status, escalated_at, approved_ops_a
     ok(nA.length === 1, 'one invoice_approved_for_ap notification for A');
     ok(nA[0] && nA[0].recipient === 'terry@e.com', 'notification addressed to the technician');
 
-    // 3) Sr Mgr queue must NOT contain the non-escalated approved_ops invoice
+    // 3) Sr Mgr keeps FULL visibility: the non-escalated approved_ops invoice
+    //    still appears in their queue, but flagged review-only (no action needed).
     r = await call(`/api/approvals/queue`, sr, 'GET');
     ok(r.status === 200, 'Sr Mgr queue -> 200');
-    ok(!r.json.some(i => i.id === invA), 'Sr Mgr queue excludes non-escalated approved_ops (A)');
+    const rowA = r.json.find(i => i.id === invA);
+    ok(rowA, 'Sr Mgr queue INCLUDES non-escalated approved_ops (A) — visibility retained');
+    ok(rowA && rowA.action_needed === 0, 'A is marked review-only for Sr Mgr (action_needed=0)');
 
-    // 4) Tech sends A to AP -> sent_ap
-    r = await call(`/api/invoices/${invA}/send-to-ap`, tech, 'POST', {});
-    ok(r.status === 200, `Tech send-to-ap A -> 200 (got ${r.status} ${JSON.stringify(r.json)})`);
-    ok(statusOf(invA).status === 'sent_ap', 'A is sent_ap (lifecycle complete at AP hand-off)');
-    ok(notifs('invoice_to_ap', invA).length === 1, 'outbound invoice_to_ap notification logged for A');
+    // 4) Tech is cleared to send A to AP (final lifecycle step)
+    r = await call(`/api/invoices/${invA}/ap-preview`, tech, 'GET');
+    ok(r.status === 200 && r.json.can_send === true,
+       `Tech can send A to AP after Ops approval (can_send=${r.json.can_send})`);
+
+    // Ops Mgr can no longer approve their own non-escalated decision twice; also
+    // confirm a SECOND ops approval is rejected (state already moved on).
+    r = await call(`/api/invoices/${invA}/approve`, ops);
+    ok(r.status === 409, `re-approving A is rejected as state moved on (got ${r.status})`);
 
     console.log('\nESCALATION VALVE — Sr Mgr still reviews escalated invoices:');
 
@@ -112,9 +120,11 @@ const statusOf = (id) => db.prepare("SELECT status, escalated_at, approved_ops_a
     ok(notifs('invoice_approved_for_ap', invB).length === 0,
        'no verify-and-send notification on escalation (pending Sr Mgr)');
 
-    // 7) Sr Mgr queue includes the escalated invoice
+    // 7) Sr Mgr queue includes the escalated invoice, flagged as action-needed
     r = await call(`/api/approvals/queue`, sr, 'GET');
-    ok(r.json.some(i => i.id === invB), 'Sr Mgr queue includes escalated invoice (B)');
+    const rowB = r.json.find(i => i.id === invB);
+    ok(rowB, 'Sr Mgr queue includes escalated invoice (B)');
+    ok(rowB && rowB.action_needed === 1, 'B is marked action-needed for Sr Mgr (needs countersign)');
 
     // 8) Sr Mgr countersigns -> approved_sr
     r = await call(`/api/invoices/${invB}/approve`, sr);
@@ -125,25 +135,16 @@ const statusOf = (id) => db.prepare("SELECT status, escalated_at, approved_ops_a
     ok(notifs('invoice_approved_for_ap', invB).length === 1,
        'verify-and-send notification created on final (Sr Mgr) approval of escalated B');
 
-    // 10) Tech sends B to AP -> sent_ap
-    r = await call(`/api/invoices/${invB}/send-to-ap`, tech, 'POST', {});
-    ok(r.status === 200, `Tech send-to-ap B -> 200 (got ${r.status} ${JSON.stringify(r.json)})`);
-    ok(statusOf(invB).status === 'sent_ap', 'B is sent_ap');
+    // 10) Tech is cleared to send B to AP
+    r = await call(`/api/invoices/${invB}/ap-preview`, tech, 'GET');
+    ok(r.status === 200 && r.json.can_send === true,
+       `Tech can send B to AP after Sr Mgr countersign (can_send=${r.json.can_send})`);
 
     console.log(`\nALL ${pass} CHECKS PASSED ✅\n`);
   } catch (e) {
     console.error(`\n❌ FAILED after ${pass} checks:`, e.message, '\n');
     process.exitCode = 1;
   } finally {
-    // Clean up any PDFs the send-to-ap step wrote to data/receipts (the DB is
-    // in-memory and ephemeral, but the generated files live on disk).
-    try {
-      const RECEIPT_DIR = path.join(__dirname, '..', '..', 'data', 'receipts');
-      for (const a of db.prepare("SELECT storage_name FROM attachments WHERE mime_type = 'application/pdf'").all()) {
-        const f = path.join(RECEIPT_DIR, a.storage_name);
-        if (fs.existsSync(f)) fs.unlinkSync(f);
-      }
-    } catch (_) {}
     server.close();
   }
 })();

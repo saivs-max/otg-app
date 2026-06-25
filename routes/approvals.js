@@ -199,10 +199,12 @@ module.exports = (db) => {
 
   // ===== Approval queue =====
   // Ops Mgr sees: invoices in 'submitted' state from techs on their team.
-  // Sr Mgr / PM sees: only invoices the Ops Mgr ESCALATED for a secondary look
-  // (v0.67 — Ops approval is final in the normal flow, so non-escalated
-  // approved_ops invoices go straight to the tech to send to AP and no longer
-  // sit in the Sr Mgr queue), plus all submitted vendor invoices.
+  // Sr Mgr / PM sees: EVERY approved_ops tech invoice (so they retain full
+  // visibility of what's flowing through) + every submitted vendor invoice.
+  // v0.67 — Ops approval is now final, so the Sr Mgr no longer needs to approve
+  // normal invoices: those rows are surfaced as review-only (action_needed=0).
+  // Only ESCALATED tech invoices and submitted vendor invoices need Sr Mgr
+  // action (action_needed=1); escalated items sort to the top.
   router.get('/approvals/queue', (req, res) => {
     const userId = Number(req.header('x-user-id'));
     const me = getMe(db, userId);
@@ -227,13 +229,13 @@ module.exports = (db) => {
         ORDER BY i.submitted_at ASC
       `).all(...techIds);
     } else {
-      // Sr Mgr / PM: only ESCALATED approved_ops tech invoices (optional second
-      // look) + every submitted vendor invoice. Non-escalated approved_ops
-      // invoices are final and belong to the tech's send-to-AP queue.
+      // Sr Mgr / PM: every approved_ops tech invoice (full visibility) + every
+      // submitted vendor invoice. Escalated items sort first since they're the
+      // only tech invoices that still need a Sr Mgr countersign.
       rows = db.prepare(`
         SELECT i.*, u.name AS tech_name, u.worker_type AS tech_worker_type
         FROM invoices i JOIN users u ON u.id = i.user_id
-        WHERE (i.status = 'approved_ops' AND i.escalated_at IS NOT NULL)
+        WHERE (i.status = 'approved_ops')
            OR (i.status = 'submitted' AND i.invoice_type = 'vendor')
         ORDER BY i.escalated_at IS NULL, i.submitted_at ASC
       `).all();
@@ -242,7 +244,14 @@ module.exports = (db) => {
     // v0.58 — decorate each row with flag info (count + rule-type breakdown
     // + the first message) so the queue UI can show "⚠ 4 flags" badges and
     // a short summary without having to drill into each invoice.
+    // v0.67 — also flag whether the row still needs THIS manager's action:
+    //   • Ops Mgr queue rows are all 'submitted' → always action_needed.
+    //   • Sr Mgr / PM: vendor-submitted + escalated tech invoices need action;
+    //     non-escalated approved_ops invoices are review-only (Ops already final).
     for (const row of rows) {
+      row.action_needed = me.role === 'ops_manager'
+        ? 1
+        : ((row.invoice_type === 'vendor' && row.status === 'submitted') || row.escalated_at ? 1 : 0);
       if (row.invoice_type === 'vendor') {
         row.flag_count = 0; row.flag_rules = []; row.flag_preview = null;
         continue;
