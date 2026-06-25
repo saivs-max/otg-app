@@ -276,8 +276,12 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 
 CREATE INDEX IF NOT EXISTS idx_notif_invoice ON notifications(invoice_id);
--- v0.71 — home banner queries un-dismissed notifications per recipient.
-CREATE INDEX IF NOT EXISTS idx_notif_recipient ON notifications(recipient, dismissed_at);
+-- NOTE: the v0.71 idx_notif_recipient index (on recipient, dismissed_at) is
+-- created in db.js ensureSchema() AFTER the dismissed_at column migration runs.
+-- It can't live here: schema.sql is exec'd before migrations, so on an existing
+-- DB (where dismissed_at doesn't exist yet) this statement would fail and crash
+-- boot. On a fresh DB the column above exists, but we keep the index in one
+-- place (db.js) so both paths are consistent.
 
 -- v0.37 — Launch Actuals submissions. Ops Mgrs are required to file weekly
 -- "launch support" hours per store via a Google Form; this table is our

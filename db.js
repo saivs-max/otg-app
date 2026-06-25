@@ -76,8 +76,11 @@ function ensureSchema(db) {
   migrateAddColumn(db, 'expenses', 'stop_location',  'TEXT');
   // v0.71 — in-app notifications surfaced on the tech's home banner. A
   // dismissed_at timestamp lets dismissal persist server-side (across reloads
-  // and devices) rather than relying on client storage.
+  // and devices) rather than relying on client storage. The index MUST be
+  // created here, AFTER the column is added — putting it in schema.sql would
+  // run it before this migration and crash boot on existing DBs.
   migrateAddColumn(db, 'notifications', 'dismissed_at', 'TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_notif_recipient ON notifications(recipient, dismissed_at)');
   // v0.48 — Expensify export for FTE field techs. Contractors keep the
   // existing PDF→AP flow. Each invoice can be sent to Expensify once and
   // we track the resulting Expensify reportID + URL for re-opening it.
