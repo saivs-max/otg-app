@@ -73,6 +73,7 @@ app.use('/api', require('./routes/invoices')(db));
 app.use('/api', require('./routes/settings')(db));
 app.use('/api', require('./routes/attachments')(db));
 app.use('/api', require('./routes/approvals')(db));
+app.use('/api', require('./routes/notifications')(db)); // v0.71 — in-app home banners
 app.use('/api', require('./routes/rules')(db));
 app.use('/api', require('./routes/dashboard')(db));
 app.use('/api', require('./routes/launch_actuals')(db));

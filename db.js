@@ -74,6 +74,10 @@ function ensureSchema(db) {
   // reimbursement report prefers these over the work order's store location.
   migrateAddColumn(db, 'expenses', 'start_location', 'TEXT');
   migrateAddColumn(db, 'expenses', 'stop_location',  'TEXT');
+  // v0.71 — in-app notifications surfaced on the tech's home banner. A
+  // dismissed_at timestamp lets dismissal persist server-side (across reloads
+  // and devices) rather than relying on client storage.
+  migrateAddColumn(db, 'notifications', 'dismissed_at', 'TEXT');
   // v0.48 — Expensify export for FTE field techs. Contractors keep the
   // existing PDF→AP flow. Each invoice can be sent to Expensify once and
   // we track the resulting Expensify reportID + URL for re-opening it.

@@ -269,10 +269,15 @@ CREATE TABLE IF NOT EXISTS notifications (
   body          TEXT,                                     -- text/markdown of the email body
   attachment_id INTEGER REFERENCES attachments(id),       -- the generated PDF
   status        TEXT DEFAULT 'logged' CHECK (status IN ('logged','sent','failed')),
-  created_at    TEXT DEFAULT CURRENT_TIMESTAMP
+  created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+  -- v0.71 — in-app notifications. When set, the recipient has dismissed the
+  -- notification from their home banner; NULL means still active/unread.
+  dismissed_at  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_notif_invoice ON notifications(invoice_id);
+-- v0.71 — home banner queries un-dismissed notifications per recipient.
+CREATE INDEX IF NOT EXISTS idx_notif_recipient ON notifications(recipient, dismissed_at);
 
 -- v0.37 — Launch Actuals submissions. Ops Mgrs are required to file weekly
 -- "launch support" hours per store via a Google Form; this table is our

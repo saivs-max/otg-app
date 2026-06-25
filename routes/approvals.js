@@ -109,6 +109,29 @@ function notifyTechVerifyAndSend(db, { invoice, approverUserId }) {
   }
 }
 
+// v0.71 — A rejected invoice silently reverted to draft, so the tech had no
+// signal their work needs fixing. Record an in-app notification (kind
+// 'invoice_rejected') so it surfaces as a persistent banner on the tech's home
+// screen until they dismiss it. Best-effort: a notify failure must never block
+// the reject transaction.
+function notifyTechRejected(db, { invoice, rejectedByUserId, reason }) {
+  try {
+    const tech = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(invoice.user_id);
+    if (!tech) return;
+    const reviewer = db.prepare("SELECT name FROM users WHERE id = ?").get(rejectedByUserId);
+    const subject = `Invoice ${invoice.invoice_number} was rejected — please review & resubmit`;
+    const body = `Your invoice ${invoice.invoice_number} was rejected by ${reviewer?.name || 'your manager'} `
+      + `and returned to draft. Reason: ${reason}. Open the invoice to make the requested changes and resubmit it.`;
+    db.prepare(`
+      INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, status)
+      VALUES ('invoice_rejected', ?, ?, ?, ?, ?, 'logged')
+    `).run(invoice.id, rejectedByUserId, tech.email || null, subject, body);
+    console.log(`🔔 [mock notify] To tech ${tech.email || tech.id} · ${subject}`);
+  } catch (e) {
+    console.error('notifyTechRejected failed:', e.message);
+  }
+}
+
 module.exports = (db) => {
 
   // ===== Team management =====
@@ -400,6 +423,8 @@ module.exports = (db) => {
     if (r.changes === 0) return res.status(409).json({ error: 'invoice state changed — refresh and retry' });
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId,
                    action: 'reject', details: { reason, prior_status: inv.status } });
+    // v0.71 — notify the tech so the rejection surfaces on their home banner.
+    notifyTechRejected(db, { invoice: inv, rejectedByUserId: userId, reason });
     res.json(db.prepare("SELECT * FROM invoices WHERE id = ?").get(id));
   });
 

@@ -417,6 +417,8 @@ function renderTabbar() {
     // v0.60 — Corp Card ledger. Visible only to manager roles. Separate from
     // tech expenses; corp-card spend never lands on a reimbursable invoice.
     { id: 'corpcard',  label: 'Corp Card', ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="13" rx="2"/><path d="M2 10h20"/><path d="M6 15h4"/></svg>` },
+    // v0.65 — 3rd Party tab: review manager-uploaded vendor invoices, spend by vendor.
+    { id: 'thirdparty', label: '3rd Party', ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v4H3z"/><path d="M5 11v8h14v-8"/><path d="M10 15h4"/></svg>` },
     { id: 'policy',    label: 'Policy',    ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg>` },
     // v0.35 — Admin tab for PM / Sr Mgr only
     ...(['pm','sr_manager'].includes(role) ? [{ id: 'admin', label: 'Admin', ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/><circle cx="18" cy="6" r="2"/></svg>` }] : []),
@@ -462,6 +464,7 @@ async function render() {
     launch:      'Launch Actuals',
     admin:       'Admin · User management',
     corpcard:    'Corp Card',
+    thirdparty:  '3rd Party Invoices',
   })[v] || '';
   if (['woPick','woAdd','woDetail','invDetail','settings'].includes(v)) $('#backBtn').classList.remove('hidden');
 
@@ -487,6 +490,7 @@ async function render() {
     if (v === 'launch')    return renderLaunchActuals(root);
     if (v === 'admin')     return renderAdmin(root);
     if (v === 'corpcard')  return renderCorpCard(root);
+    if (v === 'thirdparty') return renderThirdParty(root);
     // v0.64 — Unplanned moved into the Dashboard. Redirect any stale link there.
     if (v === 'unplanned') { STATE.view = 'dashboard'; STATE._dashSection = 'unplanned'; return renderDashboard(root); }
     // 'map' tab dropped in v0.7 — locations are now embedded in WO time-entry edit sheets.
@@ -497,7 +501,7 @@ async function render() {
 
 // ---- HOME ----
 async function renderHome(root) {
-  const [actives, wos, drafts, current] = await Promise.all([
+  const [actives, wos, drafts, current, notifs] = await Promise.all([
     api('/timeentries/active'),
     api('/workorders'),
     api('/invoices'),
@@ -505,8 +509,27 @@ async function renderHome(root) {
     // can show a running expected-pay total before the tech drills into the
     // invoice view.
     api('/invoices/current').catch(() => null),
+    // v0.71 — active (un-dismissed) in-app notifications, e.g. invoice rejections.
+    api('/notifications').catch(() => []),
   ]);
   STATE.active = actives;
+
+  // ---- v0.71 — Rejection notifications ----
+  // A rejected invoice silently reverts to draft, leaving the tech with no
+  // signal their work needs fixing. Render a persistent banner per active
+  // notification; it reappears on every home visit until the tech dismisses it
+  // (dismissal is recorded server-side, so it sticks across reloads/devices).
+  const notifBanners = (notifs || []).map(n => `
+    <div class="alert err" data-notif="${n.id}"${n.invoice_id ? ` data-inv="${n.invoice_id}"` : ''}>
+      <span class="ico">⚠️</span>
+      <div class="body">
+        <strong>${escapeHTML(n.subject || 'Invoice rejected')}</strong>
+        ${n.body ? `<div style="margin-top:4px;">${escapeHTML(n.body)}</div>` : ''}
+        ${n.invoice_id ? `<button class="btn btn-warn btn-sm" data-act="open-inv" style="margin-top:10px;">Open invoice →</button>` : ''}
+      </div>
+      <button class="close" data-act="dismiss-notif" aria-label="Dismiss notification">×</button>
+    </div>
+  `).join('');
 
   const open  = wos.filter(w => w.status === 'open' || w.status === 'in_progress');
   const draft = drafts.find(d => d.status === 'draft');
@@ -618,6 +641,7 @@ async function renderHome(root) {
       </div>`;
 
   root.innerHTML = `
+    ${notifBanners}
     ${expectedPayCard}
     ${activeBlock}
 
@@ -682,6 +706,21 @@ async function renderHome(root) {
   $('#mxSyncBtn')?.addEventListener('click', (e) => mxSyncAll(e.currentTarget));
   $('#homeUploadInvBtn')?.addEventListener('click', openTechUploadSheet);
   $$('.card.tap[data-inv]').forEach(c => c.addEventListener('click', () => goto('invDetail', Number(c.dataset.inv))));
+
+  // v0.71 — Rejection banner actions: open the rejected invoice to fix &
+  // resubmit, or dismiss the banner (persisted server-side so it won't return).
+  $$('[data-notif]').forEach(el => {
+    const id = Number(el.dataset.notif);
+    el.querySelector('[data-act="open-inv"]')?.addEventListener('click', () => {
+      if (el.dataset.inv) goto('invDetail', Number(el.dataset.inv));
+    });
+    el.querySelector('[data-act="dismiss-notif"]')?.addEventListener('click', async () => {
+      el.classList.add('dismissed');           // fade out via .alert.dismissed
+      setTimeout(() => el.remove(), 250);
+      try { await api(`/notifications/${id}/dismiss`, { method: 'POST' }); }
+      catch (_) { /* best-effort — if it failed it simply reappears next load */ }
+    });
+  });
 
   // Periodic gentle reminder if the user is using the app but isn't clocked in
   // on any work order. Shows once per visit to home; toast nudge every 10 min.
@@ -6619,6 +6658,209 @@ function openLaunchActualReviewSheet(la) {
 // aggregate view) + one tab per category. Category tabs read from
 // /api/category-dashboard which returns spend totals + over-budget WOs for
 // every category, including soft-archived corp-card categories.
+// ============================================================
+// 3RD PARTY (VENDOR) INVOICES — review tab (v0.65)
+// ============================================================
+// Read-only review surface for the manager-uploaded 3rd-party vendor invoice
+// flow (invoice_type='vendor'). Mirrors the Corp Card tab's period-scope +
+// headline + breakdown layout. The question it answers: "how much are we
+// spending with 3rd-party vendors, and with whom" — so the primary breakdown
+// is BY VENDOR. Consumes the existing /vendor-invoices(+ /summary) endpoints;
+// no new server state.
+const TP_STATE = {
+  scope: 'mtd',          // 'mtd' | 'ytd' | 'all' | 'custom'
+  from: '', to: '',      // only used when scope='custom'
+  vendor: '',            // vendor-name contains filter ('' = all)
+  status: '',            // status filter ('' = all)
+};
+
+function tpPeriodBounds() {
+  const now = new Date();
+  const y   = now.getUTCFullYear();
+  const m   = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const d   = String(now.getUTCDate()).padStart(2, '0');
+  const today = `${y}-${m}-${d}`;
+  if (TP_STATE.scope === 'mtd') return { from: `${y}-${m}-01`, to: today, label: `Month-to-date · ${y}-${m}` };
+  if (TP_STATE.scope === 'ytd') return { from: `${y}-01-01`,   to: today, label: `Year-to-date · ${y}` };
+  if (TP_STATE.scope === 'all') return { from: '1970-01-01',   to: today, label: 'All time' };
+  return { from: TP_STATE.from || `${y}-${m}-01`, to: TP_STATE.to || today, label: `${TP_STATE.from || '—'} → ${TP_STATE.to || '—'}` };
+}
+
+// Humanize the invoice lifecycle statuses for the filter + list badges.
+const TP_STATUS_LABELS = {
+  draft: 'Draft', submitted: 'Submitted', approved_ops: 'Approved (Ops)',
+  approved_sr: 'Approved (Sr)', approved: 'Approved', sent_ap: 'Sent to AP',
+  rejected: 'Rejected', paid: 'Paid',
+};
+const tpStatusLabel = (s) => TP_STATUS_LABELS[s] || (s ? String(s).replace(/_/g, ' ') : '—');
+
+async function renderThirdParty(root) {
+  // Gate at the UI level too (the API gates server-side regardless).
+  if (!['ops_manager','sr_manager','pm'].includes(STATE.user?.role)) {
+    root.innerHTML = `<div class="empty"><div class="big">🔒</div>3rd Party invoices are manager-only.</div>`;
+    return;
+  }
+
+  const { from, to, label } = tpPeriodBounds();
+  const qList = `/vendor-invoices?from=${from}&to=${to}`
+    + (TP_STATE.vendor ? `&vendor=${encodeURIComponent(TP_STATE.vendor)}` : '')
+    + (TP_STATE.status ? `&status=${encodeURIComponent(TP_STATE.status)}` : '');
+  const [summary, list] = await Promise.all([
+    api(`/vendor-invoices/summary?from=${from}&to=${to}`),
+    api(qList),
+  ]);
+
+  const listTotal = list.reduce((s, r) => s + (r.total || 0), 0);
+
+  root.innerHTML = `
+    <!-- Header band: period scope + primary action -->
+    <div class="card" style="padding: 12px 14px; margin-bottom: 12px;">
+      <div class="flex between" style="align-items: center; gap: 10px; flex-wrap: wrap;">
+        <div>
+          <div class="section-title" style="margin: 0;">3rd-party vendor invoices</div>
+          <div class="meta" style="margin-top: 2px;">${escapeHTML(label)} · ${summary.totals.count_in_period} invoice${summary.totals.count_in_period === 1 ? '' : 's'}</div>
+        </div>
+        <div class="flex gap-12">
+          <button class="btn btn-primary btn-sm" id="tpAddBtn">＋ 3rd-party vendor invoice</button>
+        </div>
+      </div>
+
+      <div class="chips" style="margin-top: 12px;">
+        ${['mtd','ytd','all','custom'].map(s => `
+          <span class="chip ${TP_STATE.scope === s ? 'selected' : ''}" data-scope="${s}">
+            ${s === 'mtd' ? 'Month' : s === 'ytd' ? 'YTD' : s === 'all' ? 'All' : 'Custom'}
+          </span>
+        `).join('')}
+      </div>
+
+      ${TP_STATE.scope === 'custom' ? `
+        <div class="flex gap-12" style="margin-top: 8px;">
+          <input class="field" type="date" id="tpFrom" value="${escapeHTML(TP_STATE.from || from)}" />
+          <input class="field" type="date" id="tpTo"   value="${escapeHTML(TP_STATE.to   || to)}" />
+        </div>
+      ` : ''}
+    </div>
+
+    <!-- Headline total — what the user came here to see -->
+    <div class="card" style="padding: 18px 20px; margin-bottom: 12px; background: linear-gradient(135deg, var(--ic-cream) 0%, #fff 80%); border-left: 4px solid var(--ic-green-deep);">
+      <div style="font-size: 11px; color: var(--ic-green-deep); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700;">
+        Total 3rd-party spend · ${escapeHTML(label)}
+      </div>
+      <div style="font-size: 36px; font-weight: 800; color: var(--ic-green-deep); margin-top: 4px;">
+        ${fmt$(summary.totals.in_period)}
+      </div>
+      <div class="meta" style="margin-top: 4px;">
+        MTD ${fmt$(summary.totals.mtd)} · YTD ${fmt$(summary.totals.ytd)} · All-time ${fmt$(summary.totals.all_time)} (${summary.totals.all_time_count} invoice${summary.totals.all_time_count === 1 ? '' : 's'}).
+        Uploaded by managers and routed to Sr-Mgr sign-off — tracked separately from tech-labor invoices.
+      </div>
+    </div>
+
+    <!-- Filters row (vendor + status) -->
+    <div class="card" style="padding: 10px 14px; margin-bottom: 12px;">
+      <div class="flex gap-12" style="flex-wrap: wrap;">
+        <div style="flex: 2; min-width: 180px;">
+          <span class="label">Vendor</span>
+          <input class="field" id="tpFilterVendor" type="text" placeholder="Filter by vendor name…" value="${escapeHTML(TP_STATE.vendor)}" />
+        </div>
+        <div style="flex: 1; min-width: 150px;">
+          <span class="label">Status</span>
+          <select class="field" id="tpFilterStatus">
+            <option value="">All statuses</option>
+            ${summary.by_status.map(s => `<option value="${escapeHTML(s.status)}" ${TP_STATE.status === s.status ? 'selected' : ''}>${escapeHTML(tpStatusLabel(s.status))} (${s.count})</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Breakdown cards: by vendor (primary) + by status -->
+    <div class="dash-grid-2" style="margin-bottom: 12px;">
+      <div class="card">
+        <div class="section-title" style="margin-top: 0;">By vendor</div>
+        ${summary.by_vendor.length ? `
+          <table class="cc-table">
+            ${summary.by_vendor.map(v => {
+              const pct = summary.totals.in_period > 0 ? (v.total / summary.totals.in_period) * 100 : 0;
+              return `
+                <tr>
+                  <td><strong>${escapeHTML(v.vendor_name)}</strong></td>
+                  <td class="r"><span class="meta">${v.count}</span></td>
+                  <td class="r"><strong>${fmt$(v.total)}</strong></td>
+                  <td style="width: 80px;"><div class="cc-bar"><div class="cc-bar-fill" style="width: ${pct.toFixed(1)}%"></div></div></td>
+                </tr>
+              `;
+            }).join('')}
+          </table>
+        ` : `<div class="empty" style="padding: 12px;">No 3rd-party spend in this period.</div>`}
+      </div>
+      <div class="card">
+        <div class="section-title" style="margin-top: 0;">By status</div>
+        ${summary.by_status.length ? `
+          <table class="cc-table">
+            ${summary.by_status.map(s => `
+              <tr>
+                <td><strong>${escapeHTML(tpStatusLabel(s.status))}</strong></td>
+                <td class="r"><span class="meta">${s.count}</span></td>
+                <td class="r"><strong>${fmt$(s.total)}</strong></td>
+              </tr>
+            `).join('')}
+          </table>
+        ` : `<div class="empty" style="padding: 12px;">No 3rd-party spend in this period.</div>`}
+      </div>
+    </div>
+
+    <!-- Itemized list -->
+    <div class="card">
+      <div class="section-title" style="margin-top: 0;">Invoices (${list.length})</div>
+      ${list.length === 0 ? `
+        <div class="empty" style="padding: 14px;">No 3rd-party invoices match these filters.</div>
+      ` : `
+        <table class="cc-exp-table">
+          <thead>
+            <tr><th>Date</th><th>Vendor</th><th>Invoice #</th><th>Category</th><th>Status</th><th>Filed by</th><th class="r">Total</th></tr>
+          </thead>
+          <tbody>
+            ${list.map(r => `
+              <tr class="tap" data-tp-inv="${r.id}" style="cursor: pointer;">
+                <td>${fmtShortDate(r.vendor_invoice_date || (r.created_at || '').slice(0, 10))}</td>
+                <td><strong>${escapeHTML(r.vendor_name || '— unnamed —')}</strong></td>
+                <td>${r.vendor_invoice_number ? escapeHTML(r.vendor_invoice_number) : '<span class="meta">—</span>'}</td>
+                <td>${r.vendor_category ? `<span class="cc-cat-pill">${escapeHTML(capitalize(r.vendor_category))}</span>` : '<span class="meta">—</span>'}</td>
+                <td><span class="meta">${escapeHTML(tpStatusLabel(r.status))}</span></td>
+                <td>${escapeHTML(r.created_by_name || '—')}</td>
+                <td class="r amt-pos"><strong>${fmt$(r.total)}</strong></td>
+              </tr>
+            `).join('')}
+            <tr class="cc-total-row">
+              <td colspan="6" class="r"><strong>Subtotal</strong></td>
+              <td class="r amt-total"><strong>${fmt$(listTotal)}</strong></td>
+            </tr>
+          </tbody>
+        </table>
+      `}
+    </div>
+  `;
+
+  // ---- bindings ---------------------------------------------------------
+  $$('#tabbar .tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === 'thirdparty'));
+
+  $$('.chip[data-scope]').forEach(c => c.addEventListener('click', () => {
+    TP_STATE.scope = c.dataset.scope;
+    if (TP_STATE.scope !== 'custom') { TP_STATE.from = ''; TP_STATE.to = ''; }
+    renderThirdParty(root);
+  }));
+  $('#tpFrom')?.addEventListener('change', e => { TP_STATE.from = e.target.value; renderThirdParty(root); });
+  $('#tpTo')  ?.addEventListener('change', e => { TP_STATE.to   = e.target.value; renderThirdParty(root); });
+  $('#tpFilterVendor')?.addEventListener('change', e => { TP_STATE.vendor = e.target.value.trim(); renderThirdParty(root); });
+  $('#tpFilterStatus')?.addEventListener('change', e => { TP_STATE.status = e.target.value; renderThirdParty(root); });
+
+  // Reuse the existing manager upload sheet; on submit it navigates to the
+  // invoice preview (invDetail), same as the Queue tab's entry point.
+  $('#tpAddBtn')?.addEventListener('click', () => openVendorInvoiceSheet());
+
+  // Row → invoice preview/detail (where the vendor invoice can be edited).
+  $$('[data-tp-inv]').forEach(tr => tr.addEventListener('click', () => goto('invDetail', Number(tr.dataset.tpInv))));
+}
+
 async function renderDashboard(root) {
   const isManager = ['ops_manager','sr_manager','pm'].includes(STATE.user?.role);
   // v0.64 — Unplanned work is now a sub-section of the Dashboard (previously its
@@ -6916,6 +7158,44 @@ async function renderDashboardOverview(root) {
       </div>
     `; })() : ''}
 
+    ${(() => {
+      // v0.65 — 3rd-party vendor spend widget. Surfaces the manager-uploaded
+      // vendor invoice flow (invoice_type='vendor') on the Dashboard, broken
+      // out BY VENDOR, with a jump to the full 3rd Party tab. Uses data already
+      // in the dashboard payload (summary.vendor_* + by_vendor, period-scoped &
+      // billable-only) — no extra round-trip. Hidden when there's no activity.
+      const s = r.summary || {};
+      const topV = (r.by_vendor || []).slice(0, 3);
+      const hasActivity = (s.vendor_spend || 0) > 0 || (s.vendor_pending_count || 0) > 0 || topV.length > 0;
+      if (!hasActivity) return '';
+      return `
+      <div class="card" style="margin-top: 14px; padding: 14px 16px; border-left: 4px solid var(--ic-orange);">
+        <div class="flex between" style="align-items: flex-start; gap: 12px;">
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-size: 11px; color: var(--ic-green-deep); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700;">
+              🧾 3rd-party vendor spend · ${escapeHTML(r.meta.period_label)}
+            </div>
+            <div style="font-size: 28px; font-weight: 800; color: var(--ic-green-deep); margin-top: 2px;">
+              ${fmt$(s.vendor_spend || 0)}
+            </div>
+            <div class="meta" style="margin-top: 2px;">
+              ${s.vendor_invoice_count || 0} invoice${(s.vendor_invoice_count || 0) === 1 ? '' : 's'} · ${s.vendor_unique || 0} vendor${(s.vendor_unique || 0) === 1 ? '' : 's'}${(s.vendor_pending_count || 0) > 0 ? ` · <span style="color: var(--ic-orange); font-weight: 600;">${s.vendor_pending_count} pending (${fmt$(s.vendor_pending_value || 0)})</span>` : ''} · separate from tech invoices.
+            </div>
+            ${topV.length ? `
+              <div style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px;">
+                ${topV.map(v => `
+                  <span class="cc-cat-pill">
+                    ${escapeHTML(v.vendor_name || '— unnamed —')} · ${fmt$(v.total)}
+                  </span>
+                `).join('')}
+              </div>
+            ` : ''}
+          </div>
+          <button class="btn btn-ghost btn-sm" id="dashGoToThirdParty" style="flex-shrink: 0;">Open 3rd Party →</button>
+        </div>
+      </div>
+    `; })()}
+
     ${r.cost_tracker_row_count ? (() => {
       // v0.45 — BUG-011 fix: render the callout whenever there are work
       // orders, even if actuals total $0 (so Ops Mgrs see the "Open Cost
@@ -7040,6 +7320,7 @@ async function renderDashboardOverview(root) {
   $('#dashGoToTracker')?.addEventListener('click', () => goto('tracker'));
   // v0.60 — corp-card widget on the dashboard.
   $('#dashGoToCorpCard')?.addEventListener('click', () => goto('corpcard'));
+  $('#dashGoToThirdParty')?.addEventListener('click', () => goto('thirdparty'));
   // v0.45 — Excel button uses secure download-token flow.
   $$('.dash-export-btn').forEach(b => b.addEventListener('click', () => {
     downloadWithToken('/api/dashboard/export', b.dataset.exportQs || '');
