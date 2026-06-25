@@ -146,11 +146,25 @@ module.exports = (db) => {
     const times      = allTimes.filter(t => (t.mode || 'work') === 'work');
     const driveTimes = allTimes.filter(t => t.mode === 'drive');
     const expenses = db.prepare(`
-      SELECT e.*, w.external_id, w.source_system, w.work_type, w.store_name, w.cart_count
+      SELECT e.*, w.external_id, w.source_system, w.work_type, w.store_name, w.store_address, w.cart_count
       FROM expenses e JOIN work_orders w ON w.id = e.work_order_id
       WHERE e.invoice_id = ?
       ORDER BY e.expense_date, e.id
     `).all(invoiceId);
+
+    // v0.69 — index the first captured GPS drive-leg per work order so the
+    // mileage report can fall back to GPS coords (arrival = *_out, departure =
+    // *_in) when a mileage expense has no explicit start/stop location.
+    const driveGpsByWO = {};
+    for (const t of driveTimes) {
+      if (driveGpsByWO[t.work_order_id]) continue;
+      if (t.gps_lat_out != null || t.gps_lat_in != null) {
+        driveGpsByWO[t.work_order_id] = {
+          lat_in:  t.gps_lat_in,  lng_in:  t.gps_lng_in,
+          lat_out: t.gps_lat_out, lng_out: t.gps_lng_out,
+        };
+      }
+    }
 
     // Group by work order
     const byWO = {};
@@ -296,6 +310,12 @@ module.exports = (db) => {
         work_type: e.work_type, work_order_id: e.work_order_id,
         category: e.category, subcategory: e.subcategory, amount: e.amount,
         quantity: e.quantity, rate: e.rate, description: e.description,
+        // v0.69 — drive-endpoint inputs for the mileage report. store_address is
+        // the WO's location (the default "stop"); start/stop_location are the
+        // tech's explicit overrides; gps is the captured drive-leg fallback.
+        store_address: e.store_address,
+        start_location: e.start_location, stop_location: e.stop_location,
+        gps: driveGpsByWO[e.work_order_id] || null,
         expense_date: e.expense_date, receipt_path: e.receipt_path,
         unplanned_tag: e.unplanned_tag, unplanned_note: e.unplanned_note, unplanned_wasted: e.unplanned_wasted,
       });

@@ -201,6 +201,11 @@ CREATE TABLE IF NOT EXISTS expenses (
   quantity        REAL,
   rate            REAL,
   description     TEXT,
+  -- v0.69 — optional explicit drive endpoints for the mileage report. When set,
+  -- the reimbursement report shows these instead of the work order's store
+  -- location. Free text (address or place name) entered by the tech.
+  start_location  TEXT,
+  stop_location   TEXT,
   receipt_path    TEXT,
   invoice_id      INTEGER REFERENCES invoices(id),
   created_at      TEXT    DEFAULT CURRENT_TIMESTAMP

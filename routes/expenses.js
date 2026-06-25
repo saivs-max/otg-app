@@ -60,6 +60,11 @@ module.exports = (db) => {
 
     const { work_order_id, category, subcategory, expense_date, quantity, description, receipt_path } = req.body;
     let { amount, rate } = req.body;
+    // v0.69 — optional explicit drive endpoints (mileage). Stored for any
+    // category but only surfaced by the mileage report. Empty → NULL.
+    const cleanLoc = (v) => (v != null && String(v).trim()) ? String(v).trim() : null;
+    const start_location = cleanLoc(req.body.start_location);
+    const stop_location  = cleanLoc(req.body.stop_location);
 
     // Allow managers to create expenses on behalf of a team tech (for mgr-uploaded invoices).
     // Header: x-on-behalf-of: <tech_user_id>
@@ -130,12 +135,12 @@ module.exports = (db) => {
 
     const r = db.prepare(`
       INSERT INTO expenses
-        (user_id, work_order_id, category, subcategory, expense_date, amount, quantity, rate, description, receipt_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (user_id, work_order_id, category, subcategory, expense_date, amount, quantity, rate, description, start_location, stop_location, receipt_path)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(effectiveUserId, Number(work_order_id), category, category === 'other' ? subcategory : null,
            expense_date, amount,
            quantity ? Number(quantity) : null, rate ?? null,
-           description || null, receipt_path || null);
+           description || null, start_location, stop_location, receipt_path || null);
     const newId = r.lastInsertRowid;
 
     // Auto-attach to a draft invoice whose period contains the expense_date.
@@ -198,6 +203,11 @@ module.exports = (db) => {
     subcategory  = subcategory  ?? e.subcategory;
     expense_date = expense_date ?? e.expense_date;
     description  = description  ?? e.description;
+    // v0.69 — optional explicit drive endpoints. Only overwrite when the key is
+    // present in the body; an empty string clears the field.
+    const cleanLoc = (v) => (v != null && String(v).trim()) ? String(v).trim() : null;
+    const start_location = ('start_location' in req.body) ? cleanLoc(req.body.start_location) : e.start_location;
+    const stop_location  = ('stop_location'  in req.body) ? cleanLoc(req.body.stop_location)  : e.stop_location;
 
     if (!VALID_CATS.has(category)) return res.status(400).json({ error: `category must be one of ${[...VALID_CATS].join(', ')}` });
     if (category === 'other' && (!subcategory || !VALID_SUBS.has(subcategory))) {
@@ -238,9 +248,9 @@ module.exports = (db) => {
 
     db.prepare(`
       UPDATE expenses SET category = ?, subcategory = ?, expense_date = ?, amount = ?,
-        quantity = ?, rate = ?, description = ?
+        quantity = ?, rate = ?, description = ?, start_location = ?, stop_location = ?
       WHERE id = ?
-    `).run(category, subcategory, expense_date, amount, quantity, rate, description, id);
+    `).run(category, subcategory, expense_date, amount, quantity, rate, description, start_location, stop_location, id);
 
     logAudit(db, { entity_type: 'expenses', entity_id: id, user_id: userId, action: 'update',
                    details: { category, amount } });

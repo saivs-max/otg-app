@@ -1441,7 +1441,9 @@ async function renderAdd(root) {
   // by a category change, WO change, or attaching a receipt photo preserve
   // everything the tech has entered so far. (v0.49 fix)
   let selected = { category: 'mileage', subcategory: '', work_order_id: open[0]?.id || '',
-                   expense_date: defaultDate, amount: '', miles: '', description: '', wo_search: '' };
+                   expense_date: defaultDate, amount: '', miles: '', description: '', wo_search: '',
+                   // v0.69 — optional drive endpoints shown on the mileage report.
+                   start_location: '', stop_location: '' };
   // Prefill WO from a previous "Add expense to this WO" flow
   if (STATE._prefillWO && open.find(w => w.id === STATE._prefillWO)) {
     selected.work_order_id = STATE._prefillWO;
@@ -1499,6 +1501,11 @@ async function renderAdd(root) {
           <span class="ico">✓</span><div class="body">Mileage is computed automatically: miles × $0.725.</div>
           <button class="close" data-act="dismiss">×</button>
         </div>
+        <span class="label">Start location (optional)</span>
+        <input class="field" id="startLocInp" placeholder="e.g., Home — 24 Mayflower Dr, Sicklerville, NJ" value="${escapeHTML(selected.start_location || '')}" />
+        <span class="label">Stop location (optional)</span>
+        <input class="field" id="stopLocInp" placeholder="e.g., 6901 Ridge Ave, Roxborough, PA" value="${escapeHTML(selected.stop_location || '')}" />
+        <div class="help">Shown on the mileage reimbursement report. Leave blank to use the work order's store location.</div>
       ` : (cat === 'labor' || cat === 'drive') ? `
         <span class="label">Hours</span>
         <input class="field" type="number" step="0.25" min="0" id="qtyInp" placeholder="2.5" value="${escapeHTML(selected.miles || '')}" />
@@ -1588,6 +1595,9 @@ async function renderAdd(root) {
               ${rateNote ? ` · <span style="color:var(--muted);">${rateNote}</span>` : ''}
             </div>
             ${selected.description ? `<div class="ed-row-notes">${escapeHTML(selected.description)}</div>` : ''}
+            ${cat === 'mileage' && (selected.start_location || selected.stop_location)
+              ? `<div class="ed-row-notes">🚗 ${escapeHTML([selected.start_location || '—', selected.stop_location || (w && w.store_name) || '—'].join(' → '))}</div>`
+              : ''}
             ${thumb}
           </div>
           <div class="ed-row-amt">${fmt$(amt)}</div>
@@ -1614,6 +1624,9 @@ async function renderAdd(root) {
     selected.description = $('#descInp')?.value  ?? selected.description;
     selected.wo_search   = $('#woSearch')?.value ?? selected.wo_search;
     selected.expense_date = $('#dateInp')?.value || selected.expense_date;
+    // v0.69 — preserve drive endpoints across re-renders (mileage only inputs).
+    selected.start_location = $('#startLocInp')?.value ?? selected.start_location;
+    selected.stop_location  = $('#stopLocInp')?.value  ?? selected.stop_location;
   }
   function rerender() {
     if (!previewMode) snapshot();
@@ -1657,6 +1670,11 @@ async function renderAdd(root) {
       body.quantity = Number(selected.miles);
     } else {
       body.amount = Number(selected.amount);
+    }
+    // v0.69 — send drive endpoints for the mileage report when provided.
+    if (selected.category === 'mileage') {
+      if (selected.start_location) body.start_location = selected.start_location;
+      if (selected.stop_location)  body.stop_location  = selected.stop_location;
     }
     try {
       const exp = await api('/expenses', { method: 'POST', body });
@@ -3222,10 +3240,19 @@ function openEditExpenseSheet(exp) {
           if (!body.amount) return toast('Enter amount', 'err');
         }
         try {
-          await api(`/expenses/${exp.id}`, { method: 'PATCH', body });
+          // v0.68.1 — return to the invoice this expense actually belongs to
+          // (e.g. a custom-period draft), not always the current week's invoice.
+          // Mirrors the time-entry edit (goto invDetail, t.invoice_id). The old
+          // goto('invoice') loaded /invoices/current, so editing an expense on a
+          // custom-period invoice bounced the user to the current/submitted week
+          // — the edit saved fine but appeared to "show the submitted invoice"
+          // and never reflected the change on the custom invoice.
+          const updated = await api(`/expenses/${exp.id}`, { method: 'PATCH', body });
           toast('Saved ✓', 'ok');
           closeSheet();
-          goto('invoice');
+          const backInvId = updated?.invoice_id ?? exp.invoice_id;
+          if (backInvId) goto('invDetail', backInvId);
+          else           goto('invoice');
         } catch (e) { toast(e.message, 'err'); }
       });
     }

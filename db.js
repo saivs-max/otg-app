@@ -70,6 +70,10 @@ function ensureSchema(db) {
   // v0.66.2 — Cost Tracker splits Actual Expenses out of Actual Travel; the
   // override table needs a column so manual edits to the new field persist.
   migrateAddColumn(db, 'cost_tracker_overrides', 'actual_expenses', 'REAL');
+  // v0.69 — optional explicit drive endpoints on mileage expenses. The mileage
+  // reimbursement report prefers these over the work order's store location.
+  migrateAddColumn(db, 'expenses', 'start_location', 'TEXT');
+  migrateAddColumn(db, 'expenses', 'stop_location',  'TEXT');
   // v0.48 — Expensify export for FTE field techs. Contractors keep the
   // existing PDF→AP flow. Each invoice can be sent to Expensify once and
   // we track the resulting Expensify reportID + URL for re-opening it.
@@ -385,6 +389,10 @@ function migrateExpensesCategoryCheck(db) {
       quantity        REAL,
       rate            REAL,
       description     TEXT,
+      -- v0.69 — keep this rebuild DDL in sync with schema.sql so the dynamic
+      -- colList copy (which now includes these) doesn't fail on older DBs.
+      start_location  TEXT,
+      stop_location   TEXT,
       receipt_path    TEXT,
       invoice_id      INTEGER REFERENCES invoices(id),
       created_at      TEXT    DEFAULT CURRENT_TIMESTAMP
