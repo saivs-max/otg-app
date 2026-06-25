@@ -44,6 +44,34 @@ module.exports = (db) => {
     res.json(rows);
   });
 
+  // GET /api/timeentries/:id  → a single entry (with WO fields + computed hours).
+  // v0.68 — needed so the Ops-Mgr review edit sheet can load a tech's entry by id.
+  // GET /timeentries is owner/proxy-scoped, but a manager reviewing a SUBMITTED
+  // invoice isn't in proxy mode, so list-and-find won't see the tech's rows.
+  // Authorization mirrors GET /expenses/:id and the PATCH path: sr/pm, or an
+  // ops_manager on the owning tech's team.
+  router.get('/timeentries/:id', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'invalid id' });
+    const e = db.prepare(`
+      SELECT t.*, w.external_id, w.source_system, w.work_type, w.store_name, w.cart_count
+      FROM time_entries t JOIN work_orders w ON w.id = t.work_order_id
+      WHERE t.id = ?
+    `).get(id);
+    if (!e) return res.status(404).json({ error: 'not found' });
+    if (e.user_id !== userId) {
+      const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+      const allowed = me && (
+        me.role === 'sr_manager' || me.role === 'pm' ||
+        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
+      );
+      if (!allowed) return res.status(403).json({ error: 'not yours' });
+    }
+    res.json({ ...e, hours: sumHours([e]) });
+  });
+
   // POST /api/timeentries
   // Modes:
   //   (a) live clock-in:  { work_order_id, mode?, gps? }

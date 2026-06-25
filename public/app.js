@@ -2948,9 +2948,21 @@ function editTimeRowHTML(t, invoice, isDrive, opts = {}) {
       </div>
       <div class="ed-row-amt">${isDrive ? '—' : fmt$(amt)}</div>
       <div class="ed-row-acts">
-        ${(opts.hideTimeEditDelete || opts.readOnly) ? '' : `
-        <button class="btn-icon" title="Edit" data-edit-time="${t.id}">✏️</button>
-        <button class="btn-icon btn-icon-danger" title="Delete" data-del-time="${t.id}">×</button>`}
+        ${(() => {
+          // v0.68 — Ops/Sr/PM managers can EDIT a line item's value in the
+          // review working copy (where hideTimeEditDelete normally hides the
+          // tech-facing edit/delete). Editing recomputes the invoice total and
+          // notifies the tech (see PATCH /timeentries). Delete stays draft-only
+          // for the tech — managers correct values, they don't remove logged
+          // work mid-review (and the server blocks deleting a submitted entry).
+          const isMgr = ['ops_manager','sr_manager','pm'].includes(STATE.user?.role);
+          const showEdit   = !opts.readOnly && (!opts.hideTimeEditDelete || isMgr);
+          const showDelete = !opts.readOnly && !opts.hideTimeEditDelete;
+          return `
+            ${showEdit   ? `<button class="btn-icon" title="${isMgr ? 'Edit value' : 'Edit'}" data-edit-time="${t.id}">✏️</button>` : ''}
+            ${showDelete ? `<button class="btn-icon btn-icon-danger" title="Delete" data-del-time="${t.id}">×</button>` : ''}
+          `;
+        })()}
       </div>
     </div>
   `;
@@ -2991,21 +3003,36 @@ function editExpenseRowHTML(e, invoice, opts = {}) {
 
 // Single-entry edit sheet for one time entry (loads it fresh from the API
 // so we always edit the latest values, regardless of what was rendered).
+// v0.68 — fetch the entry by id (GET /timeentries/:id) so an Ops Mgr reviewing
+// a SUBMITTED invoice can edit a tech's entry — the list endpoint is owner-/
+// proxy-scoped and wouldn't return it in review mode. Also adds a direct
+// "Hours" field so a manager can set the billable value without reverse-
+// engineering the end time; we translate it back to a clock_out the server
+// validates and the invoice total recomputes from (PATCH /timeentries).
 async function openEditOneTimeSheet(timeEntryId) {
   let t;
   try {
-    const all = await api('/timeentries');
-    t = all.find(x => x.id === timeEntryId);
-  } catch (e) { return toast(e.message, 'err'); }
+    t = await api(`/timeentries/${timeEntryId}`);
+  } catch (e) { return toast(e.message === 'not found' ? 'Time entry not found' : e.message, 'err'); }
   if (!t) return toast('Time entry not found', 'err');
 
   const dateISO = (t.clock_in || '').slice(0, 10);
   const startT  = (t.clock_in || '').slice(11, 16);
   const endT    = (t.clock_out || '').slice(11, 16);
+  // Current billable hours (server returns it computed; fall back to derive).
+  const curHours = (t.hours != null && isFinite(+t.hours))
+    ? +t.hours
+    : (t.clock_in && t.clock_out
+        ? Math.max(0, ((new Date(t.clock_out) - new Date(t.clock_in)) - (t.break_minutes || 0) * 60000) / 3600000)
+        : 0);
+  // Is a manager editing someone else's entry? Drives the "tech is notified" hint.
+  const editingOthers = ['ops_manager','sr_manager','pm'].includes(STATE.user?.role)
+    && t.user_id !== STATE.user?.id;
 
   showSheet(`
     <h3>Edit time entry</h3>
     <p class="help" style="margin-top:-4px;">Linked to ${escapeHTML(t.external_id || 'WO')} · ${escapeHTML(t.store_name || '')}</p>
+    ${editingOthers ? `<div class="alert" style="margin:0 0 10px;font-size:12px;background:#fff7ef;border:1px solid var(--ic-orange);color:var(--ic-orange-deep);padding:8px 10px;border-radius:8px;">Saving updates the invoice total and notifies the technician that this value changed.</div>` : ''}
 
     <span class="label">Date</span>
     <input class="field" id="te_date" type="date" value="${dateISO}" />
@@ -3020,6 +3047,10 @@ async function openEditOneTimeSheet(timeEntryId) {
         <input class="field" id="te_end" type="time" value="${endT}" />
       </div>
     </div>
+
+    <span class="label">Hours${(t.mode||'work')==='drive' ? '' : ' (billable)'}</span>
+    <input class="field" id="te_hours" type="number" min="0" max="24" step="0.25" value="${+curHours.toFixed(2)}" />
+    <p class="help" style="margin-top:-6px;">Set hours directly — the end time updates to match. Leave the end time to drive it instead.</p>
 
     <div class="flex gap-12">
       <div style="flex:1;">
@@ -3045,6 +3076,37 @@ async function openEditOneTimeSheet(timeEntryId) {
   `, {
     onMount: (wrap) => {
       $$('[data-act="sheet-close"]', wrap).forEach(b => b.addEventListener('click', closeSheet));
+      // Format a Date as a naive local datetime string — same wall-clock frame
+      // as the clock_in we send, so the server computes the duration tz-safely.
+      const pad = n => String(n).padStart(2, '0');
+      const toNaiveLocal = dt =>
+        `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:00`;
+      const endDateFromHours = () => {
+        const d = $('#te_date', wrap).value, s = $('#te_start', wrap).value;
+        const h = parseFloat($('#te_hours', wrap).value);
+        const bm = Number($('#te_break', wrap).value) || 0;
+        if (!d || !s || !isFinite(h) || h <= 0) return null;
+        const start = new Date(`${d}T${s}:00`);
+        if (isNaN(start)) return null;
+        return new Date(start.getTime() + bm * 60000 + h * 3600000);
+      };
+      // Two-way sync (setting .value doesn't fire 'input', so no loop).
+      $('#te_hours', wrap).addEventListener('input', () => {
+        const end = endDateFromHours();
+        if (end) $('#te_end', wrap).value = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
+      });
+      const syncHoursFromTimes = () => {
+        const d = $('#te_date', wrap).value, s = $('#te_start', wrap).value, e = $('#te_end', wrap).value;
+        const bm = Number($('#te_break', wrap).value) || 0;
+        if (!d || !s || !e) return;
+        let end = new Date(`${d}T${e}:00`); const start = new Date(`${d}T${s}:00`);
+        if (isNaN(end) || isNaN(start)) return;
+        if (end <= start) end = new Date(end.getTime() + 24*3600000); // crossed midnight
+        const h = Math.max(0, ((end - start) - bm * 60000) / 3600000);
+        $('#te_hours', wrap).value = +h.toFixed(2);
+      };
+      ['te_start','te_end','te_break'].forEach(id =>
+        $('#'+id, wrap).addEventListener('input', syncHoursFromTimes));
       $('#te_save', wrap).addEventListener('click', async () => {
         const d  = $('#te_date',  wrap).value;
         const s  = $('#te_start', wrap).value;
@@ -3053,16 +3115,28 @@ async function openEditOneTimeSheet(timeEntryId) {
         const md = $('#te_mode',  wrap).value;
         const n  = $('#te_notes', wrap).value;
         if (!d || !s) return toast('Date and start time required', 'err');
+        // Prefer the explicit Hours value (handles entries that cross midnight);
+        // otherwise fall back to the end-time field.
+        const hoursStr = $('#te_hours', wrap).value;
+        const hoursVal = parseFloat(hoursStr);
+        let clockOut;
+        if (hoursStr !== '' && isFinite(hoursVal) && hoursVal > 0) {
+          const endDt = endDateFromHours();
+          if (!endDt) return toast('Could not compute end time from hours', 'err');
+          clockOut = toNaiveLocal(endDt);
+        } else {
+          clockOut = e ? `${d}T${e}:00` : null;
+        }
         const body = {
           clock_in:      `${d}T${s}:00`,
-          clock_out:     e ? `${d}T${e}:00` : null,
+          clock_out:     clockOut,
           break_minutes: bm,
           mode:          md,
           notes:         n,
         };
         try {
           await api(`/timeentries/${t.id}`, { method: 'PATCH', body });
-          toast('Saved ✓', 'ok');
+          toast(editingOthers ? 'Saved ✓ — technician notified' : 'Saved ✓', 'ok');
           closeSheet();
           goto('invDetail', t.invoice_id);
         } catch (er) { toast(er.message, 'err'); }
@@ -8601,7 +8675,7 @@ async function renderInvoiceDetail(root, invoiceId) {
     ${isMgrReview ? `
       <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-orange); background: #fff7ef;">
         <div class="section-title" style="margin-top: 0; color: var(--ic-orange-deep);">Review · submitted vs working copy</div>
-        <p class="help" style="margin: 0;">Left is the invoice <strong>as submitted</strong>. Edit on the <strong>right</strong> — the working total updates as you save each change, and you can split tagged work into wasted vs actual. Tags are backend-only; they never appear on the AP invoice.</p>
+        <p class="help" style="margin: 0;">Left is the invoice <strong>as submitted</strong> by the technician. Edit on the <strong>right</strong> — adjust labor hours, drive time, and expense amounts; the working total updates as you save each change and the technician is notified that their values changed. You can also tag work as unplanned and split it into wasted vs actual. Tags are backend-only; they never appear on the AP invoice.</p>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;">
         <div style="flex:1;min-width:320px;">
