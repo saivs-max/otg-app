@@ -20,6 +20,10 @@ const rulesEvaluator = require('./rules');
 // v0.58 — Run the policy engine against every WO line on an invoice and
 // return the resulting flag count. Used to decorate queue rows so Ops Mgrs
 // can see at-a-glance which invoices need attention before they drill in.
+// v0.67.2 — now also runs the per-WO/category budget evaluator (evaluateBudgets),
+// so the queue surfaces overages (wo_category_budget / category_per_wo_cap /
+// category_receipt_required) instead of dropping them. Previously this only ran
+// evaluate(), so budget overages showed on the invoice side but never here.
 function computeFlagsForInvoice(db, invoiceId) {
   const allTimes = db.prepare(`
     SELECT t.*, w.external_id, w.work_type, w.store_name, w.cart_count
@@ -36,24 +40,31 @@ function computeFlagsForInvoice(db, invoiceId) {
   const byWO = {};
   for (const t of allTimes) {
     const k = t.external_id;
-    byWO[k] ||= { external_id: k, work_type: t.work_type, store_name: t.store_name, cart_count: t.cart_count, labor_hours: 0 };
+    // v0.67.2 — capture work_order_id so evaluateBudgets() (per-WO budgets) can run.
+    byWO[k] ||= { external_id: k, work_order_id: t.work_order_id, work_type: t.work_type, store_name: t.store_name, cart_count: t.cart_count, labor_hours: 0 };
     if ((t.mode || 'work') === 'work') byWO[k].labor_hours += sumHours([t]);
   }
   for (const e of expenses) {
     const k = e.external_id;
-    byWO[k] ||= { external_id: k, work_type: e.work_type, store_name: e.store_name, cart_count: e.cart_count, labor_hours: 0 };
+    byWO[k] ||= { external_id: k, work_order_id: e.work_order_id, work_type: e.work_type, store_name: e.store_name, cart_count: e.cart_count, labor_hours: 0 };
   }
 
   const flags = [];
   for (const line of Object.values(byWO)) {
+    const lineExpenses = expenses.filter(e => e.external_id === line.external_id);
     const lineFlags = rulesEvaluator.evaluate(db, line,
-      expenses.filter(e => e.external_id === line.external_id),
+      lineExpenses,
       allTimes.filter(t => t.external_id === line.external_id).map(t => ({
         external_id: t.external_id, clock_in: t.clock_in, clock_out: t.clock_out,
         mode: t.mode || 'work', hours: sumHours([t]),
       }))
     );
     for (const f of lineFlags) flags.push({ wo: line.external_id, store: line.store_name, ...f });
+    // v0.67.2 — per-WO / category budget overages, mirroring computeInvoice on
+    // the invoice side. evaluateBudgets() reads wo_category_budgets + category_rules
+    // (and live corp-card spend) and no-ops without line.work_order_id.
+    const budgetFlags = rulesEvaluator.evaluateBudgets(db, line, lineExpenses);
+    for (const f of budgetFlags) flags.push({ wo: line.external_id, store: line.store_name, ...f });
   }
   return flags;
 }
@@ -405,6 +416,16 @@ module.exports = (db) => {
     const id = Number(req.params.id);
     const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(id);
     if (!inv) return res.status(404).json({ error: 'invoice not found' });
+
+    // v0.67.1 — Segregation of duties: you cannot escalate your own invoice
+    // (tech-labor owner / vendor creator). Escalation advances submitted →
+    // approved_ops, so without this guard an approver could move an invoice
+    // they're party to onward themselves. Mirrors the /approve self-guard.
+    const ownerOrCreator = inv.invoice_type === 'vendor' ? inv.created_by : inv.user_id;
+    if (ownerOrCreator && ownerOrCreator === userId) {
+      return res.status(409).json({ error: 'you cannot escalate your own invoice — a different manager is required' });
+    }
+
     if (inv.status !== 'submitted' && inv.status !== 'approved_ops') {
       return res.status(409).json({ error: `invoice must be submitted or approved_ops to escalate (current: ${inv.status})` });
     }
