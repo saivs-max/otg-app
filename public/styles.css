@@ -1047,18 +1047,21 @@ button, input, select, textarea { font-size: inherit; }
   display: flex; gap: 16px; align-items: flex-start; padding: 8px 0;
 }
 .donut-svg {
-  width: 180px; height: 180px; flex-shrink: 0;
+  width: 200px; height: 200px; flex-shrink: 0;
 }
 .donut-svg path {
   cursor: pointer; transition: opacity .12s ease, transform .12s ease;
-  transform-origin: 90px 90px;
+  transform-origin: 100px 100px;
 }
 .donut-svg path:hover { opacity: 0.85; transform: scale(1.02); }
 .donut-center-label {
   font-size: 11px; fill: var(--muted); font-weight: 600; letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.donut-center-value { font-size: 18px; font-weight: 700; fill: var(--ic-green-deep); }
+.donut-center-value { font-size: 20px; font-weight: 700; fill: var(--ic-green-deep); }
+/* v0.75 — per-slice share bar in the donut legend */
+.dl-track { height: 6px; border-radius: 3px; background: #eef0f3; margin: 4px 0 2px; overflow: hidden; }
+.dl-fill  { height: 100%; border-radius: 3px; }
 .donut-legend { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .donut-legend-row {
   display: flex; align-items: center; gap: 10px;
@@ -1115,12 +1118,10 @@ button, input, select, textarea { font-size: inherit; }
   padding-top: 12px; border-top: 1px solid var(--line);
 }
 
-/* Column chart */
-.column-svg { width: 100%; height: 200px; display: block; }
-.column-svg rect {
-  cursor: pointer; transition: opacity .12s ease;
-}
-.column-svg rect:hover { opacity: 1; filter: brightness(1.1); }
+/* Column chart (v0.75 — auto height for the taller redesigned canvas) */
+.column-svg { width: 100%; height: auto; display: block; }
+.column-svg rect { transition: filter .12s ease; }
+.column-svg rect:hover { filter: brightness(1.06); }
 
 /* v0.46 — Vertical bar chart (renderVerticalBarCard) */
 .vbar-svg .vbar-bar {
@@ -1136,6 +1137,21 @@ button, input, select, textarea { font-size: inherit; }
   outline: 2px solid var(--ic-orange);
   outline-offset: 2px;
 }
+
+/* v0.75 — Tableau-style horizontal ranked bars (renderBarCard / renderVerticalBarCard) */
+.hbar-svg { width: 100%; height: auto; display: block; }
+.hbar-svg .hb-bar { transition: filter .15s ease; }
+.hbar-svg .hb-row { cursor: pointer; }
+.hbar-svg .hb-row:hover .hb-bar {
+  filter: brightness(1.07) drop-shadow(0 1px 3px rgba(31, 122, 31, 0.28));
+}
+.hbar-svg .hb-row:focus { outline: none; }
+.hbar-svg .hb-row:focus-visible .hb-bar {
+  outline: 2px solid var(--ic-orange); outline-offset: 2px;
+}
+.hbar-svg .hb-rank { font-size: 12px; font-weight: 700; fill: #b9bcc0; }
+.hbar-svg .hb-cat  { font-size: 13.5px; font-weight: 600; fill: #33373b; }
+.hbar-svg .hb-val  { font-size: 13.5px; font-weight: 700; fill: var(--ic-green-deep); }
 
 /* Modernize KPI tiles slightly */
 .kpi-tile {
