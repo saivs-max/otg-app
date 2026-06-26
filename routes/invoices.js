@@ -353,8 +353,16 @@ module.exports = (db) => {
       }))
       .sort((a, b) => a.date.localeCompare(b.date));
 
-    // Persist total
-    db.prepare("UPDATE invoices SET total = ? WHERE id = ?").run(+total.toFixed(2), invoiceId);
+    // Persist total — but NEVER for vendor invoices. A vendor invoice's total is
+    // entered at upload / vendor-update and is the source of truth (it has no time
+    // entries or expenses to recompute from, so `total` here is 0). v0.43 guarded
+    // the *returned* total (see finalTotal below); this guards the *persisted*
+    // column too. Without it, merely opening a vendor draft zeroed its stored
+    // total, which then made vendor-submit falsely reject "total required" and
+    // silently corrupted already-approved vendor totals. (v0.72.1 bugfix)
+    if (inv.invoice_type !== 'vendor') {
+      db.prepare("UPDATE invoices SET total = ? WHERE id = ?").run(+total.toFixed(2), invoiceId);
+    }
 
     // Attachments linked to this invoice or any of its expenses / time_entries / WOs
     const attachments = db.prepare(`
@@ -796,11 +804,11 @@ module.exports = (db) => {
     if (typeof notes === 'string') { updates.push('notes = ?'); params.push(notes); }
 
     if (period_start) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(period_start)) return res.status(400).json({ error: 'period_start must be YYYY-MM-DD' });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(period_start)) return res.status(400).json({ error: 'Period start must be a valid date (YYYY-MM-DD)' });
       updates.push('period_start = ?'); params.push(period_start);
     }
     if (period_end) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(period_end)) return res.status(400).json({ error: 'period_end must be YYYY-MM-DD' });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(period_end)) return res.status(400).json({ error: 'Period end must be a valid date (YYYY-MM-DD)' });
       updates.push('period_end = ?'); params.push(period_end);
     }
 
@@ -1647,11 +1655,11 @@ module.exports = (db) => {
 
     // v0.44 — BUG-005 fix: cap free-text fields up-front.
     if (typeof vendor_name === 'string' && vendor_name.length > 200)
-      return res.status(400).json({ error: 'vendor_name max 200 chars' });
+      return res.status(400).json({ error: 'Vendor name must be 200 characters or fewer' });
     if (typeof vendor_invoice_number === 'string' && vendor_invoice_number.length > 80)
-      return res.status(400).json({ error: 'vendor_invoice_number max 80 chars' });
+      return res.status(400).json({ error: 'Invoice # must be 80 characters or fewer' });
     if (typeof notes === 'string' && notes.length > 2000)
-      return res.status(400).json({ error: 'notes max 2000 chars' });
+      return res.status(400).json({ error: 'Notes must be 2000 characters or fewer' });
 
     // v0.39 — If a PDF is attached, parse it FIRST and use the extracted
     // values to fill any missing manual fields. The Ops Mgr can still type
@@ -1701,11 +1709,12 @@ module.exports = (db) => {
     const amt = Number(total) || 0;
     const hasPdfBacking = !!extractedVendor;
     if (!hasPdfBacking) {
+      // v0.72.1 — user-facing field labels in the alert (not internal column names).
       const missing = [];
-      if (!vendor_name)           missing.push('vendor_name');
-      if (!vendor_invoice_number) missing.push('vendor_invoice_number');
-      if (!vendor_invoice_date)   missing.push('vendor_invoice_date');
-      if (!(amt > 0))             missing.push('total');
+      if (!vendor_name)           missing.push('Vendor name');
+      if (!vendor_invoice_number) missing.push('Invoice #');
+      if (!vendor_invoice_date)   missing.push('Invoice date');
+      if (!(amt > 0))             missing.push('Total');
       if (missing.length) {
         return res.status(400).json({
           error: `Required: ${missing.join(', ')}. Attach a PDF to auto-extract these.`,
@@ -1843,21 +1852,23 @@ module.exports = (db) => {
 
     if ('total' in updates) {
       const n = Number(updates.total);
-      if (!isFinite(n) || n <= 0) return res.status(400).json({ error: 'total must be > 0' });
+      if (!isFinite(n) || n <= 0) return res.status(400).json({ error: 'Total must be greater than 0' });
       updates.total = +n.toFixed(2);
     }
+    // v0.72.1 — user-facing labels for date-format errors.
+    const DATE_LABELS = { vendor_invoice_date: 'Invoice date', period_start: 'Period start', period_end: 'Period end' };
     for (const dateField of ['vendor_invoice_date','period_start','period_end']) {
       if (dateField in updates && updates[dateField] && !/^\d{4}-\d{2}-\d{2}$/.test(updates[dateField])) {
-        return res.status(400).json({ error: `${dateField} must be YYYY-MM-DD` });
+        return res.status(400).json({ error: `${DATE_LABELS[dateField]} must be a valid date (YYYY-MM-DD)` });
       }
     }
-    // v0.44 — BUG-005 fix: cap free-text fields.
+    // v0.44 — BUG-005 fix: cap free-text fields. (v0.72.1 — friendly labels)
     if (typeof updates.vendor_name === 'string' && updates.vendor_name.length > 200)
-      return res.status(400).json({ error: 'vendor_name max 200 chars' });
+      return res.status(400).json({ error: 'Vendor name must be 200 characters or fewer' });
     if (typeof updates.vendor_invoice_number === 'string' && updates.vendor_invoice_number.length > 80)
-      return res.status(400).json({ error: 'vendor_invoice_number max 80 chars' });
+      return res.status(400).json({ error: 'Invoice # must be 80 characters or fewer' });
     if (typeof updates.notes === 'string' && updates.notes.length > 2000)
-      return res.status(400).json({ error: 'notes max 2000 chars' });
+      return res.status(400).json({ error: 'Notes must be 2000 characters or fewer' });
 
     if (Object.keys(updates).length === 0) {
       return res.json(inv); // nothing to change
@@ -1941,8 +1952,17 @@ module.exports = (db) => {
     if (inv.user_id !== me.id && me.role === 'ops_manager') {
       return res.status(403).json({ error: 'only the uploader (or Sr Mgr / PM) can submit this draft' });
     }
-    if (!inv.vendor_name || !inv.vendor_invoice_number || !inv.vendor_invoice_date || !(inv.total > 0)) {
-      return res.status(400).json({ error: 'vendor_name, vendor_invoice_number, vendor_invoice_date, and a positive total are required before submit' });
+    // v0.72.1 — report only the fields that are actually missing, using
+    // user-facing labels (not internal column names).
+    const missing = [];
+    if (!inv.vendor_name)           missing.push('Vendor name');
+    if (!inv.vendor_invoice_number) missing.push('Invoice #');
+    if (!inv.vendor_invoice_date)   missing.push('Invoice date');
+    if (!(inv.total > 0))           missing.push('a positive Total');
+    if (missing.length) {
+      return res.status(400).json({
+        error: `${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} required before submitting to Sr Mgr.`,
+      });
     }
 
     // v0.44 — BUG-006 fix: race-safe state transition. The UPDATE asserts the

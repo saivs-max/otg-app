@@ -836,7 +836,12 @@ async function renderWoDetail(root, woId) {
   if (!woId) return goto('home');
   const w = await api(`/workorders/${woId}`);
 
-  const total = (w.expenses || []).reduce((s, e) => s + e.amount, 0);
+  // v0.67 — labor/drive logged as expenses (quantity = hours) are TIME, not
+  // out-of-pocket spend. Show them in the labor/time area and keep "Expenses"
+  // for real expenses. Editing/adding stays the same (the expense form).
+  const laborDriveExp = (w.expenses || []).filter(e => e.category === 'labor' || e.category === 'drive');
+  const realExpenses  = (w.expenses || []).filter(e => e.category !== 'labor' && e.category !== 'drive');
+  const total = realExpenses.reduce((s, e) => s + e.amount, 0);
   const totalHours = (w.time_entries || []).reduce((s, t) => {
     const ms = (t.clock_out ? new Date(t.clock_out) : new Date()) - new Date(t.clock_in);
     return s + Math.max(0, (ms - (t.break_minutes || 0) * 60000) / 3600000);
@@ -922,10 +927,10 @@ async function renderWoDetail(root, woId) {
       <div id="woDetailMap-dist" style="font-size: 13px; color: var(--ink-2); text-align: center; padding: 4px 0 14px;"></div>
     ` : ''}
 
-    <div class="section-title">Time entries (${(w.time_entries || []).length})</div>
-    ${w.time_entries.length === 0
+    <div class="section-title">Time entries (${(w.time_entries || []).length + laborDriveExp.length})</div>
+    ${(w.time_entries.length === 0 && laborDriveExp.length === 0)
       ? `<div class="card" style="background:#fafafa; text-align:center; color: var(--muted); font-size: 13px;">No time logged yet for this WO.</div>`
-      : w.time_entries.map(t => {
+      : `${w.time_entries.map(t => {
           const dur = t.clock_out ? ((new Date(t.clock_out) - new Date(t.clock_in)) / 3600000).toFixed(2) : '—';
           const isDrive = (t.mode || 'work') === 'drive';
           return `
@@ -945,11 +950,32 @@ async function renderWoDetail(root, woId) {
             </div>
           `;
         }).join('')}
+        ${laborDriveExp.map(e => {
+          // v0.67 — labor/drive logged as an expense (quantity = hours). Rendered
+          // here as labor/time, not under Expenses. Still edited via the expense form.
+          const isDrive = e.category === 'drive';
+          const hrs = (e.quantity != null && e.quantity !== '') ? Number(e.quantity).toFixed(2)
+                    : (e.rate ? (e.amount / e.rate).toFixed(2) : null);
+          return `
+            <div class="card" style="padding: 14px;">
+              <div class="flex between">
+                <div>
+                  <span class="badge ${isDrive ? 'pending' : 'approved'}">${isDrive ? '🚗 Drive' : '🛠 Work'}</span><span class="badge gray" style="margin-left:6px;">logged as hours</span>
+                  <strong style="margin-left: 8px;">${fmtDate(e.expense_date)}</strong>${e.tech_name ? `<span class="meta"> · ${escapeHTML(e.tech_name)}</span>` : ''}
+                  ${e.description ? `<div class="meta">${escapeHTML(e.description)}</div>` : ''}
+                </div>
+                <div class="amt" style="text-align:right;"><strong>${hrs != null ? `${hrs} hr${hrs === '1.00' ? '' : 's'}` : ''}</strong><div class="meta">${fmt$(e.amount)}</div></div>
+              </div>
+              ${['ops_manager','sr_manager','pm'].includes(STATE.user?.role)
+                ? `<div style="margin-top:8px;">${renderUnplannedTagBtn('expense', e.id, e.unplanned_tag, e.unplanned_note, e.amount, e.unplanned_wasted)}</div>${unplannedNoteLine(e.unplanned_tag, e.unplanned_note)}${unplannedSplitLine(e.unplanned_tag, e.unplanned_wasted, e.amount)}` : ''}
+            </div>
+          `;
+        }).join('')}`}
 
-    <div class="section-title">Expenses (${(w.expenses || []).length} · ${fmt$(total)})</div>
-    ${w.expenses.length === 0
+    <div class="section-title">Expenses (${realExpenses.length} · ${fmt$(total)})</div>
+    ${realExpenses.length === 0
       ? `<div class="card" style="background:#fafafa; text-align:center; color: var(--muted); font-size: 13px;">No expenses on this WO yet.</div>`
-      : w.expenses.map(e => `
+      : realExpenses.map(e => `
           <div class="card" style="padding: 12px 14px;">
             <div class="flex between">
               <div>

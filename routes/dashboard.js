@@ -1058,24 +1058,29 @@ function buildSubmittedApprovedInvoicesByStore(db, req) {
       w.external_id            AS wo_external_id,
       w.store_name, w.store_id,
       w.work_type, w.cart_count, w.scheduled_date, w.title,
-      COALESCE((
-        SELECT SUM(
-          CASE WHEN t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
-               THEN (julianday(t.clock_out) - julianday(t.clock_in)) * 24 * COALESCE(u.hourly_rate, 40)
-               ELSE 0 END
-        )
-        FROM time_entries t
-        WHERE t.invoice_id = i.id AND t.work_order_id = w.id
-      ), 0) AS labor_subtotal,
-      COALESCE((
-        SELECT SUM(
-          CASE WHEN t.clock_out IS NOT NULL AND t.mode = 'drive'
-               THEN (julianday(t.clock_out) - julianday(t.clock_in)) * 24 * COALESCE(u.hourly_rate, 40)
-               ELSE 0 END
-        )
-        FROM time_entries t
-        WHERE t.invoice_id = i.id AND t.work_order_id = w.id
-      ), 0) AS drive_subtotal,
+      -- v0.67 — labor = clocked work time OR labor logged as an expense (quantity=hours).
+      -- When both exist for this tech/WO the manual expense WINS (replaces the clock),
+      -- matching the cost tracker so the pipeline visit_total reconciles 1:1.
+      CASE WHEN COALESCE((
+             SELECT SUM(e.amount) FROM expenses e
+             WHERE e.invoice_id = i.id AND e.work_order_id = w.id AND e.category = 'labor'), 0) > 0
+        THEN COALESCE((SELECT SUM(e.amount) FROM expenses e
+             WHERE e.invoice_id = i.id AND e.work_order_id = w.id AND e.category = 'labor'), 0)
+        ELSE COALESCE((
+          SELECT SUM(CASE WHEN t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+               THEN (julianday(t.clock_out) - julianday(t.clock_in)) * 24 * COALESCE(u.hourly_rate, 40) ELSE 0 END)
+          FROM time_entries t WHERE t.invoice_id = i.id AND t.work_order_id = w.id), 0)
+      END AS labor_subtotal,
+      CASE WHEN COALESCE((
+             SELECT SUM(e.amount) FROM expenses e
+             WHERE e.invoice_id = i.id AND e.work_order_id = w.id AND e.category = 'drive'), 0) > 0
+        THEN COALESCE((SELECT SUM(e.amount) FROM expenses e
+             WHERE e.invoice_id = i.id AND e.work_order_id = w.id AND e.category = 'drive'), 0)
+        ELSE COALESCE((
+          SELECT SUM(CASE WHEN t.clock_out IS NOT NULL AND t.mode = 'drive'
+               THEN (julianday(t.clock_out) - julianday(t.clock_in)) * 24 * COALESCE(u.hourly_rate, 40) ELSE 0 END)
+          FROM time_entries t WHERE t.invoice_id = i.id AND t.work_order_id = w.id), 0)
+      END AS drive_subtotal,
       COALESCE((
         SELECT SUM(e.amount)
         FROM expenses e
@@ -1262,39 +1267,64 @@ function buildCostTrackerRows(db, req) {
   //   visit_total = work-labor + drive-labor + (expenses NOT IN 'labor','drive').
   const travelByWo  = {};
   const expenseByWo = {};
-  // (a) drive-mode labor on an approved invoice → Travel
-  const driveRows = db.prepare(`
-    SELECT t.work_order_id AS wo, COALESCE(SUM(
-      CASE WHEN t.clock_out IS NOT NULL AND t.mode = 'drive'
-           THEN (julianday(t.clock_out) - julianday(t.clock_in)) * 24 * COALESCE(u.hourly_rate, 40)
-           ELSE 0 END
-    ), 0) AS drive
-    FROM time_entries t
-    LEFT JOIN users u ON u.id = t.user_id
-    WHERE t.work_order_id IS NOT NULL
-      AND t.invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})
-    GROUP BY t.work_order_id
-  `).all();
-  for (const r of driveRows) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.drive;
-  // (b) travel-category expenses on an approved invoice → Travel
-  const travelExpRows = db.prepare(`
+  const APPROVED_INV = `invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})`;
+
+  // ----- Per-(work-order, tech) labor/drive resolution -----
+  // v0.67 — labor & drive can be recorded two ways: the clock (work/drive-mode
+  // time entries) OR logged as an expense (category='labor'/'drive', quantity=
+  // hours). When BOTH exist for the SAME tech on a WO, the manual entry is the
+  // source of truth and REPLACES that tech's timer (no double-counting). Resolved
+  // per tech so another tech's clocked time on the same WO is never dropped.
+  const woUser = {};   // wo -> { uid -> { work, drive, laborExp, driveExp } }
+  const slot = (wo, uid) => {
+    woUser[wo] = woUser[wo] || {};
+    return (woUser[wo][uid] = woUser[wo][uid] || { work: 0, drive: 0, laborExp: 0, driveExp: 0 });
+  };
+  // clocked time (approved), split work vs drive, per (wo, user)
+  for (const r of db.prepare(`
+    SELECT t.work_order_id AS wo, t.user_id AS uid,
+      COALESCE(SUM(CASE WHEN t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+        THEN (julianday(t.clock_out) - julianday(t.clock_in)) * 24 * COALESCE(u.hourly_rate, 40) ELSE 0 END), 0) AS work,
+      COALESCE(SUM(CASE WHEN t.clock_out IS NOT NULL AND t.mode = 'drive'
+        THEN (julianday(t.clock_out) - julianday(t.clock_in)) * 24 * COALESCE(u.hourly_rate, 40) ELSE 0 END), 0) AS drive
+    FROM time_entries t LEFT JOIN users u ON u.id = t.user_id
+    WHERE t.work_order_id IS NOT NULL AND t.${APPROVED_INV}
+    GROUP BY t.work_order_id, t.user_id
+  `).all()) { const s = slot(r.wo, r.uid); s.work += r.work; s.drive += r.drive; }
+  // labor/drive logged AS EXPENSES (approved), per (wo, user)
+  for (const r of db.prepare(`
+    SELECT work_order_id AS wo, user_id AS uid, category, COALESCE(SUM(amount), 0) AS amt
+    FROM expenses
+    WHERE category IN ('labor','drive') AND work_order_id IS NOT NULL AND ${APPROVED_INV}
+    GROUP BY work_order_id, user_id, category
+  `).all()) { const s = slot(r.wo, r.uid); if (r.category === 'labor') s.laborExp += r.amt; else s.driveExp += r.amt; }
+
+  // Resolve: per tech, manual (expense) wins over the clock when both exist.
+  const laborByWo = {};   // resolved → Act Labor
+  for (const [wo, users] of Object.entries(woUser)) {
+    let labor = 0, drive = 0;
+    for (const u of Object.values(users)) {
+      labor += (u.laborExp > 0 ? u.laborExp : u.work);    // manual labor replaces clocked work
+      drive += (u.driveExp > 0 ? u.driveExp : u.drive);   // manual drive replaces clocked drive
+    }
+    laborByWo[wo] = labor;
+    travelByWo[wo] = (travelByWo[wo] || 0) + drive;        // resolved drive → Travel
+  }
+  // travel-category expenses (mileage/tolls/parking/travel) → Travel (always added)
+  for (const r of db.prepare(`
     SELECT work_order_id AS wo, COALESCE(SUM(amount), 0) AS amt
     FROM expenses
-    WHERE category IN ('mileage','tolls','travel','parking') AND work_order_id IS NOT NULL
-      AND invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})
+    WHERE category IN ('mileage','tolls','travel','parking') AND work_order_id IS NOT NULL AND ${APPROVED_INV}
     GROUP BY work_order_id
-  `).all();
-  for (const r of travelExpRows) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.amt;
-  // (c) every other approved expense (materials / 'other' / vendor / misc) → Expenses
-  const otherExpRows = db.prepare(`
+  `).all()) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.amt;
+  // every other approved expense (materials / 'other' / vendor / misc) → Expenses
+  for (const r of db.prepare(`
     SELECT work_order_id AS wo, COALESCE(SUM(amount), 0) AS amt
     FROM expenses
     WHERE category NOT IN ('labor','drive','mileage','tolls','travel','parking')
-      AND work_order_id IS NOT NULL
-      AND invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})
+      AND work_order_id IS NOT NULL AND ${APPROVED_INV}
     GROUP BY work_order_id
-  `).all();
-  for (const r of otherExpRows) expenseByWo[r.wo] = (expenseByWo[r.wo] || 0) + r.amt;
+  `).all()) expenseByWo[r.wo] = (expenseByWo[r.wo] || 0) + r.amt;
 
   // Which work orders have at least one line on an approved invoice? Only these
   // (when also completed) contribute their computed actuals to the totals.
@@ -1333,9 +1363,9 @@ function buildCostTrackerRows(db, req) {
   };
 
   return woRows.map(w => {
-    const computedLabor    = +w.actual_labor.toFixed(2);              // approved work-mode labor
-    const computedTravel   = +(travelByWo[w.wo_id]  || 0).toFixed(2); // approved drive + travel exp
-    const computedExpenses = +(expenseByWo[w.wo_id] || 0).toFixed(2); // approved other expenses
+    const computedLabor    = +(laborByWo[w.wo_id]   || 0).toFixed(2); // resolved labor (clock OR manual; manual wins per tech)
+    const computedTravel   = +(travelByWo[w.wo_id]  || 0).toFixed(2); // resolved drive + travel/drive expenses
+    const computedExpenses = +(expenseByWo[w.wo_id] || 0).toFixed(2); // approved other expenses (labor/drive excluded — counted above)
 
     // Manager overrides always win and always count — even before approval.
     const hasLaborOv   = w.o_actual_labor    != null;
