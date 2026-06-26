@@ -214,6 +214,22 @@ CREATE TABLE IF NOT EXISTS expenses (
 CREATE INDEX IF NOT EXISTS idx_expense_user    ON expenses(user_id);
 CREATE INDEX IF NOT EXISTS idx_expense_invoice ON expenses(invoice_id);
 
+-- v0.73 — Vendor master list. Every vendor name used on a 3rd-party invoice is
+-- auto-saved here (routes/invoices.js → upsertVendor; db.js backfills existing
+-- names on boot) so managers can filter by a known vendor and pick one from a
+-- dropdown instead of re-typing it. Deliberately light now (name + optional
+-- default category / notes) with room to grow into full vendor records.
+CREATE TABLE IF NOT EXISTS vendors (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  name             TEXT NOT NULL UNIQUE COLLATE NOCASE,   -- case-insensitive unique
+  default_category TEXT,                                  -- typical work category (deployment/retrofit/service/…)
+  notes            TEXT,
+  created_by       INTEGER REFERENCES users(id),
+  created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+  archived_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_vendors_name ON vendors(name);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   entity_type   TEXT NOT NULL,

@@ -996,6 +996,26 @@ module.exports = (db) => {
     res.json({ totals, by_vendor, by_status });
   });
 
+  // v0.73 — Vendor master list for the filter dropdown + the form's vendor
+  // picker. Returns every saved vendor with light usage stats so the UI can
+  // show "Acme (3 · $4,200)". Manager-only, same gate as the rest of the flow.
+  router.get('/vendors', (req, res) => {
+    if (!vendMgr(req, res)) return;
+    const rows = db.prepare(`
+      SELECT v.id, v.name, v.default_category, v.notes,
+             COUNT(i.id)                       AS invoice_count,
+             COALESCE(SUM(i.total), 0)         AS total_spend,
+             MAX(i.vendor_invoice_date)        AS last_invoice_date
+      FROM vendors v
+      LEFT JOIN invoices i
+        ON i.invoice_type = 'vendor' AND TRIM(i.vendor_name) = v.name COLLATE NOCASE
+      WHERE v.archived_at IS NULL
+      GROUP BY v.id
+      ORDER BY v.name COLLATE NOCASE
+    `).all().map(r => ({ ...r, total_spend: +Number(r.total_spend).toFixed(2) }));
+    res.json({ vendors: rows });
+  });
+
   // GET /api/invoices/:id
   // Allowed for: invoice owner, an Ops Mgr who has the tech on their team,
   // any Sr Mgr / PM (they oversee everything).
@@ -1770,6 +1790,10 @@ module.exports = (db) => {
            vendor_category || null);
     const invoiceId = r.lastInsertRowid;
 
+    // v0.73 — auto-save the vendor into the master list so it's available in the
+    // filter dropdown + the vendor picker on future invoices.
+    upsertVendor(db, vendor_name, { category: vendor_category, userId: me.id });
+
     // Attach the original file if provided
     let attachmentId = null;
     if (attachment && attachment.filename && attachment.data_b64) {
@@ -1850,6 +1874,13 @@ module.exports = (db) => {
                      'vendor_category'];   // v0.54 — categorize vendor work
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
 
+    // v0.73 — never blank a stored vendor name with an empty string. The name is
+    // required to submit, so an empty value is always an accident (e.g. a cleared
+    // field on save). Dropping it from the update preserves the parsed/typed name.
+    if (updates.vendor_name !== undefined && String(updates.vendor_name).trim() === '') {
+      delete updates.vendor_name;
+    }
+
     if ('total' in updates) {
       const n = Number(updates.total);
       if (!isFinite(n) || n <= 0) return res.status(400).json({ error: 'Total must be greater than 0' });
@@ -1879,6 +1910,10 @@ module.exports = (db) => {
 
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId,
                    action: 'vendor_update', details: updates });
+
+    // v0.73 — keep the vendor master list in sync with any (re)named vendor.
+    upsertVendor(db, updates.vendor_name ?? inv.vendor_name,
+                 { category: updates.vendor_category ?? inv.vendor_category, userId });
 
     res.json(db.prepare("SELECT * FROM invoices WHERE id = ?").get(id));
   });
@@ -2137,4 +2172,16 @@ function renderEmailBody({ invoice, tech, sender }) {
     ``,
     `Sent by ${sender?.name || ''} via Caper CostWise.`,
   ].join('\n');
+}
+
+// v0.73 — Upsert a vendor into the master list. The name column is UNIQUE
+// COLLATE NOCASE, so "Acme" and "acme" collapse to one entry. INSERT OR IGNORE
+// keeps this idempotent and non-destructive — it never overwrites an existing
+// vendor's saved details. Safe to call on every vendor create/update.
+function upsertVendor(db, name, { category, userId } = {}) {
+  if (!name || !String(name).trim()) return;
+  try {
+    db.prepare(`INSERT OR IGNORE INTO vendors (name, default_category, created_by) VALUES (?, ?, ?)`)
+      .run(String(name).trim(), category || null, userId || null);
+  } catch (_) { /* vendors table may be absent on a partial schema — non-fatal */ }
 }

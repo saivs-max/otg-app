@@ -4002,8 +4002,15 @@ async function renderApprovalQueue(root) {
 // ---- VENDOR INVOICE UPLOAD (v0.36, manager-only) ----
 // 3rd-party vendor invoice. v0.65.2 — any manager (Ops / Sr / PM) can approve
 // it (Sr Mgr approval is optional); the creator still can't self-approve.
-function openVendorInvoiceSheet() {
+async function openVendorInvoiceSheet() {
   let pendingFile = null;
+  // v0.73 — saved-vendor autocomplete. Fetch the master list so the vendor name
+  // field can offer existing vendors (you can still type a brand-new one).
+  let vendorDatalist = '';
+  try {
+    const vs = (await api('/vendors')).vendors || [];
+    vendorDatalist = `<datalist id="vnVendorsDL">${vs.map(v => `<option value="${escapeHTML(v.name)}"></option>`).join('')}</datalist>`;
+  } catch (_) {}
   function html() {
     const isPdf = pendingFile && /pdf/i.test(pendingFile.mime_type || '') || /\.pdf$/i.test(pendingFile?.filename || '');
     return `
@@ -4029,7 +4036,8 @@ function openVendorInvoiceSheet() {
         </summary>
         <div style="margin-top: 10px; padding: 12px; background: #fafbfc; border-radius: 8px;">
           <span class="label">Vendor name</span>
-          <input class="field" id="vnName" placeholder="Sbot Technologies LLC" />
+          <input class="field" id="vnName" list="vnVendorsDL" autocomplete="off" placeholder="Start typing or pick a saved vendor…" />
+          ${vendorDatalist}
 
           <div class="flex gap-12" style="margin-top: 8px;">
             <div style="flex:2;">
@@ -4127,13 +4135,20 @@ function openVendorInvoiceSheet() {
 
 // v0.38 — Edit a vendor invoice draft (vendor name, #, date, total, period, notes).
 // PATCHes the row and re-renders invDetail so the preview shows the new values.
-function openVendorEditSheet(invoice, onSaved) {
+async function openVendorEditSheet(invoice, onSaved) {
+  // v0.73 — saved-vendor autocomplete (type a new one or pick an existing).
+  let vendorDatalist = '';
+  try {
+    const vs = (await api('/vendors')).vendors || [];
+    vendorDatalist = `<datalist id="veVendorsDL">${vs.map(v => `<option value="${escapeHTML(v.name)}"></option>`).join('')}</datalist>`;
+  } catch (_) {}
   showSheet(`
     <h3>Edit vendor invoice details</h3>
     <p class="help" style="margin-bottom: 14px;">Adjust anything that needs fixing. Changes save when you click <strong>Save</strong>.</p>
 
     <span class="label">Vendor name</span>
-    <input class="field" id="veName"  type="text" value="${escapeHTML(invoice.vendor_name || '')}" />
+    <input class="field" id="veName"  type="text" list="veVendorsDL" autocomplete="off" value="${escapeHTML(invoice.vendor_name || '')}" />
+    ${vendorDatalist}
 
     <div class="flex gap-12" style="margin-top: 8px;">
       <div style="flex:1;">
@@ -6769,10 +6784,12 @@ async function renderThirdParty(root) {
   const qList = `/vendor-invoices?from=${from}&to=${to}`
     + (TP_STATE.vendor ? `&vendor=${encodeURIComponent(TP_STATE.vendor)}` : '')
     + (TP_STATE.status ? `&status=${encodeURIComponent(TP_STATE.status)}` : '');
-  const [summary, list] = await Promise.all([
+  const [summary, list, vendorsResp] = await Promise.all([
     api(`/vendor-invoices/summary?from=${from}&to=${to}`),
     api(qList),
+    api('/vendors').catch(() => ({ vendors: [] })),   // v0.73 — saved vendor list for the filter
   ]);
+  const savedVendors = vendorsResp.vendors || [];
 
   const listTotal = list.reduce((s, r) => s + (r.total || 0), 0);
 
@@ -6824,7 +6841,11 @@ async function renderThirdParty(root) {
       <div class="flex gap-12" style="flex-wrap: wrap;">
         <div style="flex: 2; min-width: 180px;">
           <span class="label">Vendor</span>
-          <input class="field" id="tpFilterVendor" type="text" placeholder="Filter by vendor name…" value="${escapeHTML(TP_STATE.vendor)}" />
+          <select class="field" id="tpFilterVendor">
+            <option value="">All vendors${savedVendors.length ? ` (${savedVendors.length})` : ''}</option>
+            ${savedVendors.map(v => `<option value="${escapeHTML(v.name)}" ${TP_STATE.vendor === v.name ? 'selected' : ''}>${escapeHTML(v.name)}${v.invoice_count ? ` · ${v.invoice_count}` : ''}</option>`).join('')}
+            ${TP_STATE.vendor && !savedVendors.some(v => v.name === TP_STATE.vendor) ? `<option value="${escapeHTML(TP_STATE.vendor)}" selected>${escapeHTML(TP_STATE.vendor)}</option>` : ''}
+          </select>
         </div>
         <div style="flex: 1; min-width: 150px;">
           <span class="label">Status</span>

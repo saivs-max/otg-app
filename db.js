@@ -119,6 +119,18 @@ function ensureSchema(db) {
   // v0.68 — "Add work orders to an already-submitted week" requests. The
   // wo_addition_requests table is created by schema.sql above (CREATE TABLE IF
   // NOT EXISTS, applied on every boot); no column migration is needed.
+
+  // v0.73 — Vendor master list. The `vendors` table is created by schema.sql
+  // above; backfill it from any vendor names already on invoices so the new
+  // picker/filter shows existing vendors immediately. Idempotent (OR IGNORE +
+  // case-insensitive UNIQUE), safe on every boot.
+  try {
+    db.exec(`
+      INSERT OR IGNORE INTO vendors (name)
+      SELECT DISTINCT TRIM(vendor_name) FROM invoices
+      WHERE invoice_type = 'vendor' AND vendor_name IS NOT NULL AND TRIM(vendor_name) <> ''
+    `);
+  } catch (_) { /* vendors table absent on a partial schema — ignore */ }
 }
 
 // v0.63 — Unplanned tagging. Tags are stored as a JSON array so one item can

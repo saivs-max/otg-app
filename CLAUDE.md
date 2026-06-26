@@ -79,6 +79,14 @@ Node backend + vanilla-JS SPA (`public/app.js`).
 - Version tags in comments, e.g. `v0.66.2`.
 - `cost_tracker_overrides` columns: actual_labor, actual_travel, actual_expenses,
   third_party_cost, … edited via `PATCH /cost-tracker/:wo_id`.
+- **Vendors (v0.73)**: `vendors` master table (name UNIQUE COLLATE NOCASE +
+  default_category/notes/archived_at). Auto-saved via `upsertVendor()` on
+  vendor-upload + vendor-update; backfilled from existing `invoices.vendor_name`
+  on boot (`db.js`). `GET /vendors` lists them (with usage count/spend) for the
+  3rd-party filter dropdown and the form's vendor autocomplete (`vnName`/`veName`
+  datalists). Vendor-invoice `total`/`vendor_name` are the source of truth — the
+  detail GET never recomputes/zeros them (v0.72.1), and an empty `vendor_name` on
+  vendor-update is ignored so a stored name can't be blanked.
 - Expense categories: `mileage, tolls, parking, travel` (→ Act Travel), `other`,
   `vendor` (→ Act Expenses), `labor` (→ Act Labor), `drive` (→ Act Travel). The
   v0.54 expense tab lets techs log labor/drive as expenses with `quantity`=hours,
