@@ -4101,7 +4101,7 @@ function openVendorInvoiceSheet() {
 
 // v0.38 — Edit a vendor invoice draft (vendor name, #, date, total, period, notes).
 // PATCHes the row and re-renders invDetail so the preview shows the new values.
-function openVendorEditSheet(invoice) {
+function openVendorEditSheet(invoice, onSaved) {
   showSheet(`
     <h3>Edit vendor invoice details</h3>
     <p class="help" style="margin-bottom: 14px;">Adjust anything that needs fixing. Changes save when you click <strong>Save</strong>.</p>
@@ -4176,7 +4176,10 @@ function openVendorEditSheet(invoice) {
           await api(`/invoices/${invoice.id}/vendor-update`, { method: 'PATCH', body });
           toast('Updated ✓', 'ok');
           closeSheet();
-          goto('invDetail', invoice.id);
+          // v0.65 — return to the caller's context when given (e.g. the 3rd Party
+          // tab refreshes in place); otherwise fall back to the invoice preview.
+          if (typeof onSaved === 'function') onSaved();
+          else goto('invDetail', invoice.id);
         } catch (e) { toast(e.message, 'err'); }
       });
     },
@@ -5397,6 +5400,18 @@ async function renderCostTracker(root) {
   const missingCount = r.meta?.missing_count || 0;
   const editedCount  = r.meta?.edited_count  || 0;
 
+  // v0.67 — bottom-line totals over the filtered set, APPROVED actuals only.
+  // Pending-approval rows are surfaced in the table but never counted here, so
+  // the footer + summary are a 1:1 source of truth on approved spend.
+  const countedRows  = sortedRows.filter(row => !row.pending_approval);
+  const pendingCount = sortedRows.length - countedRows.length;
+  const sumCol = (k) => countedRows.reduce((s, row) => s + (Number(row[k]) || 0), 0);
+  const tLabor  = sumCol('actual_labor');
+  const tTravel = sumCol('actual_travel');
+  const tExp    = sumCol('actual_expenses');
+  const t3p     = sumCol('third_party_cost');
+  const tTotal  = sumCol('actual_total');
+
   root.innerHTML = `
     <div class="dash-toolbar">
       <div class="chips" style="margin: 0; flex-wrap: wrap;">
@@ -5414,22 +5429,23 @@ async function renderCostTracker(root) {
     </div>
 
     <p class="help" style="margin: 4px 0 12px;">
-      Actuals only — what was actually spent on each work order. Click any row to edit it (fill in PM DRI / Ops Mgr / hours / 3P vendor / notes / etc.).
-      Rows with <span style="color: var(--ic-orange);">⚠</span> have no underlying time entries or expenses recorded yet — those need manual entry.
+      Approved actuals only — labor &amp; expenses count toward the totals once their invoice is approved, so this stays a 1:1 source of truth on spend.
+      Rows marked <span style="color: var(--ic-orange);">⏳</span> are completed work still awaiting invoice approval (or in-flight) — shown for visibility but excluded from totals until approved.
+      Click any row to edit it (PM DRI / Ops Mgr / manual labor / 3P vendor / notes). Manager overrides always apply, approved or not.
     </p>
 
-    <!-- ============ DASHBOARD section (actuals by month) ============ -->
+    <!-- ============ DASHBOARD section (approved actuals by month & work type) ============ -->
     <div class="card" style="margin-top: 14px;">
-      <div class="section-title" style="margin-top: 0;">DASHBOARD · Actual cost by month</div>
-      ${monthly.rows.length === 0 ? `<div class="empty">No work orders in this period.</div>` : `
+      <div class="section-title" style="margin-top: 0;">DASHBOARD · Approved actual cost by month &amp; work type</div>
+      ${monthly.rows.length === 0 ? `<div class="empty">No approved work orders in this period.</div>` : (() => {
+        const wtCols = monthly.types || [];
+        return `
         <div style="overflow-x: auto;">
           <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
             <thead>
               <tr style="background: #f4f5f7; text-align: right;">
                 <th style="padding: 8px 10px; text-align: left;">Month</th>
-                <th style="padding: 8px 10px;">Deployment</th>
-                <th style="padding: 8px 10px;">Retrofit</th>
-                <th style="padding: 8px 10px;">Other</th>
+                ${wtCols.map(t => `<th style="padding: 8px 10px;">${escapeHTML(t)}</th>`).join('')}
                 <th style="padding: 8px 10px;">Grand Total</th>
                 <th style="padding: 8px 10px;"># WOs</th>
               </tr>
@@ -5438,23 +5454,21 @@ async function renderCostTracker(root) {
               ${monthly.rows.map(m => `
                 <tr style="border-top: 1px solid var(--line); text-align: right;">
                   <td style="padding: 8px 10px; text-align: left;"><strong>${escapeHTML(m.month)}</strong></td>
-                  <td style="padding: 8px 10px;">${fmt$(m.actual_deployment)}</td>
-                  <td style="padding: 8px 10px;">${fmt$(m.actual_retrofit)}</td>
-                  <td style="padding: 8px 10px;">${fmt$(m.actual_other)}</td>
+                  ${wtCols.map(t => `<td style="padding: 8px 10px;">${fmt$((m.by_type && m.by_type[t]) || 0)}</td>`).join('')}
                   <td style="padding: 8px 10px; font-weight: 700;">${fmt$(m.actual_total)}</td>
                   <td style="padding: 8px 10px; color: var(--muted);">${m.wo_count}</td>
                 </tr>
               `).join('')}
               <tr style="border-top: 2px solid var(--ic-green-deep); background: #f4faf6; text-align: right; font-weight: 800;">
-                <td style="padding: 10px;">Grand Total</td>
-                <td style="padding: 10px;" colspan="3"></td>
+                <td style="padding: 10px; text-align: left;">Grand Total</td>
+                ${wtCols.map(t => `<td style="padding: 10px;">${fmt$((monthly.totals.by_type && monthly.totals.by_type[t]) || 0)}</td>`).join('')}
                 <td style="padding: 10px;">${fmt$(monthly.totals.actual)}</td>
                 <td style="padding: 10px;">${monthly.totals.wo_count}</td>
               </tr>
             </tbody>
           </table>
         </div>
-      `}
+      `; })()}
     </div>
 
     <!-- ============ VISITS IN AP PIPELINE (submitted + approved) ============ -->
@@ -5550,6 +5564,15 @@ async function renderCostTracker(root) {
           <input class="field" id="trackerSearch" type="search" placeholder="🔎 Filter…" value="${escapeHTML(STATE._trackerSearch)}" style="width: 220px; padding: 6px 10px; font-size: 12px;" />
         </div>
       </div>
+      <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin:10px 0 4px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#f4faf6; font-size:12px;">
+        <span style="font-weight:700; color:var(--ink-2);">Approved actuals</span>
+        <span>Labor <strong>${fmt$(tLabor)}</strong></span>
+        <span>Travel <strong>${fmt$(tTravel)}</strong></span>
+        <span>Expenses <strong>${fmt$(tExp)}</strong></span>
+        ${t3p ? `<span>3P <strong>${fmt$(t3p)}</strong></span>` : ''}
+        <span style="margin-left:auto; font-size:13px;">Actual Total <strong style="color:var(--ic-green-deep);">${fmt$(tTotal)}</strong> · ${countedRows.length} WO${countedRows.length === 1 ? '' : 's'}</span>
+        ${pendingCount ? `<span style="color:var(--ic-orange);" title="Completed work without an approved invoice, or work still in approval — excluded from totals until approved.">⏳ ${pendingCount} pending approval (excluded)</span>` : ''}
+      </div>
       ${rows.length === 0 ? `<div class="empty">No work orders yet. Run the demo seed or assign techs to work orders.</div>` : `
         <div style="overflow-x: auto;">
           <table style="width: 100%; border-collapse: collapse; font-size: 11.5px; min-width: 1500px;">
@@ -5581,8 +5604,10 @@ async function renderCostTracker(root) {
             </thead>
             <tbody>
               ${slice.map(row => {
-                const rowBg = row.missing_data ? 'background: #fff8f0;' : '';
-                const flag  = row.missing_data ? '<span title="No actuals data — needs manual entry" style="color: var(--ic-orange); font-weight: 800;">⚠</span>' :
+                const rowBg = row.pending_approval ? 'background: #f6f7f9; color: var(--muted);'
+                            : row.missing_data ? 'background: #fff8f0;' : '';
+                const flag  = row.pending_approval ? '<span title="Pending invoice approval — excluded from totals until approved" style="color: var(--ic-orange); font-weight: 800;">⏳</span>' :
+                              row.missing_data ? '<span title="No actuals data — needs manual entry" style="color: var(--ic-orange); font-weight: 800;">⚠</span>' :
                               row.is_edited    ? '<span title="Edited by Ops Mgr" style="color: var(--ic-green-deep); font-weight: 800;">✏</span>' : '';
                 return `
                   <tr style="border-top: 1px solid var(--line); cursor: pointer; ${rowBg}" data-edit-wo="${row.wo_id}">
@@ -5611,7 +5636,7 @@ async function renderCostTracker(root) {
                     <td style="padding: 6px 8px; color: var(--muted);">${escapeHTML(row.service_delay || 'None')}</td>
                     <td style="padding: 6px 8px;">${row.has_third_party ? `${escapeHTML(row.third_party_vendor || 'Yes')}` : 'No'}</td>
                     <td style="padding: 6px 8px; text-align: right;">${row.third_party_cost ? fmt$(row.third_party_cost) : ''}</td>
-                    <td style="padding: 6px 8px; text-align: right; font-weight: 700;">${fmt$(row.actual_total)}</td>
+                    <td style="padding: 6px 8px; text-align: right; font-weight: 700;">${row.pending_approval ? '<span style="color: var(--muted); font-weight: 600;">pending</span>' : fmt$(row.actual_total)}</td>
                     <td style="padding: 6px 8px; color: var(--muted); font-family: monospace; font-size: 10px;">${escapeHTML(row.invoice_link || '')}</td>
                     <td style="padding: 6px 8px; color: var(--muted); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHTML(row.notes || '')}">${escapeHTML(row.notes || '')}</td>
                     <td style="padding: 6px 8px; text-align: right; white-space: nowrap;">
@@ -5622,6 +5647,19 @@ async function renderCostTracker(root) {
                 `;
               }).join('')}
             </tbody>
+            <tfoot>
+              <tr style="border-top: 2px solid var(--ic-green-deep); background: #f4faf6; font-weight: 800;">
+                <td colspan="12" style="padding: 10px;">TOTAL · ${countedRows.length} approved WO${countedRows.length === 1 ? '' : 's'}${pendingCount ? ` · <span style="color: var(--ic-orange); font-weight: 700;">${pendingCount} pending excluded</span>` : ''}</td>
+                <td style="padding: 10px; text-align: right;">${fmt$(tLabor)}</td>
+                <td style="padding: 10px; text-align: right;">${fmt$(tTravel)}</td>
+                <td style="padding: 10px; text-align: right;">${fmt$(tExp)}</td>
+                <td></td>
+                <td></td>
+                <td style="padding: 10px; text-align: right;">${t3p ? fmt$(t3p) : '—'}</td>
+                <td style="padding: 10px; text-align: right;">${fmt$(tTotal)}</td>
+                <td colspan="3"></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
         ${pageCount > 1 ? `
@@ -5752,29 +5790,29 @@ function openCostTrackerEditSheet(woId, rows, onSaved) {
     <div class="flex gap-12" style="margin-top: 8px;">
       <div style="flex:1;">
         <span class="label"># Techs</span>
-        <input class="field" id="ctEdNumTechs" type="number" min="0" step="1" value="${row.num_techs || ''}" placeholder="${row.computed?.num_techs || 1}" />
+        <input class="field" id="ctEdNumTechs" type="number" min="0" step="1" value="${row.override?.num_techs != null ? row.override.num_techs : ''}" placeholder="${row.computed?.num_techs || 1}" />
       </div>
       <div style="flex:2;">
         <span class="label">Technician(s)</span>
-        <input class="field" id="ctEdTechNames" type="text" value="${escapeHTML(row.tech_names || '')}" placeholder="${escapeHTML(row.computed?.tech_names || 'Comma-separated names')}" />
+        <input class="field" id="ctEdTechNames" type="text" value="${row.override?.tech_names != null ? escapeHTML(row.override.tech_names) : ''}" placeholder="${escapeHTML(row.computed?.tech_names || 'Comma-separated names')}" />
       </div>
     </div>
 
     <div class="flex gap-12" style="margin-top: 8px;">
       <div style="flex:1;">
         <span class="label">Actual Labor ($)</span>
-        <input class="field" id="ctEdLabor" type="number" min="0" step="0.01" value="${row.actual_labor != null ? row.actual_labor : ''}" placeholder="${row.computed?.actual_labor || 0}" />
-        <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Computed from time entries: ${fmt$(row.computed?.actual_labor || 0)}</div>
+        <input class="field" id="ctEdLabor" type="number" min="0" step="0.01" value="${row.override?.actual_labor != null ? row.override.actual_labor : ''}" placeholder="${row.computed?.actual_labor || 0}" />
+        <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Approved actuals: ${fmt$(row.computed?.actual_labor || 0)}${row.override?.actual_labor != null ? '' : ' · leave blank to keep auto-summing'}</div>
       </div>
       <div style="flex:1;">
         <span class="label">Actual Travel ($)</span>
-        <input class="field" id="ctEdTravel" type="number" min="0" step="0.01" value="${row.actual_travel != null ? row.actual_travel : ''}" placeholder="${row.computed?.actual_travel || 0}" />
-        <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Drive time + travel: ${fmt$(row.computed?.actual_travel || 0)}</div>
+        <input class="field" id="ctEdTravel" type="number" min="0" step="0.01" value="${row.override?.actual_travel != null ? row.override.actual_travel : ''}" placeholder="${row.computed?.actual_travel || 0}" />
+        <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Approved drive + travel: ${fmt$(row.computed?.actual_travel || 0)}</div>
       </div>
       <div style="flex:1;">
         <span class="label">Actual Expenses ($)</span>
-        <input class="field" id="ctEdExpenses" type="number" min="0" step="0.01" value="${row.actual_expenses != null ? row.actual_expenses : ''}" placeholder="${row.computed?.actual_expenses || 0}" />
-        <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Materials / other: ${fmt$(row.computed?.actual_expenses || 0)}</div>
+        <input class="field" id="ctEdExpenses" type="number" min="0" step="0.01" value="${row.override?.actual_expenses != null ? row.override.actual_expenses : ''}" placeholder="${row.computed?.actual_expenses || 0}" />
+        <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Approved materials / other: ${fmt$(row.computed?.actual_expenses || 0)}</div>
       </div>
     </div>
 
@@ -5796,7 +5834,7 @@ function openCostTrackerEditSheet(woId, rows, onSaved) {
         </div>
         <div style="flex:1;">
           <span class="label">3P Cost ($)</span>
-          <input class="field" id="ctEd3pCost" type="number" min="0" step="0.01" value="${row.third_party_cost || ''}" placeholder="0.00" />
+          <input class="field" id="ctEd3pCost" type="number" min="0" step="0.01" value="${row.override?.third_party_cost != null ? row.override.third_party_cost : ''}" placeholder="0.00" />
         </div>
       </div>
     </div>
@@ -6816,7 +6854,7 @@ async function renderThirdParty(root) {
       ` : `
         <table class="cc-exp-table">
           <thead>
-            <tr><th>Date</th><th>Vendor</th><th>Invoice #</th><th>Category</th><th>Status</th><th>Filed by</th><th class="r">Total</th></tr>
+            <tr><th>Date</th><th>Vendor</th><th>Invoice #</th><th>Category</th><th>Status</th><th>Filed by</th><th class="r">Total</th><th></th></tr>
           </thead>
           <tbody>
             ${list.map(r => `
@@ -6828,11 +6866,15 @@ async function renderThirdParty(root) {
                 <td><span class="meta">${escapeHTML(tpStatusLabel(r.status))}</span></td>
                 <td>${escapeHTML(r.created_by_name || '—')}</td>
                 <td class="r amt-pos"><strong>${fmt$(r.total)}</strong></td>
+                <td class="r">${r.status === 'draft'
+                  ? `<button class="btn-icon" data-tp-edit="${r.id}" title="Edit invoice details">✏️</button>`
+                  : `<span class="meta" title="Locked — submitted/approved invoices can't be edited">🔒</span>`}</td>
               </tr>
             `).join('')}
             <tr class="cc-total-row">
               <td colspan="6" class="r"><strong>Subtotal</strong></td>
               <td class="r amt-total"><strong>${fmt$(listTotal)}</strong></td>
+              <td></td>
             </tr>
           </tbody>
         </table>
@@ -6859,6 +6901,20 @@ async function renderThirdParty(root) {
 
   // Row → invoice preview/detail (where the vendor invoice can be edited).
   $$('[data-tp-inv]').forEach(tr => tr.addEventListener('click', () => goto('invDetail', Number(tr.dataset.tpInv))));
+
+  // v0.65 — inline Edit shortcut. Draft invoices only (the backend locks edits
+  // once submitted). Fetch the full invoice first so the sheet prefills period
+  // + notes, then refresh the tab in place on save. stopPropagation keeps the
+  // row's navigate-to-detail click from also firing.
+  $$('[data-tp-edit]').forEach(b => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const id  = Number(b.dataset.tpEdit);
+    // Use the list row directly — it carries the authoritative raw total +
+    // vendor fields + period (GET /invoices/:id nests under .invoice and
+    // recomputes total to 0 for vendor invoices, which would mis-prefill).
+    const row = list.find(x => x.id === id);
+    if (row) openVendorEditSheet(row, () => renderThirdParty(root));
+  }));
 }
 
 async function renderDashboard(root) {

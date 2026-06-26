@@ -929,6 +929,18 @@ function buildDashboardWorkbook(p, costRows = []) {
     const xr = i + 2;
     setFormula(ctmSheet, `Q${xr}`, `IF($B${xr}="","",SUM(IF($K${xr}="",0,$K${xr}),IF($L${xr}="",0,$L${xr}),IF($M${xr}="",0,$M${xr}),IF($P${xr}="",0,$P${xr})))`);
   }
+  // v0.67 — grand-total row so the export showcases the same bottom-line totals
+  // as the in-app footer (Labor / Travel / Expenses / 3P / Total). Pending rows
+  // carry $0, so the column sums equal the approved actuals.
+  if (costRows.length) {
+    const first = 2, last = costRows.length + 1, totalRow = costRows.length + 2;
+    XLSX.utils.sheet_add_aoa(ctmSheet, [['', 'TOTAL (approved actuals)']], { origin: `A${totalRow}` });
+    setFormula(ctmSheet, `K${totalRow}`, `SUM(K${first}:K${last})`);
+    setFormula(ctmSheet, `L${totalRow}`, `SUM(L${first}:L${last})`);
+    setFormula(ctmSheet, `M${totalRow}`, `SUM(M${first}:M${last})`);
+    setFormula(ctmSheet, `P${totalRow}`, `SUM(P${first}:P${last})`);
+    setFormula(ctmSheet, `Q${totalRow}`, `SUM(Q${first}:Q${last})`);
+  }
   ctmSheet['!cols'] = [
     { wch: 14 }, { wch: 20 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch:  8 },
     { wch: 12 }, { wch: 18 }, { wch: 11 }, { wch: 22 },
@@ -938,50 +950,41 @@ function buildDashboardWorkbook(p, costRows = []) {
   ];
   XLSX.utils.book_append_sheet(wb, ctmSheet, 'COST TRACKER MAIN');
 
-  // ============== Sheet 2: DASHBOARD (actuals only) ==============
-  const months = ['January','February','March','April','May','June','July',
-                  'August','September','October','November','December'];
-  const byMonthType = {};
-  for (const r of costRows) {
-    if (!r.service_month) continue;
-    const m = r.service_month, t = r.service_type || 'Other';
-    byMonthType[m] = byMonthType[m] || { Deployment: 0, Retrofit: 0, Other: 0, Count: 0 };
-    const bucket = ['Deployment','Retrofit'].includes(t) ? t : 'Other';
-    byMonthType[m][bucket] += (r.actual_total || 0);
-    byMonthType[m].Count   += 1;
-  }
+  // ============== Sheet 2: DASHBOARD (approved actuals, by work type) ==============
+  // v0.67 — reuse the very same aggregate the app + Google Sheets use, broken out
+  // by EVERY work type (a column each) so the export matches the in-app dashboard.
+  const agg   = aggregateCostTrackerByMonth(costRows);
+  const types = agg.types;
+  const NT    = types.length;
+  const colL  = (i) => XLSX.utils.encode_col(i);     // 0->A, 1->B, …
+  const totalColIdx = NT + 1;                         // grand-total col (after month + N types)
+  const countColIdx = NT + 2;                         // # work orders col
   const dashRows = [
-    ['Caper CostWise — Cost Tracker Dashboard (actuals only)'],
+    ['Caper CostWise — Cost Tracker Dashboard (approved actuals only)'],
     [],
-    ['Service Month', 'Actual: Deployment', 'Actual: Retrofit', 'Actual: Other', 'GRAND TOTAL Actual', '# Work Orders'],
+    ['Service Month', ...types.map(t => `Actual: ${t}`), 'GRAND TOTAL Actual', '# Work Orders'],
   ];
-  const monthsWithData = months.filter(m => byMonthType[m]);
-  for (const m of monthsWithData) {
-    const v = byMonthType[m];
+  agg.rows.forEach(m => {
     dashRows.push([
-      m,
-      +v.Deployment.toFixed(2), +v.Retrofit.toFixed(2), +v.Other.toFixed(2),
-      null,
-      v.Count,
+      m.month,
+      ...types.map(t => +(+(m.by_type[t] || 0)).toFixed(2)),
+      null,                                            // grand-total formula filled below
+      m.wo_count,
     ]);
-  }
+  });
   const dashSheet = XLSX.utils.aoa_to_sheet(dashRows);
-  for (let i = 0; i < monthsWithData.length; i++) {
+  for (let i = 0; i < agg.rows.length; i++) {
     const xr = i + 4;
-    setFormula(dashSheet, `E${xr}`, `SUM(B${xr}:D${xr})`);
+    setFormula(dashSheet, `${colL(totalColIdx)}${xr}`, `SUM(${colL(1)}${xr}:${colL(NT)}${xr})`);
   }
-  if (monthsWithData.length) {
-    const totalRow = monthsWithData.length + 4;
-    XLSX.utils.sheet_add_aoa(dashSheet, [['Total', null, null, null, null, null]], { origin: `A${totalRow}` });
-    setFormula(dashSheet, `B${totalRow}`, `SUM(B4:B${totalRow - 1})`);
-    setFormula(dashSheet, `C${totalRow}`, `SUM(C4:C${totalRow - 1})`);
-    setFormula(dashSheet, `D${totalRow}`, `SUM(D4:D${totalRow - 1})`);
-    setFormula(dashSheet, `E${totalRow}`, `SUM(E4:E${totalRow - 1})`);
-    setFormula(dashSheet, `F${totalRow}`, `SUM(F4:F${totalRow - 1})`);
+  if (agg.rows.length) {
+    const totalRow = agg.rows.length + 4;
+    XLSX.utils.sheet_add_aoa(dashSheet, [['Total']], { origin: `A${totalRow}` });
+    for (let c = 1; c <= countColIdx; c++) {
+      setFormula(dashSheet, `${colL(c)}${totalRow}`, `SUM(${colL(c)}4:${colL(c)}${totalRow - 1})`);
+    }
   }
-  dashSheet['!cols'] = [
-    { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 20 }, { wch: 14 },
-  ];
+  dashSheet['!cols'] = [{ wch: 16 }, ...types.map(() => ({ wch: 16 })), { wch: 20 }, { wch: 14 }];
   XLSX.utils.book_append_sheet(wb, dashSheet, 'DASHBOARD');
 
   // ============== Sheet 4: Summary (legacy KPI tiles, back-compat) ==============
@@ -1192,18 +1195,27 @@ function buildCostTrackerRows(db, req) {
   }
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
+  // v0.67 — APPROVED-ONLY actuals. A labor / drive / expense line only counts
+  // toward the cost tracker once its invoice has reached approval (approved_ops
+  // and later). Anything still in draft / submitted / in_review is treated as
+  // not-yet-real and is excluded from every total. Kept as a single source list
+  // so the main query and the per-bucket queries below stay in lock-step.
+  const APPROVED = "('approved_ops','approved_sr','queued_ap','sent_ap')";
+
   const woRows = db.prepare(`
     SELECT
       w.id            AS wo_id,
       w.external_id   AS wo_ext,
       w.store_id, w.store_name, w.work_type, w.cart_count, w.scheduled_date,
-      w.title, w.status,
+      w.title, w.status, w.created_at AS wo_created_at,
       w.assigned_user_id,
       au.name         AS assigned_user_name,
       COUNT(DISTINCT t.user_id) AS num_techs,
       COALESCE(GROUP_CONCAT(DISTINCT u.name), '') AS tech_names,
+      -- v0.67 — labor counts only when the time entry sits on an APPROVED invoice.
       COALESCE(SUM(
         CASE WHEN t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+                  AND t.invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})
              THEN (julianday(t.clock_out) - julianday(t.clock_in)) * 24 * COALESCE(u.hourly_rate, 40)
              ELSE 0 END
       ), 0) AS actual_labor,
@@ -1237,18 +1249,20 @@ function buildCostTrackerRows(db, req) {
     ORDER BY w.scheduled_date, w.id
   `).all(...params);
 
-  // v0.66.2 — Cost Tracker cost columns now mirror the invoice / AP pipeline
-  // total exactly, split three ways so each is auditable on its own:
-  //   Act Labor    = work-mode time            (priced at the tech's hourly rate)
-  //   Act Travel   = drive-mode time + travel expenses (mileage / tolls / parking / travel)
-  //   Act Expenses = every other expense line  (materials / 'other' / vendor / misc)
-  // Act Total = Labor + Travel + Expenses + 3P. Mirrors buildSubmittedApprovedInvoicesByStore:
-  //   visit_total = work-labor + drive-labor + (expenses NOT IN 'labor','drive')
-  // Before v0.66.1 drive labor and non-travel expenses were dropped entirely —
-  // that's why a $472 store could show as $115 in the tracker.
+  // v0.67 — Cost Tracker reflects APPROVED ACTUALS ONLY and is the 1:1 source of
+  // truth on spend. Cost is split four ways, each auditable on its own:
+  //   Act Labor    = approved work-mode time         (priced at the tech's hourly rate)
+  //   Act Travel   = approved drive-mode time + approved travel expenses (mileage/tolls/parking/travel)
+  //   Act Expenses = approved materials / 'other' / vendor / misc expenses
+  // Act Total = Labor + Travel + Expenses + 3P. A work order's computed actuals
+  // count toward the totals only when it is COMPLETED and has lines on an approved
+  // invoice; un-approved work shows as a "pending approval" row at $0 and is left
+  // out of every total. Manager overrides (cost_tracker_overrides) ALWAYS apply and
+  // always count — that's the manual reconciliation lever. Mirrors the AP pipeline:
+  //   visit_total = work-labor + drive-labor + (expenses NOT IN 'labor','drive').
   const travelByWo  = {};
   const expenseByWo = {};
-  // (a) drive-mode labor → Travel
+  // (a) drive-mode labor on an approved invoice → Travel
   const driveRows = db.prepare(`
     SELECT t.work_order_id AS wo, COALESCE(SUM(
       CASE WHEN t.clock_out IS NOT NULL AND t.mode = 'drive'
@@ -1258,26 +1272,52 @@ function buildCostTrackerRows(db, req) {
     FROM time_entries t
     LEFT JOIN users u ON u.id = t.user_id
     WHERE t.work_order_id IS NOT NULL
+      AND t.invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})
     GROUP BY t.work_order_id
   `).all();
   for (const r of driveRows) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.drive;
-  // (b) travel-category expenses → Travel
+  // (b) travel-category expenses on an approved invoice → Travel
   const travelExpRows = db.prepare(`
     SELECT work_order_id AS wo, COALESCE(SUM(amount), 0) AS amt
     FROM expenses
     WHERE category IN ('mileage','tolls','travel','parking') AND work_order_id IS NOT NULL
+      AND invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})
     GROUP BY work_order_id
   `).all();
   for (const r of travelExpRows) travelByWo[r.wo] = (travelByWo[r.wo] || 0) + r.amt;
-  // (c) everything else (non-labor, non-drive, non-travel) → Expenses
+  // (c) every other approved expense (materials / 'other' / vendor / misc) → Expenses
   const otherExpRows = db.prepare(`
     SELECT work_order_id AS wo, COALESCE(SUM(amount), 0) AS amt
     FROM expenses
     WHERE category NOT IN ('labor','drive','mileage','tolls','travel','parking')
       AND work_order_id IS NOT NULL
+      AND invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})
     GROUP BY work_order_id
   `).all();
   for (const r of otherExpRows) expenseByWo[r.wo] = (expenseByWo[r.wo] || 0) + r.amt;
+
+  // Which work orders have at least one line on an approved invoice? Only these
+  // (when also completed) contribute their computed actuals to the totals.
+  const approvedWoSet = new Set();
+  for (const r of db.prepare(`
+    SELECT DISTINCT work_order_id AS wo FROM time_entries
+      WHERE work_order_id IS NOT NULL
+        AND invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})
+    UNION
+    SELECT DISTINCT work_order_id AS wo FROM expenses
+      WHERE work_order_id IS NOT NULL
+        AND invoice_id IN (SELECT id FROM invoices WHERE status IN ${APPROVED})
+  `).all()) approvedWoSet.add(r.wo);
+
+  // Latest logged work date per WO — fallback "service month" so a completed WO
+  // with no scheduled_date still lands in a real month and is never dropped from
+  // the dashboard totals.
+  const workDateByWo = {};
+  for (const r of db.prepare(`
+    SELECT work_order_id AS wo, MAX(date(clock_in)) AS d
+    FROM time_entries WHERE clock_out IS NOT NULL AND work_order_id IS NOT NULL
+    GROUP BY work_order_id
+  `).all()) workDateByWo[r.wo] = r.d;
 
   const monthName = (iso) => {
     if (!iso) return '';
@@ -1293,13 +1333,29 @@ function buildCostTrackerRows(db, req) {
   };
 
   return woRows.map(w => {
-    const computedLabor    = +w.actual_labor.toFixed(2);
-    const computedTravel   = +(travelByWo[w.wo_id]  || 0).toFixed(2);
-    const computedExpenses = +(expenseByWo[w.wo_id] || 0).toFixed(2);
+    const computedLabor    = +w.actual_labor.toFixed(2);              // approved work-mode labor
+    const computedTravel   = +(travelByWo[w.wo_id]  || 0).toFixed(2); // approved drive + travel exp
+    const computedExpenses = +(expenseByWo[w.wo_id] || 0).toFixed(2); // approved other expenses
 
-    const actualLabor    = w.o_actual_labor    != null ? +(+w.o_actual_labor).toFixed(2)    : computedLabor;
-    const actualTravel   = w.o_actual_travel   != null ? +(+w.o_actual_travel).toFixed(2)   : computedTravel;
-    const actualExpenses = w.o_actual_expenses != null ? +(+w.o_actual_expenses).toFixed(2) : computedExpenses;
+    // Manager overrides always win and always count — even before approval.
+    const hasLaborOv   = w.o_actual_labor    != null;
+    const hasTravelOv  = w.o_actual_travel   != null;
+    const hasExpenseOv = w.o_actual_expenses != null;
+    const has3pOv      = w.o_3p_cost         != null;
+    const hasCostOverride = hasLaborOv || hasTravelOv || hasExpenseOv || has3pOv;
+
+    const actualLabor    = hasLaborOv   ? +(+w.o_actual_labor).toFixed(2)    : computedLabor;
+    const actualTravel   = hasTravelOv  ? +(+w.o_actual_travel).toFixed(2)   : computedTravel;
+    const actualExpenses = hasExpenseOv ? +(+w.o_actual_expenses).toFixed(2) : computedExpenses;
+    const tpCost         = has3pOv      ? +(+w.o_3p_cost).toFixed(2)         : 0;
+
+    // v0.67 — a row contributes to the totals only when COMPLETED + approved, or
+    // when a manager has typed an override. Otherwise it's surfaced as pending.
+    const isCompleted    = (w.status || 'open') === 'completed';
+    const hasApprovedInv = approvedWoSet.has(w.wo_id);
+    const inTotals       = hasCostOverride || (isCompleted && hasApprovedInv);
+    const pendingApproval = !inTotals;
+
     // v0.62.3 — fall back to work_orders.assigned_user_id (and its name) when
     // no time entries exist. Without this, a tech who marks a WO completed
     // without ever clocking in disappears from the Technicians column.
@@ -1308,9 +1364,14 @@ function buildCostTrackerRows(db, req) {
     const numTechs     = w.o_num_techs != null ? +w.o_num_techs : computedNumTechs;
     const techNames    = ov(w.o_tech_names, computedTechNames);
     const has3p        = w.o_has_3p != null ? !!w.o_has_3p : false;
-    const tpCost       = w.o_3p_cost != null ? +(+w.o_3p_cost).toFixed(2) : 0;
-    const reconciled   = ov(w.o_reconciled, actualLabor > 0 ? 'Yes' : 'No');
+    const reconciled   = ov(w.o_reconciled, (inTotals && actualLabor > 0) ? 'Yes' : 'No');
     const isEdited     = !!w.o_updated_at;
+
+    // Effective date for month bucketing: scheduled date → last logged work date
+    // → WO creation date. Guarantees a month so the dashboard never drops a row.
+    const createdDate   = w.wo_created_at ? String(w.wo_created_at).slice(0, 10) : '';
+    const effectiveDate = w.scheduled_date || workDateByWo[w.wo_id] || createdDate;
+    const actualTotal   = +(actualLabor + actualTravel + actualExpenses + tpCost).toFixed(2);
 
     return {
       wo_id:            w.wo_id,
@@ -1326,8 +1387,8 @@ function buildCostTrackerRows(db, req) {
       ops_manager:      ov(w.o_ops_manager, ''),
       service_type:     titleCase(w.work_type),
       cart_count:       w.cart_count || 0,
-      service_month:    monthName(w.scheduled_date),
-      service_date:     w.scheduled_date || '',
+      service_month:    monthName(effectiveDate),
+      service_date:     w.scheduled_date || workDateByWo[w.wo_id] || '',
       num_techs:        numTechs,
       tech_names:       techNames,
       actual_labor:     actualLabor,
@@ -1337,13 +1398,30 @@ function buildCostTrackerRows(db, req) {
       has_third_party:  has3p,
       third_party_vendor: ov(w.o_3p_vendor, ''),
       third_party_cost: tpCost,
-      actual_total:     +(actualLabor + actualTravel + actualExpenses + tpCost).toFixed(2),
+      actual_total:     actualTotal,
       invoice_link:     w.wo_ext || '',
       notes:            ov(w.o_notes, w.title || ''),
+      // v0.67 — approval gating. `in_totals` is the single flag every total
+      // (footer row, monthly dashboard, exports) keys off of.
+      approved:         hasApprovedInv,
+      pending_approval: pendingApproval,
+      in_totals:        inTotals,
       // Flags so the UI can show edit-state badges & call attention to
       // rows that have NO actuals data at all (so Ops Mgrs know to fill in).
-      missing_data:     actualLabor === 0 && actualTravel === 0 && actualExpenses === 0 && tpCost === 0,
+      missing_data:     inTotals && actualLabor === 0 && actualTravel === 0 && actualExpenses === 0 && tpCost === 0,
       is_edited:        isEdited,
+      // v0.67 — raw override values (null when not set) so the edit modal can
+      // pre-fill ONLY what was explicitly overridden. Pre-filling computed values
+      // used to freeze them into an override, so later-added labor/expenses
+      // stopped summing in — this is the fix for that.
+      override: {
+        actual_labor:     hasLaborOv   ? +(+w.o_actual_labor).toFixed(2)    : null,
+        actual_travel:    hasTravelOv  ? +(+w.o_actual_travel).toFixed(2)   : null,
+        actual_expenses:  hasExpenseOv ? +(+w.o_actual_expenses).toFixed(2) : null,
+        third_party_cost: has3pOv      ? +(+w.o_3p_cost).toFixed(2)         : null,
+        num_techs:        w.o_num_techs != null ? +w.o_num_techs : null,
+        tech_names:       (w.o_tech_names != null && w.o_tech_names !== '') ? w.o_tech_names : null,
+      },
       computed: {
         actual_labor:    computedLabor,
         actual_travel:   computedTravel,
@@ -1355,36 +1433,64 @@ function buildCostTrackerRows(db, req) {
   });
 }
 
+// v0.67 — ordered list of the work-type categories present in a set of cost
+// rows (approved/counted only). Known types lead in a fixed order; any custom or
+// unexpected types follow alphabetically. Used so the dashboard breaks every
+// work type out into its own column instead of lumping them under "Other".
+function orderedServiceTypes(rows) {
+  const present = new Set();
+  for (const r of rows) { if (r && !r.pending_approval) present.add(r.service_type || 'Other'); }
+  const PREFERRED = ['Deployment', 'Retrofit', 'Maintenance', 'Repair'];
+  const lead  = PREFERRED.filter(t => present.has(t));
+  const extra = [...present].filter(t => !PREFERRED.includes(t)).sort();
+  const out = [...lead, ...extra];
+  return out.length ? out : ['Deployment'];
+}
+
 // v0.42 — actuals-only monthly aggregate. Forecast columns dropped per
 // product direction; the team is reconciling only what's been spent.
+// v0.67 — counts APPROVED rows only (skips pending_approval) and never drops a
+// row: anything without a month lands in an "Unscheduled" bucket so the grand
+// total always equals the sum of every counted row (1:1 source of truth). Cost
+// is now broken out by EVERY work type (not just Deployment/Retrofit/Other).
 function aggregateCostTrackerByMonth(rows) {
   const months = ['January','February','March','April','May','June','July',
                   'August','September','October','November','December'];
+  const types = orderedServiceTypes(rows);
   const map = {};
   for (const r of rows) {
-    if (!r.service_month) continue;
-    const t = r.service_type || 'Other';
-    map[r.service_month] = map[r.service_month] || { Deployment: 0, Retrofit: 0, Other: 0, Count: 0 };
-    const bucket = ['Deployment', 'Retrofit'].includes(t) ? t : 'Other';
-    map[r.service_month][bucket] += (r.actual_total || 0);
-    map[r.service_month].Count   += 1;
+    if (r.pending_approval) continue;            // approved + completed actuals only
+    const month = r.service_month || 'Unscheduled';
+    const ty = r.service_type || 'Other';
+    map[month] = map[month] || { byType: {}, Count: 0 };
+    map[month].byType[ty] = (map[month].byType[ty] || 0) + (r.actual_total || 0);
+    map[month].Count += 1;
   }
-  const totals = { actual: 0, wo_count: 0 };
-  const out = months.filter(m => map[m]).map(m => {
-    const ac = map[m].Deployment + map[m].Retrofit + map[m].Other;
+  const ordered = months.filter(m => map[m]);
+  if (map['Unscheduled']) ordered.push('Unscheduled');   // always last
+  const totals = { actual: 0, wo_count: 0, by_type: {} };
+  types.forEach(t => { totals.by_type[t] = 0; });
+  const out = ordered.map(m => {
+    const by_type = {};
+    let ac = 0;
+    // every known type column…
+    types.forEach(t => {
+      const v = +(map[m].byType[t] || 0);
+      by_type[t] = +v.toFixed(2);
+      ac += v;
+      totals.by_type[t] += v;
+    });
+    // …plus any stray type not in the ordered list, so no dollars are dropped.
+    for (const [t, v] of Object.entries(map[m].byType)) {
+      if (!(t in by_type)) { by_type[t] = +(+v).toFixed(2); ac += v; totals.by_type[t] = (totals.by_type[t] || 0) + v; }
+    }
     totals.actual   += ac;
     totals.wo_count += map[m].Count;
-    return {
-      month: m,
-      actual_deployment: +map[m].Deployment.toFixed(2),
-      actual_retrofit:   +map[m].Retrofit.toFixed(2),
-      actual_other:      +map[m].Other.toFixed(2),
-      actual_total:      +ac.toFixed(2),
-      wo_count:          map[m].Count,
-    };
+    return { month: m, by_type, actual_total: +ac.toFixed(2), wo_count: map[m].Count };
   });
+  Object.keys(totals.by_type).forEach(t => { totals.by_type[t] = +totals.by_type[t].toFixed(2); });
   totals.actual = +totals.actual.toFixed(2);
-  return { rows: out, totals };
+  return { rows: out, totals, types };
 }
 
 function makeExportFilename(meta) {

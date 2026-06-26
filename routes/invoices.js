@@ -952,6 +952,7 @@ module.exports = (db) => {
     const rows = db.prepare(`
       SELECT i.id, i.invoice_number, i.vendor_name, i.vendor_invoice_number, i.vendor_invoice_date,
              i.vendor_category, i.status, i.total, i.notes, i.created_at, i.submitted_at,
+             i.period_start, i.period_end,
              i.approved_ops_at, i.approved_sr_at, i.sent_to_ap_at,
              cu.name AS created_by_name,
              (SELECT COUNT(*) FROM attachments a WHERE a.invoice_id = i.id) AS attachment_count
