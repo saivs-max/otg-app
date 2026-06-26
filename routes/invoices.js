@@ -1919,6 +1919,68 @@ module.exports = (db) => {
   });
 
   // ------------------------------------------------------------
+  // PATCH /api/invoices/:id/vendor-line-items  (manager, vendor draft only)
+  // ------------------------------------------------------------
+  // v0.74 — edit the parsed line items: fix descriptions/qty/price/amount, add a
+  // row the parser missed, or delete a bad one. Persisted back into
+  // extracted_summary.line_items so the itemized table re-renders from them. The
+  // invoice TOTAL stays the source of truth (entered/parsed) — line items can
+  // legitimately differ from it (freight/tax), so we never auto-overwrite it.
+  router.patch('/invoices/:id/vendor-line-items', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    const me = userId ? db.prepare("SELECT id, role FROM users WHERE id = ?").get(userId) : null;
+    if (!me) return res.status(401).json({ error: 'no user selected' });
+    if (!['ops_manager','sr_manager','pm'].includes(me.role)) {
+      return res.status(403).json({ error: 'manager role required' });
+    }
+    const id  = Number(req.params.id);
+    const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(id);
+    if (!inv) return res.status(404).json({ error: 'not found' });
+    if (inv.invoice_type !== 'vendor') return res.status(409).json({ error: 'not a vendor invoice' });
+    if (inv.status !== 'draft')        return res.status(409).json({ error: `invoice is ${inv.status}, not draft — line items are locked once submitted` });
+    if (inv.user_id !== me.id && me.role === 'ops_manager') {
+      return res.status(403).json({ error: 'only the uploader (or Sr Mgr / PM) can edit this draft' });
+    }
+
+    const raw = Array.isArray(req.body?.line_items) ? req.body.line_items : null;
+    if (!raw) return res.status(400).json({ error: 'line_items must be an array' });
+    if (raw.length > 200) return res.status(400).json({ error: 'too many line items (max 200)' });
+
+    const num = (v) => (v === '' || v == null || !isFinite(Number(v))) ? null : Number(v);
+    const clean = raw.map(it => {
+      const qty = num(it.qty);
+      const unit_price = num(it.unit_price) != null ? +num(it.unit_price).toFixed(2) : null;
+      let amount = num(it.amount);
+      if (amount == null && unit_price != null && qty != null) amount = +(unit_price * qty).toFixed(2); // derive if blank
+      return {
+        date:        (typeof it.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(it.date)) ? it.date : null,
+        reference:   it.reference ? String(it.reference).slice(0, 80) : null,
+        serial:      it.serial ? String(it.serial).slice(0, 80) : null,
+        description: String(it.description || '').slice(0, 300).trim(),
+        qty,
+        unit_price,
+        amount: amount != null ? +Number(amount).toFixed(2) : 0,
+      };
+    }).filter(it => it.description || it.amount);   // drop fully-empty rows
+
+    if (clean.some(it => it.amount < 0)) return res.status(400).json({ error: 'line item amounts cannot be negative' });
+
+    let summary = {};
+    try { summary = inv.extracted_summary ? JSON.parse(inv.extracted_summary) : {}; } catch (_) { summary = {}; }
+    summary.line_items = clean;
+    summary._line_items_edited_at = new Date().toISOString();
+    const now = new Date().toISOString();
+    db.prepare("UPDATE invoices SET extracted_summary = ?, extracted_at = COALESCE(extracted_at, ?) WHERE id = ?")
+      .run(JSON.stringify(summary), now, id);
+
+    logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId,
+                   action: 'vendor_line_items_edit', details: { count: clean.length } });
+
+    const linesSum = +clean.reduce((s, it) => s + (it.amount || 0), 0).toFixed(2);
+    res.json({ ok: true, line_items: clean, lines_subtotal: linesSum });
+  });
+
+  // ------------------------------------------------------------
   // DELETE /api/invoices/:id  (vendor drafts only; uploader / Sr Mgr / PM)
   // ------------------------------------------------------------
   // Discard a vendor draft. Cleans up the row + any attachments. Tech-labor

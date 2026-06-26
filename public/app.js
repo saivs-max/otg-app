@@ -4227,6 +4227,77 @@ async function openVendorEditSheet(invoice, onSaved) {
   });
 }
 
+// v0.74 — editor for parsed vendor line items. Lets a manager fix/add/remove the
+// rows the parser produced (or hand-build them for a scanned invoice). Saves to
+// extracted_summary.line_items via PATCH /invoices/:id/vendor-line-items. The
+// invoice Total stays the source of truth (line items can differ — freight/tax).
+function openVendorLineItemsSheet(invoice, items, onSaved) {
+  let rows = (items && items.length ? items : [{ description: '', qty: '', unit_price: '', amount: '' }])
+    .map(it => ({ description: it.description || '', qty: it.qty ?? '', unit_price: it.unit_price ?? '', amount: it.amount ?? '' }));
+  const rowHtml = (r, i) => `
+    <tr data-li="${i}">
+      <td style="padding:4px;"><input class="field li-desc" data-i="${i}" type="text" value="${escapeHTML(String(r.description))}" placeholder="Description" style="min-width:200px;"/></td>
+      <td style="padding:4px;"><input class="field li-qty"  data-i="${i}" type="number" step="0.01" value="${r.qty}"        style="width:70px;text-align:right;"/></td>
+      <td style="padding:4px;"><input class="field li-unit" data-i="${i}" type="number" step="0.01" value="${r.unit_price}" style="width:90px;text-align:right;"/></td>
+      <td style="padding:4px;"><input class="field li-amt"  data-i="${i}" type="number" step="0.01" value="${r.amount}"     style="width:100px;text-align:right;"/></td>
+      <td style="padding:4px;"><button class="btn btn-ghost btn-sm li-del" data-i="${i}" title="Remove row">✕</button></td>
+    </tr>`;
+  const table = () => {
+    const sum = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    return `
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr style="background:#f4f5f7;text-align:left;">
+          <th style="padding:6px;">Description</th><th style="padding:6px;text-align:right;">Qty</th>
+          <th style="padding:6px;text-align:right;">Unit&nbsp;price</th><th style="padding:6px;text-align:right;">Amount</th><th></th>
+        </tr></thead>
+        <tbody id="liBody">${rows.map(rowHtml).join('')}</tbody>
+        <tfoot><tr style="border-top:2px solid var(--ic-green-deep);font-weight:700;">
+          <td colspan="3" style="padding:6px;text-align:right;">Line items subtotal</td>
+          <td style="padding:6px;text-align:right;" id="liSum">${fmt$(sum)}</td><td></td>
+        </tr></tfoot>
+      </table>`;
+  };
+  showSheet(`
+    <h3>Edit line items</h3>
+    <p class="help" style="margin-bottom:10px;">Fix anything the parser got wrong, or add rows it missed. The invoice <strong>Total</strong> (${fmt$(invoice.total)}) stays as-is — line items can legitimately differ from it (freight / tax). Leave Amount blank to auto-calc from Qty × Unit price.</p>
+    <div id="liWrap" style="overflow-x:auto;">${table()}</div>
+    <button class="btn btn-ghost btn-sm" id="liAdd" style="margin-top:8px;">＋ Add line item</button>
+    <div class="actions" style="margin-top:14px;">
+      <button class="btn btn-ghost" data-act="sheet-close">Cancel</button>
+      <button class="btn btn-primary" id="liSave">💾 Save line items</button>
+    </div>
+  `, {
+    onMount: (wrap) => {
+      const sync = () => {
+        $$('.li-desc', wrap).forEach(inp => { rows[+inp.dataset.i].description = inp.value; });
+        $$('.li-qty',  wrap).forEach(inp => { rows[+inp.dataset.i].qty        = inp.value; });
+        $$('.li-unit', wrap).forEach(inp => { rows[+inp.dataset.i].unit_price = inp.value; });
+        $$('.li-amt',  wrap).forEach(inp => { rows[+inp.dataset.i].amount     = inp.value; });
+      };
+      const redraw = () => { $('#liWrap', wrap).innerHTML = table(); bind(); };
+      function bind() {
+        $$('.li-del', wrap).forEach(b => b.addEventListener('click', () => { sync(); rows.splice(+b.dataset.i, 1); if (!rows.length) rows.push({ description: '', qty: '', unit_price: '', amount: '' }); redraw(); }));
+        $$('.li-qty,.li-unit,.li-amt', wrap).forEach(inp => inp.addEventListener('input', () => { sync(); const sum = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0); const el = $('#liSum', wrap); if (el) el.textContent = fmt$(sum); }));
+      }
+      $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
+      $('#liAdd', wrap).addEventListener('click', () => { sync(); rows.push({ description: '', qty: '', unit_price: '', amount: '' }); redraw(); });
+      $('#liSave', wrap).addEventListener('click', async () => {
+        sync();
+        const payload = rows
+          .map(r => ({ description: String(r.description || '').trim(), qty: r.qty === '' ? null : Number(r.qty), unit_price: r.unit_price === '' ? null : Number(r.unit_price), amount: r.amount === '' ? null : Number(r.amount) }))
+          .filter(r => r.description || r.amount != null);
+        try {
+          await api(`/invoices/${invoice.id}/vendor-line-items`, { method: 'PATCH', body: { line_items: payload } });
+          toast('Line items saved ✓', 'ok');
+          closeSheet();
+          onSaved?.();
+        } catch (e) { toast(e.message, 'err'); }
+      });
+      bind();
+    },
+  });
+}
+
 // Manager-only: paste invoice text → server extracts ticket candidates →
 // manager picks which to Pull from FD/MX → creates WO records linked to this invoice.
 // ---- EXTRACTED-FROM-PDF PANEL ----
@@ -7333,7 +7404,7 @@ async function renderDashboardOverview(root) {
     <div class="dash-grid-2">
       ${renderColumnCard('Spend by cart-count bucket', r.by_cart_bucket)}
       ${renderVerticalBarCard('Top stores by spend', r.by_store, 'store_name', 'total',
-        (s) => `${s.wo_count} ${s.wo_count===1?'visit':'visits'} · avg ${fmt$(s.total / Math.max(1, s.wo_count))}/visit`,
+        (s) => `${s.wo_count} ${s.wo_count===1?'visit':'visits'} · avg ${fmtMoneyFull(s.total / Math.max(1, s.wo_count))}/visit`,
         { drillKey: 'store', drillValue: (s) => s.store_name, maxBars: 10 })}
     </div>
 
@@ -7342,13 +7413,13 @@ async function renderDashboardOverview(root) {
     <div class="dash-grid-2">
       ${renderBarCard('Most active stores', [...r.by_store].sort((a,b) => b.wo_count - a.wo_count).slice(0, 10),
         'store_name', 'wo_count', Math.max(1, ...r.by_store.map(s => s.wo_count)),
-        (s) => `${fmt$(s.total)} total · ${fmt$(s.total / Math.max(1, s.wo_count))} per visit`,
-        { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => `${n} visit${n===1?'':'s'}` })}
+        (s) => `${fmtMoneyFull(s.total)} total · ${fmtMoneyFull(s.total / Math.max(1, s.wo_count))} per visit`,
+        { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => `${n} visit${n===1?'':'s'}`, axisFmt: (n) => String(Math.round(n)) })}
       ${renderBarCard('Highest $ per visit', [...r.by_store].map(s => ({...s, per_visit: s.total / Math.max(1, s.wo_count)}))
           .sort((a,b) => b.per_visit - a.per_visit).slice(0, 10),
         'store_name', 'per_visit', Math.max(1, ...r.by_store.map(s => s.total / Math.max(1, s.wo_count))),
-        (s) => `${s.wo_count} ${s.wo_count===1?'visit':'visits'} · ${fmt$(s.total)} total`,
-        { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => fmt$(n) })}
+        (s) => `${s.wo_count} ${s.wo_count===1?'visit':'visits'} · ${fmtMoneyFull(s.total)} total`,
+        { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => fmtMoneyFull(n) })}
     </div>
 
     ${(r.trend_by_store || []).length ? renderMultiLineStoresCard('Spend trend per store (top 5)', r.trend_by_store) : ''}
@@ -7481,7 +7552,7 @@ async function renderDashboardOverview(root) {
     goto('dashboard');
   }
   // Drill-down hooks — applies to bars, stacked rows, donut slices, donut legend, and store-trend pills
-  $$('.bar-row[data-drill], .stack-row[data-drill], .donut-svg [data-drill], .donut-legend-row[data-drill], .legend-pill[data-drill], .vbar-row[data-drill]').forEach(el => {
+  $$('.bar-row[data-drill], .stack-row[data-drill], .donut-svg [data-drill], .donut-legend-row[data-drill], .legend-pill[data-drill], .vbar-row[data-drill], .hb-row[data-drill]').forEach(el => {
     el.addEventListener('click', () => drill(el));
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drill(el); } });
   });
@@ -7604,13 +7675,91 @@ function renderCostTrackerCard(monthly) {
 
 // Donut chart with center total + legend on the right. Click-to-filter on
 // each slice (drillKey defaults to 'wt' since this card is work-type centric).
+// ── v0.75 Tableau-inspired chart helpers ──────────────────────────────
+// Money with thousands separators ($1,413.53) for marks + tooltips; short
+// $k/$M form for axes + reference-line captions. niceMax() rounds an axis
+// top to a clean value; seqGreen() ramps light→deep green to encode rank.
+function fmtMoneyFull(n) { return '$' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fmtMoneyShort(n) {
+  n = n || 0; const a = Math.abs(n);
+  if (a >= 1e6) return '$' + (n / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M';
+  if (a >= 1e3) return '$' + (n / 1e3).toFixed(a >= 1e4 ? 0 : 1) + 'k';
+  if (a > 0 && a < 1) return '$' + n.toFixed(2);
+  return '$' + Math.round(n);
+}
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const e = Math.pow(10, Math.floor(Math.log10(v))), f = v / e;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e;
+}
+function lerpHex(a, b, t) {
+  a = a.replace('#', ''); b = b.replace('#', '');
+  const A = [0, 2, 4].map(i => parseInt(a.substr(i, 2), 16)), B = [0, 2, 4].map(i => parseInt(b.substr(i, 2), 16));
+  return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join('');
+}
+function seqGreen(t) { return lerpHex('#cfe9c2', '#16531f', Math.max(0, Math.min(1, t))); }
+
+// Tableau-style horizontal ranked bars — used by Top stores / Most active /
+// Highest $ per visit. Sorts desc, shades by magnitude, draws a quantitative
+// axis + dashed average reference line, and direct-labels each bar. Each row
+// carries the same data-drill/data-value hooks the old bars did.
+// opts: { rows, labelKey, valueKey, subFn, fmtV, fmtAxis, drillKey, drillValue, maxBars }
+function tableauHBars(opts) {
+  const { rows, labelKey, valueKey, subFn, drillKey, drillValue } = opts;
+  const fmtV = opts.fmtV || fmtMoneyFull;
+  const fmtAxis = opts.fmtAxis || fmtMoneyShort;
+  const maxBars = opts.maxBars || 10;
+  const data = (rows || []).filter(r => (r[valueKey] || 0) > 0)
+    .slice().sort((a, b) => b[valueKey] - a[valueKey]).slice(0, maxBars);
+  if (!data.length) return '';
+  const max = Math.max(...data.map(r => r[valueKey]), 1);
+  const nmax = niceMax(max);
+  const avg = data.reduce((s, r) => s + r[valueKey], 0) / data.length;
+  const W = 540, padL = 168, padR = 78, padT = 44, padB = 34, rowH = 48, barH = 29;
+  const baseY = padT + data.length * rowH;
+  const H = baseY + padB, plotW = W - padL - padR;
+  const xAt = v => padL + (v / nmax) * plotW;
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(p => p * nmax);
+  const trunc = (s, n) => (s && s.length > n) ? s.slice(0, n - 1) + '…' : (s || '');
+  const mid = y0 => y0 + barH / 2 + 4.5;
+  return `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="hbar-svg" style="width:100%;height:auto;display:block;">
+      ${ticks.map(t => { const x = xAt(t); return `
+        <line x1="${x}" y1="${padT - 8}" x2="${x}" y2="${baseY}" stroke="#eef0f4" stroke-width="1"/>
+        <text x="${x}" y="${baseY + 18}" text-anchor="middle" font-size="11" fill="#9aa0a6">${fmtAxis(t)}</text>`; }).join('')}
+      <line x1="${xAt(avg)}" y1="${padT - 10}" x2="${xAt(avg)}" y2="${baseY}" stroke="#F36D00" stroke-width="1.4" stroke-dasharray="5 4" opacity="0.85"/>
+      <text x="${xAt(avg)}" y="${padT - 15}" text-anchor="middle" font-size="11" font-weight="600" fill="#F36D00">Avg ${fmtAxis(avg)}</text>
+      ${data.map((r, i) => {
+        const v = r[valueKey], y = padT + i * rowH + (rowH - barH) / 2;
+        const w = Math.max((v / nmax) * plotW, 2);
+        const fill = seqGreen(0.35 + 0.65 * (max > 0 ? v / max : 0));
+        const lab = trunc(String(r[labelKey] || ''), 22);
+        const sub = subFn ? subFn(r) : '';
+        const drillAttrs = drillKey
+          ? `data-drill="${escapeHTML(drillKey)}" data-value="${escapeHTML(String(drillValue ? drillValue(r) : r[labelKey]))}" role="button" tabindex="0" style="cursor:pointer;"`
+          : '';
+        return `
+          <g class="hb-row" ${drillAttrs}>
+            <title>${escapeHTML(String(r[labelKey] || ''))}: ${fmtV(v)}${sub ? ' · ' + sub : ''}</title>
+            <rect x="0" y="${padT + i * rowH}" width="${W}" height="${rowH}" fill="transparent"></rect>
+            <text class="hb-rank" x="16" y="${mid(y)}" text-anchor="middle">${i + 1}</text>
+            <text class="hb-cat" x="${padL - 10}" y="${mid(y)}" text-anchor="end">${escapeHTML(lab)}</text>
+            <rect class="hb-bar" x="${padL}" y="${y}" width="${w}" height="${barH}" rx="4" fill="${fill}"></rect>
+            <text class="hb-val" x="${padL + w + 7}" y="${mid(y)}">${fmtV(v)}</text>
+          </g>`;
+      }).join('')}
+    </svg>`;
+}
+
+// v0.75 — work-type mix donut: slices sorted largest-first, slimmer + larger
+// ring, legend gains a per-slice share bar. Categorical WT colors retained.
 function renderDonutCard(title, rows, labelKey, valueKey, subFn) {
-  const data = rows.filter(r => r[valueKey] > 0);
+  const data = rows.filter(r => r[valueKey] > 0).slice().sort((a, b) => b[valueKey] - a[valueKey]);
   const total = data.reduce((s, r) => s + r[valueKey], 0);
   if (!data.length || !total) {
     return `<div class="card dash-card"><div class="section-title" style="margin-top:0;">${escapeHTML(title)}</div><div class="empty" style="padding:14px;font-size:12px;">No data in this period yet.</div></div>`;
   }
-  const cx = 90, cy = 90, r = 72, ir = 48;
+  const cx = 105, cy = 105, r = 90, ir = 66;
   // Build SVG arcs.
   let acc = 0;
   const slices = data.map(d => {
@@ -7631,14 +7780,14 @@ function renderDonutCard(title, rows, labelKey, valueKey, subFn) {
     <div class="card dash-card">
       <div class="section-title" style="margin-top: 0;">${escapeHTML(title)} <span class="bar-help">Click a slice to filter</span></div>
       <div class="donut-row">
-        <svg viewBox="0 0 180 180" class="donut-svg">
+        <svg viewBox="0 0 210 210" class="donut-svg">
           ${slices.map(s => `
             <path d="${s.path}" fill="${s.color}" data-drill="wt" data-value="${escapeHTML(s.d[labelKey])}" role="button" tabindex="0">
-              <title>${escapeHTML(s.d[labelKey])}: ${fmt$(s.d[valueKey])} (${(s.pct*100).toFixed(1)}%)</title>
+              <title>${escapeHTML(capitalize(s.d[labelKey]))}: ${fmtMoneyFull(s.d[valueKey])} (${(s.pct*100).toFixed(1)}%)</title>
             </path>
           `).join('')}
           <text x="${cx}" y="${cy - 4}" class="donut-center-label" text-anchor="middle">${escapeHTML('Total')}</text>
-          <text x="${cx}" y="${cy + 14}" class="donut-center-value" text-anchor="middle">${fmt$(total)}</text>
+          <text x="${cx}" y="${cy + 18}" class="donut-center-value" text-anchor="middle">${fmtMoneyShort(total)}</text>
         </svg>
         <div class="donut-legend">
           ${slices.map(s => `
@@ -7646,9 +7795,10 @@ function renderDonutCard(title, rows, labelKey, valueKey, subFn) {
               <span class="swatch" style="background: ${s.color};"></span>
               <div class="ll-body">
                 <div class="ll-name">${escapeHTML(capitalize(s.d[labelKey]))}</div>
-                <div class="ll-sub">${(s.pct*100).toFixed(0)}% · ${subFn ? escapeHTML(subFn(s.d)) : ''}</div>
+                <div class="dl-track"><div class="dl-fill" style="width:${(s.pct*100).toFixed(1)}%; background:${s.color};"></div></div>
+                <div class="ll-sub">${(s.pct*100).toFixed(0)}% of spend${subFn ? ' · ' + escapeHTML(subFn(s.d)) : ''}</div>
               </div>
-              <strong>${fmt$(s.d[valueKey])}</strong>
+              <strong>${fmtMoneyFull(s.d[valueKey])}</strong>
             </div>
           `).join('')}
         </div>
@@ -7820,36 +7970,44 @@ function renderMultiLineStoresCard(title, series) {
 
 // Vertical column chart for cart-count buckets. Same drill-down hooks as
 // horizontal bars but with a fresh look.
+// v0.75 — cart-count buckets. Fixes clipped y-axis labels (padL widened +
+// abbreviated $k ticks), shades columns by magnitude, direct-labels each
+// column, keeps zero-spend buckets in place (ordinal axis), adds an average
+// reference line.
 function renderColumnCard(title, rows) {
-  const data = (rows || []).filter(r => r.total > 0);
+  const data = (rows || []).filter(r => (r.total > 0) || (r.wo_count > 0));
   if (!data.length) {
     return `<div class="card dash-card"><div class="section-title" style="margin-top:0;">${escapeHTML(title)}</div><div class="empty" style="padding:14px;font-size:12px;">No data in this period yet.</div></div>`;
   }
   const max = Math.max(...data.map(r => r.total), 1);
-  const W = 320, H = 200, padL = 32, padR = 8, padT = 12, padB = 28;
-  const colW = (W - padL - padR) / data.length;
+  const nmax = niceMax(max);
+  const avg = data.reduce((s, r) => s + r.total, 0) / data.length;
+  const W = 400, H = 300, padL = 54, padR = 16, padT = 42, padB = 54;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const colW = plotW / data.length, bw = Math.min(62, colW * 0.66);
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(p => p * nmax);
+  const yAt = v => padT + plotH * (1 - v / nmax);
   return `
     <div class="card dash-card">
       <div class="section-title" style="margin-top:0;">${escapeHTML(title)}</div>
-      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="column-svg">
-        ${[0, 0.5, 1].map(p => {
-          const y = H - padB - p * (H - padT - padB);
-          return `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#eef0f4"/>
-                  <text x="${padL - 4}" y="${y + 3}" text-anchor="end" font-size="9" fill="#888">${fmt$(p * max)}</text>`;
-        }).join('')}
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="column-svg" style="height:auto;">
+        ${ticks.map(t => { const y = yAt(t); return `
+          <line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#eef0f4" stroke-width="1"/>
+          <text x="${padL - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="#9aa0a6">${fmtMoneyShort(t)}</text>`; }).join('')}
+        <line x1="${padL}" y1="${yAt(avg)}" x2="${W - padR}" y2="${yAt(avg)}" stroke="#F36D00" stroke-width="1.4" stroke-dasharray="5 4" opacity="0.85"/>
+        <text x="${W - padR}" y="${yAt(avg) - 5}" text-anchor="end" font-size="11" font-weight="600" fill="#F36D00">Avg ${fmtMoneyShort(avg)}</text>
         ${data.map((r, i) => {
           const cx = padL + i * colW + colW / 2;
-          const barH = (r.total / max) * (H - padT - padB);
-          const y = H - padB - barH;
-          const w = Math.min(40, colW * 0.7);
+          const barH = (r.total / nmax) * plotH;
+          const y = padT + plotH - barH;
+          const fill = seqGreen(0.35 + 0.65 * (max > 0 ? r.total / max : 0));
           return `
             <g>
-              <rect x="${cx - w/2}" y="${y}" width="${w}" height="${barH}"
-                    fill="#43B02A" rx="3" opacity="0.92">
-                <title>${escapeHTML(r.bucket)}: ${fmt$(r.total)} (${r.wo_count} WOs)</title>
-              </rect>
-              <text x="${cx}" y="${H - padB + 14}" text-anchor="middle" font-size="10" font-weight="600" fill="#3a3a3a">${escapeHTML(r.bucket)}</text>
-              <text x="${cx}" y="${H - padB + 26}" text-anchor="middle" font-size="9" fill="#888">${r.wo_count} WOs</text>
+              <title>${escapeHTML(r.bucket)}: ${fmtMoneyFull(r.total)} (${r.wo_count} WOs)</title>
+              <rect x="${cx - bw/2}" y="${y}" width="${bw}" height="${Math.max(barH, 1)}" rx="4" fill="${fill}"></rect>
+              ${r.total > 0 ? `<text x="${cx}" y="${y - 7}" text-anchor="middle" font-size="13" font-weight="700" fill="#1F4E1F">${fmtMoneyShort(r.total)}</text>` : ''}
+              <text x="${cx}" y="${H - padB + 19}" text-anchor="middle" font-size="13" font-weight="600" fill="#33373b">${escapeHTML(r.bucket)}</text>
+              <text x="${cx}" y="${H - padB + 34}" text-anchor="middle" font-size="11" fill="#9aa0a6">${r.wo_count} WOs</text>
             </g>
           `;
         }).join('')}
@@ -7858,105 +8016,43 @@ function renderColumnCard(title, rows) {
   `;
 }
 
-// Vertical bar chart for stores (or any rows with long labels). Mirrors the
-// look of renderColumnCard but with rotated x-axis labels so long store
-// names ("ShopRite of Bridge & Harbison") fit without wrapping.
-// v0.46 — replaces horizontal bars on "Top stores by spend" per design ask.
-//
-// `rows`     — array of objects, sorted desc by `valueKey`
-// `labelKey` — field name for the bar label (e.g. 'store_name')
-// `valueKey` — numeric field for the bar height (e.g. 'total')
-// `subFn(row)` — returns a small per-bar tooltip string (e.g. "12 visits")
+// v0.75 — store rankings (e.g. "Top stores by spend"). Long store names read
+// far better as HORIZONTAL bars than rotated columns, so this now delegates to
+// tableauHBars (sorted, sequentially shaded, quantitative axis + average line).
+// Signature kept for the existing call site.
+// `opts.valueFmt` — bar/value formatter (defaults to $ with separators)
+// `opts.axisFmt`  — axis/avg formatter (defaults to short $k)
 // `opts.drillKey` + `opts.drillValue(row)` — click a bar to filter dashboard
-// `opts.valueFmt` — custom value formatter (defaults to fmt$)
-// `opts.maxBars` — cap N bars (default 10)
+// `opts.maxBars`  — cap N bars (default 10)
 function renderVerticalBarCard(title, rows, labelKey, valueKey, subFn, opts = {}) {
-  const fmtV = opts.valueFmt || ((v) => fmt$(v));
+  const fmtV = opts.valueFmt || ((v) => fmtMoneyFull(v));
   const maxBars = opts.maxBars || 10;
-  const data = (rows || []).filter(r => r[valueKey] > 0).slice(0, maxBars);
+  const data = (rows || []).filter(r => (r[valueKey] || 0) > 0);
   if (!data.length) {
     return `<div class="card dash-card"><div class="section-title" style="margin-top:0;">${escapeHTML(title)}</div><div class="empty" style="padding:14px;font-size:12px;">No data in this period yet.</div></div>`;
   }
-  const max  = Math.max(...data.map(r => r[valueKey]), 1);
-
-  // Layout: wider canvas + tall bottom padding to fit rotated labels.
-  const W = 640, H = 360, padL = 56, padR = 12, padT = 24, padB = 110;
-  const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-  const colW  = plotW / data.length;
-  const barW  = Math.min(48, colW * 0.62);
-
-  // Y-axis ticks at 0 / 25 / 50 / 75 / 100 % of max.
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map(p => ({ p, val: p * max, y: padT + plotH * (1 - p) }));
-
-  // Trim long labels — full name is in title tooltip + secondary text.
-  // Rotated -40° labels can fit ~24 chars without overlapping the next bar.
-  const truncate = (s, n) => (s && s.length > n) ? s.slice(0, n - 1) + '…' : (s || '');
-  const LABEL_MAX = 24;
-
   const helpText = opts.drillKey ? '<span class="bar-help">Tap a bar to filter the dashboard.</span>' : '';
-
+  const shown = Math.min(maxBars, data.length);
   return `
     <div class="card dash-card">
       <div class="section-title" style="margin-top:0;">${escapeHTML(title)} ${helpText}</div>
-      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="vbar-svg" style="width:100%;height:auto;display:block;">
-        <defs>
-          <linearGradient id="vbar-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%"  stop-color="#43B02A" stop-opacity="0.95"/>
-            <stop offset="100%" stop-color="#1F7A1F" stop-opacity="1"/>
-          </linearGradient>
-        </defs>
-
-        <!-- y-axis grid + labels -->
-        ${ticks.map(t => `
-          <line x1="${padL}" y1="${t.y}" x2="${W - padR}" y2="${t.y}" stroke="#eef0f4" stroke-width="1"/>
-          <text x="${padL - 8}" y="${t.y + 3}" text-anchor="end" font-size="10" fill="#888">${fmtV(t.val)}</text>
-        `).join('')}
-
-        <!-- x-axis baseline -->
-        <line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="#d6dae0" stroke-width="1"/>
-
-        <!-- bars -->
-        ${data.map((r, i) => {
-          const cx = padL + i * colW + colW / 2;
-          const v  = r[valueKey];
-          const barH = (v / max) * plotH;
-          const y = padT + plotH - barH;
-          const labelText = truncate(String(r[labelKey] || ''), LABEL_MAX);
-          const drillAttrs = opts.drillKey
-            ? `data-drill="${opts.drillKey}" data-value="${escapeHTML(opts.drillValue ? opts.drillValue(r) : r[labelKey])}" role="button" tabindex="0" style="cursor:pointer;"`
-            : '';
-          const sub = subFn ? subFn(r) : '';
-          return `
-            <g class="vbar-row" ${drillAttrs}>
-              <!-- click target: full column -->
-              <rect x="${cx - colW/2}" y="${padT}" width="${colW}" height="${plotH}" fill="transparent"></rect>
-              <rect x="${cx - barW/2}" y="${y}" width="${barW}" height="${Math.max(barH, 2)}"
-                    fill="url(#vbar-grad)" rx="4" class="vbar-bar">
-                <title>${escapeHTML(String(r[labelKey] || ''))}: ${fmtV(v)}${sub ? ' · ' + sub : ''}</title>
-              </rect>
-              <!-- value label above bar -->
-              <text x="${cx}" y="${y - 6}" text-anchor="middle" font-size="11" font-weight="700" fill="#1F4E1F">${fmtV(v)}</text>
-              <!-- rotated x-axis label -->
-              <text x="${cx}" y="${padT + plotH + 12}" text-anchor="end" font-size="11" font-weight="600" fill="#3a3a3a"
-                    transform="rotate(-40 ${cx} ${padT + plotH + 12})">${escapeHTML(labelText)}</text>
-            </g>
-          `;
-        }).join('')}
-      </svg>
-      ${data.length > 5 ? `<div style="font-size: 11px; color: var(--muted); text-align: right; margin-top: 4px;">Showing top ${data.length} of ${rows.length}</div>` : ''}
+      ${tableauHBars({ rows: data, labelKey, valueKey, subFn, fmtV, fmtAxis: opts.axisFmt, drillKey: opts.drillKey, drillValue: opts.drillValue, maxBars })}
+      ${data.length > shown ? `<div style="font-size: 11px; color: var(--muted); text-align: right; margin-top: 4px;">Showing top ${shown} of ${rows.length}</div>` : ''}
     </div>
   `;
 }
 
-// Horizontal bar chart card. `rows` is an array of objects, `labelKey` and
-// `valueKey` are field names. `subLineFn(row)` returns a small meta string.
-// `opts.drillKey` + `opts.drillValue(row)` make each bar clickable to filter
-// the dashboard by that field (one of: tech, store, wt).
+// v0.75 — ranked store metrics (Most active / Highest $ per visit). Now an
+// SVG horizontal-bar card via tableauHBars: quantitative axis, rank number,
+// sequential shading, dashed average line. `max` kept for signature
+// compatibility (no longer needed — the axis is auto-scaled).
+// `opts.valueFmt` — bar/value formatter (defaults to $ with separators)
+// `opts.axisFmt`  — axis/avg formatter (e.g. integer counts for visits)
 function renderBarCard(title, rows, labelKey, valueKey, max, subLineFn, opts = {}) {
-  const helpText = opts.drillKey ? '<span class="bar-help">Tap a row to filter the dashboard.</span>' : '';
-  const fmtV = opts.valueFmt || ((v) => fmt$(v));
-  if (!rows.length || !max) {
+  const helpText = opts.drillKey ? '<span class="bar-help">Tap a bar to filter the dashboard.</span>' : '';
+  const fmtV = opts.valueFmt || ((v) => fmtMoneyFull(v));
+  const data = (rows || []).filter(r => (r[valueKey] || 0) > 0);
+  if (!data.length) {
     return `
       <div class="card dash-card">
         <div class="section-title" style="margin-top: 0;">${escapeHTML(title)}</div>
@@ -7967,24 +8063,7 @@ function renderBarCard(title, rows, labelKey, valueKey, max, subLineFn, opts = {
   return `
     <div class="card dash-card">
       <div class="section-title" style="margin-top: 0;">${escapeHTML(title)}${helpText}</div>
-      ${rows.map(r => {
-        const label = r[labelKey] || '—';
-        const v     = r[valueKey] || 0;
-        const pct   = max > 0 ? Math.max(2, (v / max) * 100) : 0;
-        const drillAttrs = opts.drillKey
-          ? `data-drill="${escapeHTML(opts.drillKey)}" data-value="${escapeHTML(String(opts.drillValue(r) ?? ''))}" role="button" tabindex="0"`
-          : '';
-        return `
-          <div class="bar-row ${opts.drillKey ? 'bar-clickable' : ''}" ${drillAttrs}>
-            <div class="bar-row-head">
-              <span class="bar-label">${escapeHTML(String(label))}</span>
-              <strong>${fmtV(v)}</strong>
-            </div>
-            <div class="bar-track"><div class="bar-fill" style="width: ${pct}%;"></div></div>
-            ${subLineFn ? `<div class="bar-sub">${escapeHTML(subLineFn(r))}</div>` : ''}
-          </div>
-        `;
-      }).join('')}
+      ${tableauHBars({ rows: data, labelKey, valueKey, subFn: subLineFn, fmtV, fmtAxis: opts.axisFmt, drillKey: opts.drillKey, drillValue: opts.drillValue, maxBars: opts.maxBars || 10 })}
     </div>
   `;
 }
@@ -9230,6 +9309,7 @@ async function renderInvoiceDetail(root, invoiceId) {
 
         <p class="help" style="margin-bottom: 12px;">Confirm the vendor name, invoice number, date, and total against the attached PDF above. Edit anything that needs fixing. When everything matches, click <strong>Submit to Sr Mgr</strong>.</p>
         <button class="btn btn-ghost btn-block" id="vendorEditBtn" style="margin-bottom: 8px;">✏️ Edit vendor details (name, #, date, total, notes)</button>
+        <button class="btn btn-ghost btn-block" id="vendorEditLinesBtn" style="margin-bottom: 8px;">🧾 Edit line items (fix / add / remove parsed rows)</button>
         <div class="flex gap-12" style="margin-top: 8px;">
           <button class="btn btn-danger" style="flex:1;" id="vendorDiscardBtn">🗑 Discard draft</button>
           <button class="btn btn-primary" style="flex:2;" id="vendorSubmitBtn" ${missing.length ? 'disabled title="Fill in missing fields first"' : ''}>Submit to Sr Mgr →</button>
@@ -9530,7 +9610,13 @@ async function renderInvoiceDetail(root, invoiceId) {
   });
 
   // v0.38 — vendor draft handlers
-  $('#vendorEditBtn')?.addEventListener('click', () => openVendorEditSheet(invoice));
+  $('#vendorEditBtn')?.addEventListener('click', () => openVendorEditSheet(invoice, () => goto('invDetail', invoice.id)));
+  // v0.74 — edit parsed line items
+  $('#vendorEditLinesBtn')?.addEventListener('click', () => {
+    let li = [];
+    try { const ex = invoice.extracted_summary ? JSON.parse(invoice.extracted_summary) : null; if (ex && Array.isArray(ex.line_items)) li = ex.line_items; } catch (_) {}
+    openVendorLineItemsSheet(invoice, li, () => goto('invDetail', invoice.id));
+  });
   $('#vendorSubmitBtn')?.addEventListener('click', async () => {
     if (!confirm(`Submit ${invoice.vendor_name || 'vendor'} invoice ${invoice.vendor_invoice_number || invoice.invoice_number} for ${fmt$(invoice.total)} to Sr Mgr?`)) return;
     try {

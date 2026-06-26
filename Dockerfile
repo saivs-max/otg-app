@@ -8,8 +8,17 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# v0.74 — OCR for image-only / scanned vendor invoices. `tesseract-ocr` does the
+# OCR and `poppler-utils` (pdftoppm) rasterizes PDF pages to images first. These
+# are the only system packages we shell out to (see lib/ocr.js); everything else
+# stays pure-JS. If this layer is dropped, OCR degrades gracefully to "scanned —
+# enter manually" rather than breaking uploads.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first for better layer caching.
-# All deps are pure-JS (no native addons), so no build toolchain is needed.
+# All Node deps are pure-JS (no native addons), so no build toolchain is needed.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 

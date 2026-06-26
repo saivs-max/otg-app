@@ -79,6 +79,21 @@ Node backend + vanilla-JS SPA (`public/app.js`).
 - Version tags in comments, e.g. `v0.66.2`.
 - `cost_tracker_overrides` columns: actual_labor, actual_travel, actual_expenses,
   third_party_cost, … edited via `PATCH /cost-tracker/:wo_id`.
+- **Vendor PDF parser (v0.74)**: `lib/vendorPdfExtractor.js`. `findLineItems` runs
+  every shape (A0 Kept-glued, D reordered/glued product table e.g. TRUNO, E clean
+  DESCRIPTION/QTY/UNIT/TOTAL table, A/A2 Crystal, B classic, C qty) then picks the
+  set whose amounts sum to the printed Subtotal (`findSubtotal`), else the most
+  rows — add new layouts as another extractor in that list. Header parsing also
+  handles Proposal/Quote #s and textual dates ("24th June 2026"). **Image-only
+  PDFs (no text layer, e.g. a single full-page JPEG) now go through OCR
+  (`lib/ocr.js`): pdftoppm rasterizes the page → tesseract (TSV) → rows rebuilt by
+  word y-coordinate → same parser. Needs `poppler-utils`+`tesseract-ocr` (added to
+  the Dockerfile); if absent OCR degrades gracefully to `scanned_pdf`/manual
+  entry. `extractVendorPdf` returns `ocr:true` when used.** Parsed `line_items`
+  render in the vendor invoice detail table and are **editable** on a draft via
+  "🧾 Edit line items" → `openVendorLineItemsSheet` → `PATCH
+  /invoices/:id/vendor-line-items` (writes `extracted_summary.line_items`; invoice
+  Total stays the source of truth, never auto-overwritten).
 - **Vendors (v0.73)**: `vendors` master table (name UNIQUE COLLATE NOCASE +
   default_category/notes/archived_at). Auto-saved via `upsertVendor()` on
   vendor-upload + vendor-update; backfilled from existing `invoices.vendor_name`
