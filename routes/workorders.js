@@ -122,7 +122,23 @@ module.exports = (db) => {
     db.prepare(`UPDATE work_orders SET ${updates.join(', ')} WHERE id = ?`).run(...params, id);
     logAudit(db, { entity_type: 'work_orders', entity_id: id, user_id: userId, action: 'update',
                    details: req.body });
-    res.json(db.prepare("SELECT * FROM work_orders WHERE id = ?").get(id));
+    const updated = db.prepare("SELECT * FROM work_orders WHERE id = ?").get(id);
+    res.json(updated);
+
+    // v0.80 — Background MaintainX sync on completion.
+    // When a MaintainX WO is marked complete, immediately pull the latest data
+    // from MaintainX in the background so invoice labor/time stays current.
+    if (req.body.status === 'completed' && updated.source_system === 'maintainx') {
+      setImmediate(async () => {
+        try {
+          const { syncSingleWorkOrderWithOrgKey } = require('../lib/maintainx/sync');
+          await syncSingleWorkOrderWithOrgKey(db, userId, id);
+          console.log(`[MaintainX] Background sync on completion: WO ${id} refreshed`);
+        } catch (e) {
+          console.error(`[MaintainX] Background sync on completion failed for WO ${id}:`, e.message);
+        }
+      });
+    }
   });
 
   // POST /api/workorders/parse-url  { url }

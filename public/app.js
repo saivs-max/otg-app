@@ -34,90 +34,31 @@ async function api(path, opts = {}) {
   return j;
 }
 
-// ---- MaintainX work-order sync (per-worker pull + labor import) ----
-// On-demand only: the worker decides when to pull. Writeback to MaintainX is a
-// deferred phase, so these helpers only read from MaintainX into Bread.
-let _mxStatusCache = null;
-async function mxGetStatus(force) {
-  if (_mxStatusCache && !force) return _mxStatusCache;
-  try { _mxStatusCache = await api('/integrations/maintainx/status'); }
-  catch (_) { _mxStatusCache = { connected: false }; }
-  return _mxStatusCache;
-}
+// ---- MaintainX work-order sync (v0.80 — org-key, no personal token needed) ----
+// Sync runs automatically: daily at 2 AM and whenever a WO is marked complete.
+// Users can also manually import their assigned WOs via the "Import from MaintainX"
+// button — no API key required; the org-level key handles everything.
 
-async function mxDoConnect(body, close) {
-  try {
-    const r = await api('/integrations/maintainx/connect', { method: 'POST', body });
-    _mxStatusCache = r;
-    toast('MaintainX connected ✓', 'ok');
-    close(r);
-  } catch (e) { toast(e.message || 'Could not connect to MaintainX', 'err'); }
-}
-
-// Lightweight accessible modal to paste an API key (or try demo data).
-function mxConnectModal() {
-  return new Promise((resolve) => {
-    const ov = document.createElement('div');
-    ov.setAttribute('role', 'dialog');
-    ov.setAttribute('aria-modal', 'true');
-    ov.setAttribute('aria-label', 'Connect MaintainX');
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;';
-    ov.innerHTML = `
-      <div class="card" style="max-width:430px;width:100%;background:#fff;">
-        <div class="section-title" style="margin-top:0;">Connect MaintainX</div>
-        <p class="help" style="margin:0 0 12px;">Paste your personal MaintainX API key (MaintainX → Settings → Integrations → API Keys) to pull the work orders assigned to you and import the time you logged as labor.</p>
-        <input class="field" id="mxToken" type="password" autocomplete="off" placeholder="MaintainX API key" style="width:100%;margin-bottom:12px;" />
-        <div class="flex between" style="gap:8px;align-items:center;">
-          <button class="btn btn-ghost btn-sm" id="mxDemo" title="Try the sync with sample work orders">Use demo data</button>
-          <div class="flex" style="gap:8px;">
-            <button class="btn btn-ghost btn-sm" id="mxCancel">Cancel</button>
-            <button class="btn btn-primary btn-sm" id="mxConnect">Connect</button>
-          </div>
-        </div>
-      </div>`;
-    document.body.appendChild(ov);
-    const input = ov.querySelector('#mxToken');
-    input.focus();
-    const close = (val) => { ov.remove(); document.removeEventListener('keydown', onKey); resolve(val); };
-    const onKey = (e) => { if (e.key === 'Escape') close(null); };
-    document.addEventListener('keydown', onKey);
-    ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
-    ov.querySelector('#mxCancel').addEventListener('click', () => close(null));
-    ov.querySelector('#mxConnect').addEventListener('click', () => {
-      const token = input.value.trim();
-      if (!token) return toast('Enter your MaintainX API key, or use demo data', 'err');
-      mxDoConnect({ token }, close);
-    });
-    ov.querySelector('#mxDemo').addEventListener('click', () => mxDoConnect({ demo: true }, close));
-  });
-}
-
-// Returns true once connected; opens the connect modal if needed.
-async function mxEnsureConnected() {
-  const s = await mxGetStatus(true);
-  if (s.connected) return true;
-  const r = await mxConnectModal();
-  return !!(r && r.connected);
-}
-
-async function mxSyncAll(btn) {
-  if (!(await mxEnsureConnected())) return;
+// Import all MaintainX WOs assigned to the current user.
+// Uses the org-level key from Settings → Integrations; resolves user by email.
+async function mxImportMyOrders(btn) {
   const old = btn ? btn.innerHTML : null;
-  if (btn) { btn.disabled = true; btn.innerHTML = 'Syncing…'; }
+  if (btn) { btn.disabled = true; btn.innerHTML = 'Importing…'; }
   try {
-    const { summary } = await api('/integrations/maintainx/sync-now', { method: 'POST' });
+    const { summary } = await api('/integrations/maintainx/pull-my-orders', { method: 'POST' });
     const bits = [`${summary.pulled} work order${summary.pulled === 1 ? '' : 's'}`];
+    if (summary.created)       bits.push(`${summary.created} new`);
     if (summary.laborImported) bits.push(`${summary.laborImported} labor time${summary.laborImported === 1 ? '' : 's'} imported`);
-    toast(`Synced ${bits.join(' · ')} ✓`, 'ok');
+    toast(`Imported ${bits.join(' · ')} from MaintainX ✓`, 'ok');
     goto(STATE.view, STATE.view_arg);
   } catch (e) {
-    toast(e.message || 'Sync failed', 'err');
+    toast(e.message || 'Import failed', 'err');
     if (btn) { btn.disabled = false; btn.innerHTML = old; }
   }
 }
 
+// Refresh a single MaintainX WO (from WO detail view). Uses org key.
 async function mxSyncOne(woId, btn) {
-  if (!(await mxEnsureConnected())) return;
   const old = btn ? btn.innerHTML : null;
   if (btn) { btn.disabled = true; btn.innerHTML = 'Syncing…'; }
   try {
@@ -648,7 +589,7 @@ async function renderHome(root) {
     <div class="flex between" style="align-items: center; margin: 22px 4px 10px;">
       <div class="section-title" style="margin: 0;">Today's work orders</div>
       <div class="flex gap-12">
-        <button class="btn btn-ghost btn-sm" id="mxSyncBtn" title="Pull your work orders and logged time from MaintainX">⟳ Sync MaintainX</button>
+        <button class="btn btn-ghost btn-sm" id="mxImportBtn" title="Import work orders assigned to you in MaintainX">↓ Import from MaintainX</button>
         <button class="btn btn-ghost btn-sm" id="homeUploadInvBtn" title="Upload a pre-existing invoice PDF">📄 Upload invoice</button>
         <button class="btn btn-primary btn-sm" id="newWoBtn">＋ New WO</button>
       </div>
@@ -703,7 +644,7 @@ async function renderHome(root) {
     else                       goto('invoice');
   });
   $('#newWoBtn')?.addEventListener('click', () => goto('woAdd'));
-  $('#mxSyncBtn')?.addEventListener('click', (e) => mxSyncAll(e.currentTarget));
+  $('#mxImportBtn')?.addEventListener('click', (e) => mxImportMyOrders(e.currentTarget));
   $('#homeUploadInvBtn')?.addEventListener('click', openTechUploadSheet);
   $$('.card.tap[data-inv]').forEach(c => c.addEventListener('click', () => goto('invDetail', Number(c.dataset.inv))));
 
@@ -897,10 +838,10 @@ async function renderWoDetail(root, woId) {
     <div class="card">
       <div class="flex between" style="align-items:center; gap:12px;">
         <div style="min-width:0;">
-          <div style="font-size:13px;font-weight:600;">Synced from MaintainX</div>
-          <div style="font-size:12px;color:var(--muted);">Pull the latest status and import the time you logged in MaintainX as labor. Your own logged time is never overwritten.</div>
+          <div style="font-size:13px;font-weight:600;">MaintainX work order</div>
+          <div style="font-size:12px;color:var(--muted);">Auto-synced daily and on completion. Refresh now to pull the latest status and logged time. Your own logged time is never overwritten.</div>
         </div>
-        <button class="btn btn-ghost btn-sm" id="mxSyncOneBtn" style="white-space:nowrap;">⟳ Sync</button>
+        <button class="btn btn-ghost btn-sm" id="mxSyncOneBtn" style="white-space:nowrap;">⟳ Refresh</button>
       </div>
     </div>` : ''}
 
@@ -4004,13 +3945,16 @@ async function renderApprovalQueue(root) {
 // it (Sr Mgr approval is optional); the creator still can't self-approve.
 async function openVendorInvoiceSheet() {
   let pendingFile = null;
-  // v0.73 — saved-vendor autocomplete. Fetch the master list so the vendor name
-  // field can offer existing vendors (you can still type a brand-new one).
-  let vendorDatalist = '';
-  try {
-    const vs = (await api('/vendors')).vendors || [];
-    vendorDatalist = `<datalist id="vnVendorsDL">${vs.map(v => `<option value="${escapeHTML(v.name)}"></option>`).join('')}</datalist>`;
-  } catch (_) {}
+  // v0.75 — saved-vendor picker. A real <select> dropdown of saved vendors
+  // (reliable to open/select) PLUS a text input to add a brand-new vendor not in
+  // the list. Replaces the datalist, which some browsers wouldn't open.
+  let vendorOptions = [];
+  try { vendorOptions = (await api('/vendors')).vendors || []; } catch (_) {}
+  const vendorSelectHtml = vendorOptions.length ? `
+          <select class="field" id="vnVendorSelect" style="margin-bottom: 6px;">
+            <option value="">— Pick a saved vendor —</option>
+            ${vendorOptions.map(v => `<option value="${escapeHTML(v.name)}">${escapeHTML(v.name)}${v.invoice_count ? ` (${v.invoice_count})` : ''}</option>`).join('')}
+          </select>` : '';
   function html() {
     const isPdf = pendingFile && /pdf/i.test(pendingFile.mime_type || '') || /\.pdf$/i.test(pendingFile?.filename || '');
     return `
@@ -4036,8 +3980,8 @@ async function openVendorInvoiceSheet() {
         </summary>
         <div style="margin-top: 10px; padding: 12px; background: #fafbfc; border-radius: 8px;">
           <span class="label">Vendor name</span>
-          <input class="field" id="vnName" list="vnVendorsDL" autocomplete="off" placeholder="Start typing or pick a saved vendor…" />
-          ${vendorDatalist}
+          ${vendorSelectHtml}
+          <input class="field" id="vnName" type="text" autocomplete="off" placeholder="${vendorOptions.length ? '…or type a new vendor name' : 'Vendor name'}" />
 
           <div class="flex gap-12" style="margin-top: 8px;">
             <div style="flex:2;">
@@ -4083,6 +4027,8 @@ async function openVendorInvoiceSheet() {
       function rerender() { wrap.querySelector('.sheet').innerHTML = `<div class="sheet-handle"></div>${html()}`; bindAll(); }
       function bindAll() {
         $$('[data-act="sheet-close"]', wrap).forEach(b => b.addEventListener('click', closeSheet));
+        // v0.75 — picking a saved vendor fills the name input (still editable / typeable).
+        $('#vnVendorSelect', wrap)?.addEventListener('change', (e) => { if (e.target.value) $('#vnName', wrap).value = e.target.value; });
         $('#vnClearFile', wrap)?.addEventListener('click', () => { pendingFile = null; rerender(); });
         const fp = $('#vnFilePicker', wrap);
         if (fp && !pendingFile) {
@@ -4136,19 +4082,22 @@ async function openVendorInvoiceSheet() {
 // v0.38 — Edit a vendor invoice draft (vendor name, #, date, total, period, notes).
 // PATCHes the row and re-renders invDetail so the preview shows the new values.
 async function openVendorEditSheet(invoice, onSaved) {
-  // v0.73 — saved-vendor autocomplete (type a new one or pick an existing).
-  let vendorDatalist = '';
-  try {
-    const vs = (await api('/vendors')).vendors || [];
-    vendorDatalist = `<datalist id="veVendorsDL">${vs.map(v => `<option value="${escapeHTML(v.name)}"></option>`).join('')}</datalist>`;
-  } catch (_) {}
+  // v0.75 — saved-vendor dropdown + free-text input (pick an existing vendor or
+  // type a new one). Replaces the datalist that some browsers wouldn't open.
+  let vendorOptions = [];
+  try { vendorOptions = (await api('/vendors')).vendors || []; } catch (_) {}
+  const vendorSelectHtml = vendorOptions.length ? `
+    <select class="field" id="veVendorSelect" style="margin-bottom: 6px;">
+      <option value="">— Pick a saved vendor —</option>
+      ${vendorOptions.map(v => `<option value="${escapeHTML(v.name)}"${invoice.vendor_name === v.name ? ' selected' : ''}>${escapeHTML(v.name)}${v.invoice_count ? ` (${v.invoice_count})` : ''}</option>`).join('')}
+    </select>` : '';
   showSheet(`
     <h3>Edit vendor invoice details</h3>
     <p class="help" style="margin-bottom: 14px;">Adjust anything that needs fixing. Changes save when you click <strong>Save</strong>.</p>
 
     <span class="label">Vendor name</span>
-    <input class="field" id="veName"  type="text" list="veVendorsDL" autocomplete="off" value="${escapeHTML(invoice.vendor_name || '')}" />
-    ${vendorDatalist}
+    ${vendorSelectHtml}
+    <input class="field" id="veName"  type="text" autocomplete="off" value="${escapeHTML(invoice.vendor_name || '')}" placeholder="${vendorOptions.length ? '…or type a new vendor name' : 'Vendor name'}" />
 
     <div class="flex gap-12" style="margin-top: 8px;">
       <div style="flex:1;">
@@ -4198,6 +4147,8 @@ async function openVendorEditSheet(invoice, onSaved) {
   `, {
     onMount: (wrap) => {
       $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
+      // v0.75 — picking a saved vendor fills the name input (still editable).
+      $('#veVendorSelect', wrap)?.addEventListener('change', (e) => { if (e.target.value) $('#veName', wrap).value = e.target.value; });
       $('#veSave', wrap).addEventListener('click', async () => {
         const body = {
           vendor_name:           $('#veName',         wrap).value.trim(),

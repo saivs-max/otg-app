@@ -81,7 +81,7 @@ app.use('/api', require('./routes/corpcard')(db));
 app.use('/api', require('./routes/category_rules')(db));
 app.use('/api', require('./routes/work_types')(db));
 app.use('/api', require('./routes/unplanned')(db));   // v0.63 — unplanned/wasted-labour tagging
-app.use('/api', require('./routes/integrations')(db)); // v0.67 — MaintainX per-worker WO sync
+app.use('/api', require('./routes/integrations')(db)); // v0.80 — MaintainX org-key sync
 
 // Health check
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
@@ -110,7 +110,38 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('');
-  console.log('  Bread — v0.66.0 · Field Cost & Operations (new design)');
+  console.log('  Bread — v0.80.0 · Field Cost & Operations (org-key MaintainX sync)');
   console.log(`  → http://localhost:${PORT}`);
   console.log('');
 });
+
+// v0.80 — Daily MaintainX sync scheduler.
+// Fires syncAllUsersWithOrgKey once per day at MAINTAINX_SYNC_HOUR (default 2 AM
+// server time). Each run pulls all assigned WOs for every user whose email
+// matches a MaintainX account. Runs entirely in the background — no user action
+// needed. Errors per-user are logged and do not abort the overall run.
+(function scheduleDailyMxSync() {
+  const { syncAllUsersWithOrgKey } = require('./lib/maintainx/sync');
+  const syncHour = Number(process.env.MAINTAINX_SYNC_HOUR ?? 2);  // 0–23, default 2 AM
+
+  async function runSync() {
+    console.log('[MaintainX] Starting scheduled daily sync…');
+    try {
+      await syncAllUsersWithOrgKey(db);
+    } catch (e) {
+      console.error('[MaintainX] Scheduled sync error:', e.message);
+    }
+    // Schedule next run exactly 24 hours from now.
+    setTimeout(runSync, 24 * 60 * 60 * 1000);
+  }
+
+  // Calculate ms until the next occurrence of syncHour:00:00 local time.
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(syncHour, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const msUntil = next - now;
+
+  setTimeout(runSync, msUntil);
+  console.log(`[MaintainX] Daily sync scheduled for ${next.toLocaleTimeString()} (in ${Math.round(msUntil / 60000)} min)`);
+})();

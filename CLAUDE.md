@@ -93,7 +93,12 @@ Node backend + vanilla-JS SPA (`public/app.js`).
   render in the vendor invoice detail table and are **editable** on a draft via
   "🧾 Edit line items" → `openVendorLineItemsSheet` → `PATCH
   /invoices/:id/vendor-line-items` (writes `extracted_summary.line_items`; invoice
-  Total stays the source of truth, never auto-overwritten).
+  Total stays the source of truth, never auto-overwritten). **v0.75 —
+  `findVendorName` NEVER guesses: it returns a name only from an explicit
+  From/Vendor/Remit-To/Supplier label or a clear company suffix (LLC/Inc/Corp/…),
+  else null (no generic-keyword/positional heuristics). The upload + edit forms
+  use a real `<select>` of saved vendors + a text input for a new one (not a
+  datalist, which some webviews wouldn't open).
 - **Vendors (v0.73)**: `vendors` master table (name UNIQUE COLLATE NOCASE +
   default_category/notes/archived_at). Auto-saved via `upsertVendor()` on
   vendor-upload + vendor-update; backfilled from existing `invoices.vendor_name`

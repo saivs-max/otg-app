@@ -1,23 +1,31 @@
 // routes/integrations.js
 //
-// Per-worker MaintainX integration: connect (paste a personal API key or use
-// demo data), check status, disconnect, and run an on-demand sync that pulls
-// the worker's assigned work orders and imports MaintainX "time taken" as labor.
+// MaintainX integration endpoints (v0.80 — org-key sync).
+// All sync now uses the org-level API key from Settings → Integrations.
+// Technicians and managers do NOT need to provide a personal API key.
 //
-// Writeback to MaintainX (status + comments + pushing Bread's labor up) is a
-// deliberately deferred phase and is not wired here yet.
+// Sync flow:
+//   1. Daily scheduler (server.js) calls syncAllUsersWithOrgKey at 2 AM.
+//   2. WO completion (routes/workorders.js PATCH) fires syncSingleWorkOrderWithOrgKey.
+//   3. Users can manually import their assigned WOs via POST /integrations/maintainx/pull-my-orders.
+//   4. Per-WO refresh still available via POST /workorders/:id/sync-maintainx.
+//
+// Legacy personal-token connect/disconnect endpoints are retained so any existing
+// user_integrations rows with personal tokens continue to resolve mx_user_id.
 const express = require('express');
 const router  = express.Router();
 const { logAudit } = require('../db');
 const { encrypt, mask } = require('../lib/maintainx/crypto');
 const { makeClient } = require('../lib/maintainx/client');
-const { syncForUser, syncSingleWorkOrder, loadIntegration } = require('../lib/maintainx/sync');
+const {
+  syncForUser, syncSingleWorkOrder, loadIntegration,
+  syncForUserWithOrgKey, syncSingleWorkOrderWithOrgKey,
+  getOrgKey,
+} = require('../lib/maintainx/sync');
 
 const DEFAULT_MX_ORG_ID = '477835';
 
 module.exports = (db) => {
-  // Identity comes only from the validated session (x-user-id is set by the
-  // auth middleware; any client-supplied value was already stripped).
   function requireUser(req, res) {
     const userId = Number(req.header('x-user-id'));
     if (!userId) { res.status(401).json({ error: 'no user selected' }); return null; }
@@ -26,29 +34,88 @@ module.exports = (db) => {
     return u;
   }
 
+  // Status reflects org-key setup plus cached user identity (if resolved).
   function statusPayload(userId) {
+    const orgKeyConfigured = !!(getOrgKey(db));
     const i = loadIntegration(db, userId);
-    if (!i) return { connected: false };
     return {
-      connected: i.status === 'active',
-      status: i.status,
-      stub: String(i.token_type) === 'demo',
-      mx_user_id: i.mx_user_id || null,
-      organization_id: i.mx_org_id || null,
-      last_sync_at: i.last_sync_at || null,
-      last_error: i.last_error || null,
-      key_masked: i.access_token_enc ? '••••••' : null,
+      connected: orgKeyConfigured,       // connected = org key is set (no personal token needed)
+      org_key_configured: orgKeyConfigured,
+      status: orgKeyConfigured ? 'active' : 'not_configured',
+      mx_user_id: i?.mx_user_id || null, // cached from previous pull-my-orders
+      organization_id: i?.mx_org_id || null,
+      last_sync_at: i?.last_sync_at || null,
+      last_error: i?.last_error || null,
+      // Legacy personal-token fields (null for org_key users)
+      stub: i ? String(i.token_type) === 'demo' : false,
+      key_masked: (i && i.token_type !== 'org_key' && i.access_token_enc) ? '••••••' : null,
     };
   }
 
-  // GET — is this worker connected, and when did we last sync?
+  // GET — sync status for the current user.
   router.get('/integrations/maintainx/status', (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     res.json(statusPayload(u.id));
   });
 
-  // POST — connect by storing an encrypted personal token (or demo data).
-  //   body: { token, organization_id?, demo? }
+  // POST /integrations/maintainx/pull-my-orders
+  // Pull all MaintainX work orders assigned to the current user using the org key.
+  // No personal API key required — identity is resolved by matching email.
+  // Available to technicians AND managers.
+  router.post('/integrations/maintainx/pull-my-orders', async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    try {
+      const summary = await syncForUserWithOrgKey(db, u.id);
+      logAudit(db, {
+        entity_type: 'user_integrations', entity_id: u.id, user_id: u.id,
+        action: 'maintainx_pull_my_orders', details: summary,
+      });
+      res.json({ ok: true, summary });
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
+  });
+
+  // POST /integrations/maintainx/sync-now
+  // Same as pull-my-orders; kept as an alias for backward compatibility and
+  // can also be triggered programmatically (e.g. from the daily scheduler API).
+  router.post('/integrations/maintainx/sync-now', async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    try {
+      const summary = await syncForUserWithOrgKey(db, u.id);
+      logAudit(db, {
+        entity_type: 'user_integrations', entity_id: u.id, user_id: u.id,
+        action: 'maintainx_sync_all', details: summary,
+      });
+      res.json({ ok: true, summary });
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
+  });
+
+  // POST /workorders/:id/sync-maintainx
+  // Refresh a single MaintainX WO on demand (e.g. from the WO detail view).
+  // Uses the org key — no personal token needed.
+  router.post('/workorders/:id/sync-maintainx', async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad work order id' });
+    try {
+      const result = await syncSingleWorkOrderWithOrgKey(db, u.id, id);
+      logAudit(db, {
+        entity_type: 'work_orders', entity_id: id, user_id: u.id,
+        action: 'maintainx_sync_one', details: { labor: result.labor },
+      });
+      res.json({ ok: true, result });
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
+  });
+
+  // ─── Legacy personal-token endpoints (kept for backward compat) ───────────
+  // These are no longer surfaced in the UI but remain so any previously stored
+  // personal tokens can still be used and mx_user_id values are preserved.
+
   router.post('/integrations/maintainx/connect', async (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     let token = (req.body && typeof req.body.token === 'string') ? req.body.token.trim() : '';
@@ -58,8 +125,6 @@ module.exports = (db) => {
     if (token.length > 4096) return res.status(400).json({ error: 'token too long' });
 
     const orgId = (req.body && req.body.organization_id) ? String(req.body.organization_id) : DEFAULT_MX_ORG_ID;
-
-    // Validate the credential by identifying the connected MaintainX user.
     let mxUser;
     try {
       mxUser = await makeClient({ token, orgId }).me();
@@ -80,45 +145,16 @@ module.exports = (db) => {
         status = 'active', last_error = NULL, connected_at = excluded.connected_at
     `).run(u.id, mxUser.id != null ? String(mxUser.id) : null, String(mxUser.organizationId || orgId), enc, tokenType, now);
 
-    logAudit(db, { entity_type: 'user_integrations', entity_id: u.id, user_id: u.id, action: 'maintainx_connect',
-                   details: { mx_user_id: mxUser.id, demo: tokenType === 'demo' } });
+    logAudit(db, { entity_type: 'user_integrations', entity_id: u.id, user_id: u.id,
+                   action: 'maintainx_connect', details: { mx_user_id: mxUser.id, demo: tokenType === 'demo' } });
     res.json({ ok: true, ...statusPayload(u.id) });
   });
 
-  // POST — disconnect (purge token; retain already-synced data).
   router.post('/integrations/maintainx/disconnect', (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     db.prepare("DELETE FROM user_integrations WHERE user_id = ? AND provider = 'maintainx'").run(u.id);
     logAudit(db, { entity_type: 'user_integrations', entity_id: u.id, user_id: u.id, action: 'maintainx_disconnect' });
     res.json({ ok: true, connected: false });
-  });
-
-  // POST — pull ALL of this worker's assigned work orders + reconcile labor.
-  router.post('/integrations/maintainx/sync-now', async (req, res) => {
-    const u = requireUser(req, res); if (!u) return;
-    try {
-      const summary = await syncForUser(db, u.id);
-      logAudit(db, { entity_type: 'user_integrations', entity_id: u.id, user_id: u.id, action: 'maintainx_sync_all',
-                     details: summary });
-      res.json({ ok: true, summary });
-    } catch (e) {
-      res.status(e.status || 500).json({ error: e.message });
-    }
-  });
-
-  // POST — refresh a single work order on demand (from the WO detail view).
-  router.post('/workorders/:id/sync-maintainx', async (req, res) => {
-    const u = requireUser(req, res); if (!u) return;
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: 'bad work order id' });
-    try {
-      const result = await syncSingleWorkOrder(db, u.id, id);
-      logAudit(db, { entity_type: 'work_orders', entity_id: id, user_id: u.id, action: 'maintainx_sync_one',
-                     details: { labor: result.labor } });
-      res.json({ ok: true, result });
-    } catch (e) {
-      res.status(e.status || 500).json({ error: e.message });
-    }
   });
 
   return router;
