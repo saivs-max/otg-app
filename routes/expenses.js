@@ -203,6 +203,13 @@ module.exports = (db) => {
     subcategory  = subcategory  ?? e.subcategory;
     expense_date = expense_date ?? e.expense_date;
     description  = description  ?? e.description;
+    // v0.86 — allow reassigning an expense to a different work order on a draft invoice.
+    let work_order_id = e.work_order_id;
+    if (req.body.work_order_id !== undefined && Number(req.body.work_order_id) !== e.work_order_id) {
+      const wo = db.prepare("SELECT id FROM work_orders WHERE id = ?").get(Number(req.body.work_order_id));
+      if (!wo) return res.status(400).json({ error: 'work order not found' });
+      work_order_id = wo.id;
+    }
     // v0.69 — optional explicit drive endpoints. Only overwrite when the key is
     // present in the body; an empty string clears the field.
     const cleanLoc = (v) => (v != null && String(v).trim()) ? String(v).trim() : null;
@@ -248,9 +255,9 @@ module.exports = (db) => {
 
     db.prepare(`
       UPDATE expenses SET category = ?, subcategory = ?, expense_date = ?, amount = ?,
-        quantity = ?, rate = ?, description = ?, start_location = ?, stop_location = ?
+        quantity = ?, rate = ?, description = ?, start_location = ?, stop_location = ?, work_order_id = ?
       WHERE id = ?
-    `).run(category, subcategory, expense_date, amount, quantity, rate, description, start_location, stop_location, id);
+    `).run(category, subcategory, expense_date, amount, quantity, rate, description, start_location, stop_location, work_order_id, id);
 
     logAudit(db, { entity_type: 'expenses', entity_id: id, user_id: userId, action: 'update',
                    details: { category, amount } });

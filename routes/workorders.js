@@ -111,7 +111,7 @@ module.exports = (db) => {
     const params  = [];
     for (const f of fields) {
       if (req.body[f] !== undefined) {
-        if (f === 'status' && !['open','in_progress','completed','cancelled'].includes(req.body[f])) {
+        if (f === 'status' && !['open','in_progress','completed','cancelled','on_hold'].includes(req.body[f])) {
           return res.status(400).json({ error: 'invalid status' });
         }
         updates.push(`${f} = ?`); params.push(req.body[f]);

@@ -342,10 +342,11 @@ async function boot() {
 function renderTabbar() {
   const role = STATE.user?.role || 'technician';
   const tabs = role === 'technician' ? [
-    { id: 'home',    label: 'Home',     ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-9 9 9"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg>` },
-    { id: 'timer',   label: 'Timer',    ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/><path d="M12 2v3"/></svg>` },
-    { id: 'add',     label: 'Add',      ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>` },
-    { id: 'mine',    label: 'Invoices', ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/></svg>` },
+    { id: 'home',      label: 'Home',     ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-9 9 9"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg>` },
+    { id: 'timer',     label: 'Timer',    ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/><path d="M12 2v3"/></svg>` },
+    { id: 'add',       label: 'Add',      ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>` },
+    { id: 'mine',      label: 'Invoices', ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/></svg>` },
+    { id: 'woHistory', label: 'History',  ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/><path d="M3.5 8.5A9 9 0 0 1 12 3"/><path d="M3 12l1.5-1.5L6 12"/></svg>` },
   ] : [
     // Manager tabs
     { id: 'dashboard', label: 'Dashboard', ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>` },
@@ -371,6 +372,7 @@ function renderTabbar() {
 }
 
 function goto(view, arg=null) {
+  STATE._prevView = STATE.view;  // v0.86 — track for back-nav (e.g. woHistory → woDetail → back)
   STATE.view = view; STATE.view_arg = arg;
   $$('.tab-btn').forEach(t => t.classList.toggle('active', t.dataset.tab === view));
   $('#backBtn').classList.add('hidden');
@@ -406,6 +408,7 @@ async function render() {
     admin:       'Admin · User management',
     corpcard:    'Corp Card',
     thirdparty:  '3rd Party Invoices',
+    woHistory:   'Work Order History',
   })[v] || '';
   if (['woPick','woAdd','woDetail','invDetail','settings'].includes(v)) $('#backBtn').classList.remove('hidden');
 
@@ -432,6 +435,7 @@ async function render() {
     if (v === 'admin')     return renderAdmin(root);
     if (v === 'corpcard')  return renderCorpCard(root);
     if (v === 'thirdparty') return renderThirdParty(root);
+    if (v === 'woHistory') return renderWoHistory(root);
     // v0.64 — Unplanned moved into the Dashboard. Redirect any stale link there.
     if (v === 'unplanned') { STATE.view = 'dashboard'; STATE._dashSection = 'unplanned'; return renderDashboard(root); }
     // 'map' tab dropped in v0.7 — locations are now embedded in WO time-entry edit sheets.
@@ -728,7 +732,7 @@ document.addEventListener('click', (e) => {
 });
 
 function labelForWoStatus(s) {
-  return ({ in_progress: 'In progress', open: 'Open', completed: 'Done', cancelled: 'Cancelled' }[s] || s);
+  return ({ in_progress: 'In progress', open: 'Open', completed: 'Done', cancelled: 'Cancelled', on_hold: 'On Hold' }[s] || s);
 }
 function labelForStatus(s) {
   // Single source of truth for invoice-status labels — used everywhere so the
@@ -794,7 +798,7 @@ async function renderWoDetail(root, woId) {
           <div class="wo-id" style="font-size:20px;">${escapeHTML(woLabel(w))}</div>
           <div style="font-size: 11px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px;">${workTypeLabel(w.work_type)}</div>
         </div>
-        <span class="badge ${w.status === 'in_progress' ? 'pending' : (w.status === 'completed' ? 'approved' : 'gray')}">${labelForWoStatus(w.status)}</span>
+        <span class="badge ${w.status === 'in_progress' ? 'pending' : (w.status === 'completed' ? 'approved' : (w.status === 'on_hold' ? 'warn' : 'gray'))}">${labelForWoStatus(w.status)}</span>
       </div>
       ${w.title ? `<div style="font-size: 15px; color: var(--ink-2); margin-top: 6px; line-height: 1.4;">${escapeHTML(w.title)}</div>` : ''}
       ${w.store_name ? `<div style="font-size: 14px; font-weight: 600; margin-top: 10px;">${escapeHTML(w.store_name)}</div>` : ''}
@@ -825,7 +829,7 @@ async function renderWoDetail(root, woId) {
     <div class="card">
       <p class="help" style="margin: 0 0 10px;">Update the work-order status as you progress through the job.</p>
       <div class="chips" id="statusChips" style="margin-bottom: 0;">
-        ${['open','in_progress','completed','cancelled'].map(s => `
+        ${['open','in_progress','on_hold','completed','cancelled'].map(s => `
           <span class="chip ${w.status === s ? 'selected' : ''}" data-status="${s}">${labelForWoStatus(s)}</span>
         `).join('')}
       </div>
@@ -3076,11 +3080,20 @@ function editExpenseRowHTML(e, invoice, opts = {}) {
 // engineering the end time; we translate it back to a clock_out the server
 // validates and the invoice total recomputes from (PATCH /timeentries).
 async function openEditOneTimeSheet(timeEntryId) {
-  let t;
+  let t, allWos;
   try {
-    t = await api(`/timeentries/${timeEntryId}`);
+    [t, allWos] = await Promise.all([
+      api(`/timeentries/${timeEntryId}`),
+      api('/workorders?include_cancelled=1').catch(() => []),
+    ]);
   } catch (e) { return toast(e.message === 'not found' ? 'Time entry not found' : e.message, 'err'); }
   if (!t) return toast('Time entry not found', 'err');
+
+  // v0.86 — show all WOs (active + history) so the tech can reassign this entry.
+  // Current WO always appears even if it's completed/cancelled.
+  const woOptions = allWos.length
+    ? allWos
+    : (t.work_order_id ? [{ id: t.work_order_id, external_id: t.external_id, store_name: t.store_name }] : []);
 
   const dateISO = (t.clock_in || '').slice(0, 10);
   const startT  = (t.clock_in || '').slice(11, 16);
@@ -3097,8 +3110,12 @@ async function openEditOneTimeSheet(timeEntryId) {
 
   showSheet(`
     <h3>Edit time entry</h3>
-    <p class="help" style="margin-top:-4px;">Linked to ${escapeHTML(woLabel(t) || 'WO')} · ${escapeHTML(t.store_name || '')}</p>
     ${editingOthers ? `<div class="alert" style="margin:0 0 10px;font-size:12px;background:#fff7ef;border:1px solid var(--ic-orange);color:var(--ic-orange-deep);padding:8px 10px;border-radius:8px;">Saving updates the invoice total and notifies the technician that this value changed.</div>` : ''}
+
+    <span class="label">Work order</span>
+    <select class="field" id="te_wo">
+      ${woOptions.map(w => `<option value="${w.id}" ${w.id === t.work_order_id ? 'selected' : ''}>${escapeHTML(woLabel(w))}${w.store_name ? ' · ' + escapeHTML(w.store_name) : ''}${w.status && w.status !== 'open' && w.status !== 'in_progress' ? ' (' + labelForWoStatus(w.status) + ')' : ''}</option>`).join('')}
+    </select>
 
     <span class="label">Date</span>
     <input class="field" id="te_date" type="date" value="${dateISO}" />
@@ -3193,12 +3210,14 @@ async function openEditOneTimeSheet(timeEntryId) {
         } else {
           clockOut = e ? `${d}T${e}:00` : null;
         }
+        const woId = Number($('#te_wo', wrap)?.value);
         const body = {
           clock_in:      `${d}T${s}:00`,
           clock_out:     clockOut,
           break_minutes: bm,
           mode:          md,
           notes:         n,
+          ...(woId && woId !== t.work_order_id ? { work_order_id: woId } : {}),
         };
         try {
           await api(`/timeentries/${t.id}`, { method: 'PATCH', body });
@@ -3211,14 +3230,26 @@ async function openEditOneTimeSheet(timeEntryId) {
   });
 }
 
-function openEditExpenseSheet(exp) {
+async function openEditExpenseSheet(exp) {
   const isMileage = exp.category === 'mileage';
   // v0.54 — surface labor + drive (hour-based) and keep vendor available for
   // PDF-imported / Ops-Mgr-created expenses (so existing rows can still be
   // edited without losing their category).
   const EDIT_CATS = ['mileage','labor','drive','tolls','parking','meals','tools','vendor','other'];
+  // v0.86 — fetch WOs so the tech can reassign this expense to a different WO.
+  const allWos = await api('/workorders?include_cancelled=1').catch(() => []);
+  const woOptions = allWos.length
+    ? allWos
+    : (exp.work_order_id ? [{ id: exp.work_order_id, external_id: exp.external_id, store_name: exp.store_name }] : []);
+
   showSheet(`
     <h3>Edit expense</h3>
+    ${woOptions.length ? `
+    <span class="label">Work order</span>
+    <select class="field" id="ewo">
+      ${woOptions.map(w => `<option value="${w.id}" ${w.id === exp.work_order_id ? 'selected' : ''}>${escapeHTML(woLabel(w))}${w.store_name ? ' · ' + escapeHTML(w.store_name) : ''}${w.status && w.status !== 'open' && w.status !== 'in_progress' ? ' (' + labelForWoStatus(w.status) + ')' : ''}</option>`).join('')}
+    </select>` : ''}
+
     <span class="label">Category</span>
     <select class="field" id="ecat">
       ${EDIT_CATS.map(c => `<option value="${c}" ${c===exp.category?'selected':''}>${capitalize(c)}</option>`).join('')}
@@ -3271,10 +3302,12 @@ function openEditExpenseSheet(exp) {
 
       $('#saveExp', wrap).addEventListener('click', async () => {
         const cat = $('#ecat', wrap).value;
+        const woId = Number($('#ewo', wrap)?.value) || null;
         const body = {
           category: cat,
           expense_date: $('#edate', wrap).value,
           description: $('#edesc', wrap).value,
+          ...(woId && woId !== exp.work_order_id ? { work_order_id: woId } : {}),
         };
         if (cat === 'mileage') {
           body.quantity = Number($('#eqty', wrap)?.value);
@@ -8353,6 +8386,79 @@ async function renderSettings(root) {
 }
 
 // ---- INVOICES TAB ----
+// v0.86 — Work Order History tab for technicians.
+// Shows completed, cancelled, and on-hold WOs with filter chips.
+async function renderWoHistory(root) {
+  const all = await api('/workorders?include_cancelled=1');
+  // Non-active WOs only (exclude open + in_progress).
+  const history = all.filter(w => !['open','in_progress'].includes(w.status));
+
+  const STATUS_COLORS = {
+    completed: 'var(--ic-green-deep)',
+    cancelled: 'var(--muted)',
+    on_hold:   'var(--ic-orange)',
+  };
+  const STATUS_BG = {
+    completed: '#f0faf4',
+    cancelled: '#f4f5f7',
+    on_hold:   '#fff8f0',
+  };
+
+  let filter = 'all';
+
+  function match(w) {
+    if (filter === 'all') return true;
+    return w.status === filter;
+  }
+
+  function html() {
+    const filtered = history.filter(match);
+    const completedCount  = history.filter(w => w.status === 'completed').length;
+    const cancelledCount  = history.filter(w => w.status === 'cancelled').length;
+    const onHoldCount     = history.filter(w => w.status === 'on_hold').length;
+
+    return `
+      <div class="chips" style="margin-bottom: 14px;">
+        <span class="chip ${filter==='all'?'selected':''}"        data-filter="all">All (${history.length})</span>
+        ${completedCount  ? `<span class="chip ${filter==='completed'?'selected':''}"  data-filter="completed">Done (${completedCount})</span>` : ''}
+        ${onHoldCount     ? `<span class="chip ${filter==='on_hold'?'selected':''}"    data-filter="on_hold">On Hold (${onHoldCount})</span>` : ''}
+        ${cancelledCount  ? `<span class="chip ${filter==='cancelled'?'selected':''}" data-filter="cancelled">Cancelled (${cancelledCount})</span>` : ''}
+      </div>
+
+      ${filtered.length === 0
+        ? `<div class="empty"><div class="big">📂</div>${filter === 'all' ? 'No completed or closed work orders yet.' : 'No work orders in this filter.'}</div>`
+        : filtered.map(w => {
+            const color = STATUS_COLORS[w.status] || 'var(--muted)';
+            const bg    = STATUS_BG[w.status]    || '#f4f5f7';
+            return `
+              <div class="card tap" data-wo="${w.id}" style="border-left: 3px solid ${color}; margin-bottom: 10px;">
+                <div class="flex between" style="align-items: flex-start;">
+                  <div style="flex: 1; min-width: 0;">
+                    <div style="font-weight: 700; font-size: 14px;">${escapeHTML(woLabel(w))}</div>
+                    ${w.store_name ? `<div style="font-size: 13px; color: var(--ink-2); margin-top: 2px;">${escapeHTML(w.store_name)}</div>` : ''}
+                    ${w.store_address ? `<div style="font-size: 11px; color: var(--muted);">${escapeHTML(w.store_address)}</div>` : ''}
+                  </div>
+                  <div style="text-align: right; margin-left: 10px; flex-shrink: 0;">
+                    <span class="badge" style="background: ${bg}; color: ${color}; border: 1px solid ${color}33;">${labelForWoStatus(w.status)}</span>
+                    ${w.work_type ? `<div style="font-size: 11px; color: var(--muted); margin-top: 4px;">${workTypeLabel(w.work_type)}</div>` : ''}
+                  </div>
+                </div>
+                ${w.scheduled_date ? `<div style="font-size: 11px; color: var(--muted); margin-top: 6px;">📅 ${fmtDate(w.scheduled_date)}</div>` : ''}
+              </div>
+            `;
+          }).join('')}
+    `;
+  }
+
+  function bind() {
+    $$('[data-filter]').forEach(c => c.addEventListener('click', () => { filter = c.dataset.filter; root.innerHTML = html(); bind(); }));
+    $$('.card.tap[data-wo]').forEach(c => c.addEventListener('click', () => goto('woDetail', Number(c.dataset.wo))));
+  }
+
+  root.innerHTML = html();
+  bind();
+}
+
 // Single tab consolidating: this-week's draft (prominent at top with quick action),
 // + New Invoice CTA, then the complete log of all other invoices.
 async function renderMine(root) {
@@ -8857,6 +8963,32 @@ async function renderInvoiceDetail(root, invoiceId) {
       </div>
     ` : ''}
 
+    <!-- v0.86 — Draft editing section: prominent at top for techs/proxy.
+         Line items + action buttons come FIRST so the tech sees what they
+         can edit immediately, without scrolling past the invoice preview. -->
+    ${invoice.status === 'draft' && invoice.invoice_type !== 'vendor' && (me.role === 'technician' || isManagerProxy) ? `
+      <div class="card" style="border-left: 4px solid var(--ic-green); background: #f0faf4; padding: 14px 16px; margin-bottom: 14px;">
+        <div class="flex between" style="align-items: baseline; margin-bottom: 6px;">
+          <div style="font-size: 13px; font-weight: 700; color: var(--ic-green-deep);">✏️ Draft invoice</div>
+          <div style="font-size: 20px; font-weight: 800; color: var(--ic-green-deep);">${fmt$(grandTotal)}</div>
+        </div>
+        <div style="font-size: 12px; color: var(--ink-2); margin-bottom: 12px;">${fmtDate(invoice.period_start)} → ${fmtDate(invoice.period_end)} · tap any row to edit · × to delete</div>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          <button class="btn btn-ghost btn-sm" id="addExpProxy">＋ Expense</button>
+          <button class="btn btn-ghost btn-sm" id="addTimeProxy">⏱ Time entry</button>
+          <button class="btn btn-ghost btn-sm" id="editInvDetailsBtn">✏️ Period / notes</button>
+          <button class="btn btn-ghost btn-sm" id="extractWoBtn">🔎 Link WOs</button>
+        </div>
+      </div>
+      ${renderEditableLineItems(by_date, invoice)}
+      <button class="btn btn-primary btn-block" id="submitDraftBtn" style="margin: 14px 0 6px;">
+        ${isManagerProxy
+          ? `Submit invoice on behalf of ${escapeHTML(STATE.onBehalfOfName || 'tech')}`
+          : 'Review &amp; submit this invoice'}
+      </button>
+      <div class="section-title" style="margin-top: 20px;">Invoice preview</div>
+    ` : ''}
+
     <!-- v0.58 — Top-of-page policy-engine flag banner. As soon as a draft
          (or submitted invoice in review) trips any custom rule, every role
          that opens the invoice sees the full violation list right at the
@@ -9351,21 +9483,7 @@ async function renderInvoiceDetail(root, invoiceId) {
       </div>
     ` : ''}
 
-    ${invoice.invoice_type !== 'vendor' && invoice.status === 'draft' && (me.role === 'technician' || isManagerProxy) ? `
-      ${renderEditableLineItems(by_date, invoice)}
-      <div class="card" style="margin-top: 14px;">
-        <div class="section-title" style="margin-top: 0;">Edit this draft invoice</div>
-        <button class="btn btn-ghost btn-block" id="addExpProxy" style="margin-bottom: 8px;">＋ Add an expense</button>
-        <button class="btn btn-ghost btn-block" id="addTimeProxy" style="margin-bottom: 8px;">＋ Add a time entry (manual)</button>
-        <button class="btn btn-ghost btn-block" id="editInvDetailsBtn" style="margin-bottom: 8px;">✏️ Edit invoice details (period, notes)</button>
-        <button class="btn btn-warn btn-block" id="extractWoBtn" style="margin-bottom: 8px;">🔎 Extract &amp; link work orders from invoice text</button>
-        <button class="btn btn-primary btn-block" id="submitDraftBtn">
-          ${isManagerProxy
-            ? `Submit invoice on behalf of ${escapeHTML(STATE.onBehalfOfName || 'tech')}`
-            : 'Review &amp; submit this invoice'}
-        </button>
-      </div>
-    ` : ''}
+    <!-- v0.86 — draft editing section moved to top of page; rendered there for tech/proxy -->
 
     ${isMgrReview ? `
       <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-orange); background: #fff7ef;">
@@ -9852,7 +9970,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (act === 'settings') { goto('settings'); }
     if (act === 'back')     {
       if (STATE.view === 'woAdd')     return goto('woPick');
-      if (STATE.view === 'woDetail')  return goto('home');
+      if (STATE.view === 'woDetail')  return goto(STATE._prevView === 'woHistory' ? 'woHistory' : 'home');
       if (STATE.view === 'invDetail') return goto('mine');
       if (STATE.view === 'settings')  return goto('home');
       goto('home');

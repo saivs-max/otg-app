@@ -415,6 +415,13 @@ module.exports = (db) => {
         if (!['work','drive'].includes(req.body.mode)) return res.status(400).json({ error: 'mode must be work or drive' });
         mode = req.body.mode;
       }
+      // v0.86 — allow reassigning a time entry to a different work order while the invoice is draft.
+      let workOrderId = e.work_order_id;
+      if (req.body.work_order_id !== undefined && Number(req.body.work_order_id) !== e.work_order_id) {
+        const wo = db.prepare("SELECT id FROM work_orders WHERE id = ?").get(Number(req.body.work_order_id));
+        if (!wo) return res.status(400).json({ error: 'work order not found' });
+        workOrderId = wo.id;
+      }
       if (new Date(clockOut) <= new Date(clockIn)) {
         return res.status(400).json({ error: 'clock_out must be after clock_in' });
       }
@@ -427,11 +434,11 @@ module.exports = (db) => {
       }
       db.prepare(`
         UPDATE time_entries
-        SET break_minutes = ?, notes = ?, clock_in = ?, clock_out = ?, mode = ?
+        SET break_minutes = ?, notes = ?, clock_in = ?, clock_out = ?, mode = ?, work_order_id = ?
         WHERE id = ?
-      `).run(breaks || 0, notes, clockIn, clockOut, mode, id);
+      `).run(breaks || 0, notes, clockIn, clockOut, mode, workOrderId, id);
       logAudit(db, { entity_type: 'time_entries', entity_id: id, user_id: userId, action: 'edit',
-                     details: { break_minutes: breaks, clock_in: clockIn, clock_out: clockOut, mode } });
+                     details: { break_minutes: breaks, clock_in: clockIn, clock_out: clockOut, mode, work_order_id: workOrderId } });
     }
 
     // v0.64 — refresh the invoice total after editing logged hours.
