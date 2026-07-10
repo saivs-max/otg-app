@@ -138,6 +138,31 @@ function ensureSchema(db) {
   // untouched and read exactly as before. See BREAK_DRIVING_WORKFLOW_DESIGN.md.
   migrateAddColumn(db, 'time_entries', 'break_started_at', 'TEXT');
   migrateAddColumn(db, 'time_entries', 'break_flagged',    'INTEGER DEFAULT 0');
+
+  // v0.82.1 — Backfill invoice_id on existing maintainx_sync entries that were
+  // written before the inherit-invoice-id logic. Without this, the mxWorkWOs
+  // dedup filter in computeInvoice never sees the MX entry (it has no invoice_id)
+  // and the original Bread clock entry keeps showing as a duplicate line.
+  // Safe to run every boot — COALESCE means already-set values are never touched.
+  db.exec(`
+    UPDATE time_entries
+    SET invoice_id = (
+      SELECT te2.invoice_id
+      FROM time_entries te2
+      WHERE te2.work_order_id = time_entries.work_order_id
+        AND te2.invoice_id IS NOT NULL
+        AND te2.source != 'maintainx_sync'
+      LIMIT 1
+    )
+    WHERE source = 'maintainx_sync'
+      AND invoice_id IS NULL
+      AND EXISTS (
+        SELECT 1 FROM time_entries te2
+        WHERE te2.work_order_id = time_entries.work_order_id
+          AND te2.invoice_id IS NOT NULL
+          AND te2.source != 'maintainx_sync'
+      )
+  `);
 }
 
 // v0.63 — Unplanned tagging. Tags are stored as a JSON array so one item can
