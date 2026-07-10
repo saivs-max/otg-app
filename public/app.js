@@ -694,7 +694,7 @@ function stopClockInNudge() {
 // secondary description line. Invoice and detail screens still surface both.
 function woCard(w) {
   const title = w.title || w.description || w.store_name || '';
-  const ticketLabel = sourceLabel(w.source_system) + ' #' + (w.source_ticket_id || sourceTicketId(w.external_id));
+  const ticketLabel = sourceLabel(w.source_system) + ' #' + (w.wo_number || w.source_ticket_id || sourceTicketId(w.external_id));
   return `
     <div class="card tap" data-wo="${w.id}" data-act="open-wo" style="padding: 16px;">
       <div class="flex between" style="gap: 12px; align-items: center;">
@@ -788,7 +788,7 @@ async function renderWoDetail(root, woId) {
     return s + Math.max(0, (ms - (t.break_minutes || 0) * 60000) / 3600000);
   }, 0);
 
-  const ticketLabel = sourceLabel(w.source_system) + ' #' + (w.source_ticket_id || sourceTicketId(w.external_id));
+  const ticketLabel = sourceLabel(w.source_system) + ' #' + (w.wo_number || w.source_ticket_id || sourceTicketId(w.external_id));
   root.innerHTML = `
     <div class="card">
       <div class="flex between" style="margin-bottom: 8px; align-items: flex-start;">
