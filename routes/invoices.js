@@ -143,7 +143,18 @@ module.exports = (db) => {
       WHERE t.invoice_id = ? AND t.clock_out IS NOT NULL
       ORDER BY t.clock_in
     `).all(invoiceId);
-    const times      = allTimes.filter(t => (t.mode || 'work') === 'work');
+    // v0.82 — MaintainX is source of truth: when a WO has maintainx_sync work
+    // entries on this invoice, exclude app-sourced work entries for that WO so
+    // MX hours are used exclusively (no double-count). Drive entries are separate.
+    const mxWorkWOs = new Set(
+      allTimes
+        .filter(t => t.source === 'maintainx_sync' && (t.mode || 'work') === 'work')
+        .map(t => t.work_order_id)
+    );
+    const times      = allTimes.filter(t =>
+      (t.mode || 'work') === 'work' &&
+      !(mxWorkWOs.has(t.work_order_id) && (t.source == null || t.source === 'app'))
+    );
     const driveTimes = allTimes.filter(t => t.mode === 'drive');
     const expenses = db.prepare(`
       SELECT e.*, w.external_id, w.source_system, w.work_type, w.store_name, w.store_address, w.cart_count
@@ -285,7 +296,7 @@ module.exports = (db) => {
       day.time_entries.push({
         id: t.id, external_id: t.external_id, store_name: t.store_name, work_type: t.work_type,
         clock_in: t.clock_in, clock_out: t.clock_out, hours: +hrs.toFixed(2), notes: t.notes,
-        mode: 'work',
+        mode: 'work', source: t.source || null,
         // v0.64 — surfaced for the review UI only; never rendered on the AP PDF.
         unplanned_tag: t.unplanned_tag, unplanned_note: t.unplanned_note, unplanned_wasted: t.unplanned_wasted,
       });

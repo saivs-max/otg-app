@@ -3519,16 +3519,19 @@ function _cacheWos(wos) {
     if (k) _woLabels[k] = { wo_number: w.wo_number, source_system: w.source_system };
   }
 }
-// Returns a human-readable WO label. For MaintainX WOs uses the sequential ID
-// (e.g. 'MX #2722') rather than the internal API ID. Falls back gracefully for
-// non-MX WOs and partial objects that only carry external_id.
+// Returns a human-readable WO label using the sequential MaintainX ID (e.g.
+// 'MaintainX #2722') rather than the internal API ID. Falls back gracefully
+// for non-MX WOs and partial objects that only carry external_id.
 function woLabel(w) {
   if (!w) return '';
   const ext = w.external_id || w.wo_external_id || '';
   const num = w.wo_number || (ext && _woLabels[ext]?.wo_number) || null;
   const src = w.source_system || (ext && _woLabels[ext]?.source_system)
               || (ext.startsWith('MX-') ? 'maintainx' : null);
-  if (num && src === 'maintainx') return 'MX #' + num;
+  if (num) {
+    const prefix = src === 'maintainx' ? 'MaintainX' : src === 'freshdesk' ? 'Freshdesk' : 'WO';
+    return prefix + ' #' + num;
+  }
   return ext || ('WO #' + (w.id || w.work_order_id || ''));
 }
 // ---------------------------------------------------------------------------
