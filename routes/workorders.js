@@ -47,7 +47,7 @@ module.exports = (db) => {
 
     const sql = `
       SELECT id, external_id, source_system, work_type, store_id, store_name, store_address,
-             cart_count, scheduled_date, description, status, assigned_user_id
+             cart_count, scheduled_date, description, status, assigned_user_id, wo_number
       FROM work_orders
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY
