@@ -3525,11 +3525,12 @@ function woLabel(w) {
   const ext = w.external_id || w.wo_external_id || '';
   const num = w.wo_number || (ext && _woLabels[ext]?.wo_number) || null;
   const src = w.source_system || (ext && _woLabels[ext]?.source_system)
-              || (ext.startsWith('MX-') ? 'maintainx' : null);
-  if (num) {
-    const prefix = src === 'maintainx' ? 'MaintainX' : src === 'freshdesk' ? 'Freshdesk' : 'WO';
-    return prefix + ' #' + num;
-  }
+              || (ext.startsWith('MX-') ? 'maintainx' : ext.startsWith('FD-') ? 'freshdesk' : null);
+  const prefix = src === 'maintainx' ? 'MaintainX' : src === 'freshdesk' ? 'Freshdesk' : null;
+  if (num) return (prefix || 'WO') + ' #' + num;
+  // Fallback: parse external_id to at least show "MaintainX #108410919"
+  // instead of the raw "MX-RPR-108410919" slug.
+  if (prefix && ext) return prefix + ' #' + sourceTicketId(ext);
   return ext || ('WO #' + (w.id || w.work_order_id || ''));
 }
 // ---------------------------------------------------------------------------
