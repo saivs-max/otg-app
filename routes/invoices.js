@@ -310,7 +310,8 @@ module.exports = (db) => {
       day.drive_amount += hrs * rate;   // v0.55 — drive is billable
       day.work_orders.add(t.external_id);
       day.drive_entries.push({
-        id: t.id, external_id: t.external_id, store_name: t.store_name, work_type: t.work_type,
+        id: t.id, external_id: t.external_id, wo_number: t.wo_number || null,
+        source_system: t.source_system, store_name: t.store_name, work_type: t.work_type,
         clock_in: t.clock_in, clock_out: t.clock_out, hours: +hrs.toFixed(2), notes: t.notes,
         mode: 'drive',
         unplanned_tag: t.unplanned_tag, unplanned_note: t.unplanned_note, unplanned_wasted: t.unplanned_wasted,
