@@ -10,6 +10,7 @@
     "start": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env server.js",
     "test:invoices": "node test/invoice-accuracy/run-accuracy.js",
     "test:maintainx": "node --experimental-sqlite --no-warnings=ExperimentalWarning test/maintainx-sync/run.js && node --experimental-sqlite --no-warnings=ExperimentalWarning test/maintainx-sync/http-smoke.js",
+    "test:break": "node --experimental-sqlite --no-warnings=ExperimentalWarning test/break-workflow/http-smoke.js",
     "seed": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env seed.js",
     "reset": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed.js",
     "seed:demo": "rm -f data/otg.db data/otg.db-shm data/otg.db-wal && node --experimental-sqlite --no-warnings=ExperimentalWarning seed-demo.js",

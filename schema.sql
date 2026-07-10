@@ -165,6 +165,13 @@ CREATE TABLE IF NOT EXISTS time_entries (
   clock_in          TEXT    NOT NULL,
   clock_out         TEXT,
   break_minutes     INTEGER DEFAULT 0,
+  -- v0.82 — live-tracked breaks. break_started_at holds the pause timestamp
+  -- while a running timer is on break (NULL otherwise); on resume / clock-out
+  -- the measured interval is folded into break_minutes. break_flagged = 1 when
+  -- any single break exceeded 60 min, surfaced for manager review.
+  -- See BREAK_DRIVING_WORKFLOW_DESIGN.md.
+  break_started_at  TEXT,
+  break_flagged     INTEGER DEFAULT 0,
   -- "work" = on-site work, "drive" = travelling to/from job (not paid as labor)
   mode              TEXT    NOT NULL DEFAULT 'work' CHECK (mode IN ('work','drive')),
   notes             TEXT,

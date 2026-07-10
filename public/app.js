@@ -1318,16 +1318,18 @@ async function renderTimer(root) {
 
   const expectedFor = (a) => ({deployment:0.7, retrofit:0.7, maintenance:2.4, repair:1.5}[a.work_type] || 1) * (a.cart_count || 1);
 
-  // Per-timer break tally (resets each render)
-  const breakMins = {};
-
   root.innerHTML = `
     ${actives.length > 1 ? alertHTML('info', 'ⓘ', `<strong>${actives.length} concurrent timers running.</strong> Each tracks independently — clock out individually when each job is done.`) : ''}
     ${actives.map(a => {
       const expected = expectedFor(a);
       const mode = a.mode || 'work';
       const isDrive = mode === 'drive';
-      breakMins[a.id] = a.break_minutes || 0;
+      // v0.82 — an entry with break_started_at set is PAUSED (on break). It keeps
+      // its mode, so Resume restores the same activity (work or drive).
+      const paused = !!a.break_started_at;
+      const brkMin = a.break_minutes || 0;
+      const resumeLabel = isDrive ? '▶️ Resume Driving' : '▶️ Resume Work';
+      const switchLabel = isDrive ? '🛠 Switch to Work' : '🚗 Switch to Drive';
       return `
         <div class="card">
           <div class="flex between" style="margin-bottom:10px;">
@@ -1336,18 +1338,23 @@ async function renderTimer(root) {
               <div class="wo-source">${sourceLabel(a.source_system)} · ${workTypeLabel(a.work_type)}</div>
               <div style="font-size:12px; margin-top:4px;">${escapeHTML(a.store_name || '')} · ${a.cart_count} carts</div>
             </div>
-            <span class="badge ${isDrive ? 'pending' : 'approved'}">Running</span>
+            <span class="badge ${paused || isDrive ? 'pending' : 'approved'}">${paused ? '⏸ On break' : 'Running'}</span>
           </div>
           <div class="timer">
-            <div class="mode-badge ${mode}">${isDrive ? '🚗 Drive time' : '🛠 Work time'}</div>
+            <div class="mode-badge ${mode}"${paused ? ' style="background:#fff4e5;color:#b26b00;"' : ''}>${paused ? '⏸ On break' : (isDrive ? '🚗 Drive time' : '🛠 Work time')}</div>
             <div class="since">CLOCKED IN AT ${new Date(a.clock_in).toLocaleTimeString()}</div>
-            <div class="clock" data-clock="${a.id}" data-start="${a.clock_in}">00:00:00</div>
-            <div class="wo">${isDrive ? 'Drive time — billable, tracked separately from labor' : `Expected ${expected.toFixed(1)} hrs · flag if > ${(expected * 1.5).toFixed(1)} hrs`}</div>
+            <div class="clock" data-clock="${a.id}" data-start="${a.clock_in}" data-break="${brkMin}"${paused ? ` data-paused-at="${a.break_started_at}"` : ''}>00:00:00</div>
+            ${paused
+              ? `<div class="wo" style="color:#b26b00;">On break <strong data-breakclock data-break-start="${a.break_started_at}">00:00:00</strong> · typical 30 min — deducted from ${isDrive ? 'billable driving time' : 'your timesheet'}</div>
+                 <div class="alert warn" data-break-warn style="display:none; margin-top:8px;"><span class="ico">⚠</span><div class="body">Break over 60 min — this entry will be flagged for review.</div></div>`
+              : `<div class="wo">${isDrive ? 'Drive time — billable, tracked separately from labor' : `Expected ${expected.toFixed(1)} hrs · flag if > ${(expected * 1.5).toFixed(1)} hrs`}</div>`}
           </div>
           ${gpsChip(a.gps_lat_in, a.gps_lng_in, a.gps_accuracy_in, 'Clock-in location')}
           <div class="actions">
-            <button class="btn btn-ghost btn-sm" data-act="break" data-tid="${a.id}">+30 min break</button>
-            <button class="btn btn-${isDrive ? 'primary' : 'warn'} btn-sm" data-act="switch" data-tid="${a.id}">${isDrive ? '🛠 Switch to Work' : '🚗 Switch to Drive'}</button>
+            ${paused
+              ? `<button class="btn btn-primary btn-sm" data-act="break-resume" data-tid="${a.id}">${resumeLabel}</button>`
+              : `<button class="btn btn-ghost btn-sm" data-act="break-start" data-tid="${a.id}" data-mode="${mode}">☕ Break</button>
+                 <button class="btn btn-${isDrive ? 'primary' : 'warn'} btn-sm" data-act="switch" data-tid="${a.id}">${switchLabel}</button>`}
             <button class="btn btn-warn" data-act="clockout" data-tid="${a.id}">Clock Out</button>
           </div>
         </div>
@@ -1365,31 +1372,61 @@ async function renderTimer(root) {
   `;
 
   const tick = () => {
+    // Main clock: counts up while running; FROZEN at the pause instant while on
+    // break (base = break_started_at instead of now). v0.82.
     $$('[data-clock]').forEach(el => {
       const start = new Date(el.dataset.start).getTime();
-      const id = el.dataset.clock;
-      el.textContent = fmtElapsed(Date.now() - start - (breakMins[id] || 0) * 60000);
+      const brk   = Number(el.dataset.break || 0) * 60000;
+      const base  = el.dataset.pausedAt ? new Date(el.dataset.pausedAt).getTime() : Date.now();
+      el.textContent = fmtElapsed(base - start - brk);
+    });
+    // Break counter: counts up from break_started_at; reveals the >60-min flag.
+    $$('[data-breakclock]').forEach(el => {
+      const ms = Math.max(0, Date.now() - new Date(el.dataset.breakStart).getTime());
+      el.textContent = fmtElapsed(ms);
+      const warn = el.closest('.card')?.querySelector('[data-break-warn]');
+      if (warn) warn.style.display = ms > 60 * 60000 ? '' : 'none';
     });
   };
   tick(); _timerInterval = setInterval(tick, 1000);
 
   $('#addAnother').addEventListener('click', () => goto('woPick'));
   $('#manualBtn')?.addEventListener('click', openManualTimeSheet);
-  $$('[data-act="break"]').forEach(b => b.addEventListener('click', async () => {
+  // v0.82 — start a live-tracked break (pauses the timer). Confirm first so an
+  // accidental tap can't record a break; driving gets its own copy explaining
+  // the deduction from billable drive time.
+  $$('[data-act="break-start"]').forEach(b => b.addEventListener('click', async () => {
     const id = b.dataset.tid;
-    breakMins[id] = (breakMins[id] || 0) + 30;
-    // v0.65.1 (F-M8) — persist immediately (timer keeps running) so the break
-    // isn't silently lost on navigation / re-render.
-    try { await api(`/timeentries/${id}`, { method: 'PATCH', body: { break_minutes: breakMins[id], break_only: true } }); }
-    catch (e) { breakMins[id] -= 30; toast(e.message, 'err'); return; }
-    toast(`Break time +30 min (total ${breakMins[id]})`);
+    const isDrive = b.dataset.mode === 'drive';
+    const msg = isDrive
+      ? 'Take a break while driving?\n\nYour break time will be deducted from billable driving time. You can resume driving afterwards.'
+      : 'Start break?\n\nThis pauses your current activity; your break time will be deducted from your timesheet. You can resume afterwards.';
+    if (!confirm(msg)) return;
+    try {
+      await api(`/timeentries/${id}/break/start`, { method: 'POST', body: {} });
+      toast('On break — timer paused ☕', 'ok');
+      goto('timer');
+    } catch (e) { toast(e.message, 'err'); }
+  }));
+  // v0.82 — resume the pre-break activity (mode is preserved server-side, so the
+  // same work/drive timer continues seamlessly from where it paused).
+  $$('[data-act="break-resume"]').forEach(b => b.addEventListener('click', async () => {
+    const id = b.dataset.tid;
+    try {
+      const r = await api(`/timeentries/${id}/break/resume`, { method: 'POST', body: {} });
+      if (r.break_flagged) toast('Resumed — long break (>60 min) flagged for review ⚠');
+      else                 toast('Resumed ✓', 'ok');
+      goto('timer');
+    } catch (e) { toast(e.message, 'err'); }
   }));
   $$('[data-act="clockout"]').forEach(b => b.addEventListener('click', async () => {
     const id = b.dataset.tid;
     toast('Getting your location…');
     const gps = await getGPS();
     try {
-      await api(`/timeentries/${id}`, { method: 'PATCH', body: { break_minutes: breakMins[id] || 0, gps } });
+      // v0.82 — breaks are server-tracked; clock-out finalizes any in-progress
+      // break automatically, so we only send GPS here.
+      await api(`/timeentries/${id}`, { method: 'PATCH', body: { gps } });
       toast(gps ? 'Clocked out · location captured ✓' : 'Clocked out (no GPS) ✓', 'ok');
       goto('timer');
     } catch (e) { toast(e.message, 'err'); }
@@ -1707,6 +1744,13 @@ async function renderAdd(root) {
       return;
     }
     $$('#catChips .chip').forEach(c => c.addEventListener('click', () => {
+      // Clear qty/amount so values don't bleed across categories.
+      // Must wipe the live DOM inputs too — rerender() calls snapshot() first,
+      // which would otherwise re-save the old value before the form redraws.
+      const qtyInp = $('#qtyInp'); if (qtyInp) qtyInp.value = '';
+      const amtInp = $('#amtInp'); if (amtInp) amtInp.value = '';
+      selected.miles  = '';
+      selected.amount = '';
       selected.category = c.dataset.cat;
       if (selected.category !== 'other') selected.subcategory = '';
       rerender();

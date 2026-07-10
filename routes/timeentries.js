@@ -4,6 +4,21 @@ const router  = express.Router();
 const { logAudit, sumHours, weekBounds } = require('../db');
 const weekBoundsFor = (d) => weekBounds(new Date(d));
 
+// v0.82 — Fold an in-progress live-tracked break into break_minutes. Shared by
+// POST /break/resume and the clock-out path (so "Clock Out" works straight from
+// a break). Flags the entry when THIS break interval exceeded 60 min. Callers
+// must guard that break_started_at is set. Clears break_started_at.
+function finalizeBreak(db, e) {
+  const startedMs = new Date(e.break_started_at).getTime();
+  const elapsedMs = Math.max(0, Date.now() - startedMs);
+  const minutes   = Math.round(elapsedMs / 60000);
+  const break_minutes = (e.break_minutes || 0) + minutes;
+  const break_flagged = (e.break_flagged ? 1 : 0) || (elapsedMs > 60 * 60000 ? 1 : 0);
+  db.prepare("UPDATE time_entries SET break_minutes = ?, break_flagged = ?, break_started_at = NULL WHERE id = ?")
+    .run(break_minutes, break_flagged, e.id);
+  return { break_minutes, break_flagged, minutes };
+}
+
 module.exports = (db) => {
   // GET /api/timeentries/active   → ALL currently-running entries (array)
   // Multiple active timers are allowed: a tech may run 2 jobs at one site.
@@ -189,6 +204,9 @@ module.exports = (db) => {
     if (!e) return res.status(404).json({ error: 'not found' });
     if (e.user_id !== userId) return res.status(403).json({ error: 'not yours' });
     if (e.clock_out) return res.status(409).json({ error: 'entry already clocked out' });
+    // v0.82 — can't switch modes mid-break; resume first. The UI hides Switch
+    // while paused; this guards direct API calls.
+    if (e.break_started_at) return res.status(409).json({ error: 'Resume your break before switching modes.' });
 
     const newMode = e.mode === 'drive' ? 'work' : 'drive';
 
@@ -243,8 +261,68 @@ module.exports = (db) => {
     }
   });
 
+  // POST /api/timeentries/:id/break/start   {}
+  // v0.82 — Begin a live-tracked break: pauses the running timer (the main clock
+  // freezes) by stamping break_started_at. The entry KEEPS its mode, so the tech
+  // resumes the same activity (work or drive) afterwards. Billable time is not
+  // touched until the break is resumed/finalized (see /break/resume).
+  router.post('/timeentries/:id/break/start', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    const id = Number(req.params.id);
+    const e = db.prepare("SELECT * FROM time_entries WHERE id = ?").get(id);
+    if (!e) return res.status(404).json({ error: 'not found' });
+    if (e.user_id !== userId) {
+      const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+      const allowed = me && (
+        me.role === 'sr_manager' || me.role === 'pm' ||
+        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
+      );
+      if (!allowed) return res.status(403).json({ error: 'not yours' });
+    }
+    if (e.clock_out)        return res.status(409).json({ error: 'entry already clocked out' });
+    if (e.break_started_at) return res.status(409).json({ error: 'already on break' });
+
+    const now = new Date().toISOString();
+    db.prepare("UPDATE time_entries SET break_started_at = ? WHERE id = ?").run(now, id);
+    logAudit(db, { entity_type: 'time_entries', entity_id: id, user_id: userId,
+                   action: 'break_start', details: { mode: e.mode, at: now } });
+    res.json(db.prepare("SELECT * FROM time_entries WHERE id = ?").get(id));
+  });
+
+  // POST /api/timeentries/:id/break/resume   {}
+  // v0.82 — End a live-tracked break: fold the measured interval into
+  // break_minutes (so it's deducted from billable time), flag the entry if the
+  // break ran over 60 min, and clear break_started_at so the timer resumes in the
+  // SAME mode it paused from. Returns the refreshed entry (+ computed hours).
+  router.post('/timeentries/:id/break/resume', (req, res) => {
+    const userId = Number(req.header('x-user-id'));
+    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    const id = Number(req.params.id);
+    const e = db.prepare("SELECT * FROM time_entries WHERE id = ?").get(id);
+    if (!e) return res.status(404).json({ error: 'not found' });
+    if (e.user_id !== userId) {
+      const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+      const allowed = me && (
+        me.role === 'sr_manager' || me.role === 'pm' ||
+        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
+      );
+      if (!allowed) return res.status(403).json({ error: 'not yours' });
+    }
+    if (e.clock_out)         return res.status(409).json({ error: 'entry already clocked out' });
+    if (!e.break_started_at) return res.status(409).json({ error: 'not on break' });
+
+    const fin = finalizeBreak(db, e);
+    logAudit(db, { entity_type: 'time_entries', entity_id: id, user_id: userId,
+                   action: 'break_resume', details: { minutes: fin.minutes, flagged: !!fin.break_flagged } });
+    const updated = db.prepare("SELECT * FROM time_entries WHERE id = ?").get(id);
+    res.json({ ...updated, hours: sumHours([updated]) });
+  });
+
   // PATCH /api/timeentries/:id
-  //   While running: { break_minutes?, notes?, gps?: { lat, lng, accuracy } }  → clocks out
+  //   While running: { notes?, gps?: { lat, lng, accuracy } }  → clocks out
+  //     (finalizes any in-progress break first). Breaks are started/ended via
+  //     the /break/start + /break/resume routes above, not here.
   //   After clock-out (and while invoice is draft):
   //     { break_minutes?, notes?, clock_in?, clock_out?, mode? } → adjust
   router.patch('/timeentries/:id', (req, res) => {
@@ -268,28 +346,32 @@ module.exports = (db) => {
     const breaks = req.body.break_minutes != null ? Number(req.body.break_minutes) : e.break_minutes;
     const notes  = req.body.notes ?? e.notes;
 
-    // Branch A: still running.
+    // Branch A: still running → this PATCH is a clock-out.
     if (!e.clock_out) {
-      // v0.65.1 (F-M8) — a break-only update keeps the timer running so accrued
-      // break minutes persist across navigation; otherwise this is a clock-out.
-      if (req.body.break_only) {
-        db.prepare("UPDATE time_entries SET break_minutes = ? WHERE id = ?").run(breaks || 0, id);
-        logAudit(db, { entity_type: 'time_entries', entity_id: id, user_id: userId, action: 'update_break', details: { break_minutes: breaks } });
-        return res.json(db.prepare("SELECT * FROM time_entries WHERE id = ?").get(id));
+      // v0.82 — the old { break_only:true } fixed-30 path is gone; breaks are now
+      // live-tracked via POST /break/start + /break/resume. If the tech clocks out
+      // straight from a break, finalize that break first so its measured minutes
+      // are deducted and a >60-min break is flagged (also clears break_started_at).
+      let effBreak   = breaks;
+      let effFlagged = e.break_flagged ? 1 : 0;
+      if (e.break_started_at) {
+        const fin  = finalizeBreak(db, e);
+        effBreak   = fin.break_minutes;
+        effFlagged = fin.break_flagged;
       }
       const now = new Date().toISOString();
       const gps = req.body.gps;
       db.prepare(`
         UPDATE time_entries
-        SET clock_out = ?, break_minutes = ?, notes = ?,
+        SET clock_out = ?, break_minutes = ?, break_flagged = ?, notes = ?,
             gps_lat_out = ?, gps_lng_out = ?, gps_accuracy_out = ?
         WHERE id = ?
-      `).run(now, breaks || 0, notes,
+      `).run(now, effBreak || 0, effFlagged, notes,
              gps?.lat ?? null, gps?.lng ?? null, gps?.accuracy ?? null,
              id);
       logAudit(db, {
         entity_type: 'time_entries', entity_id: id, user_id: userId, action: 'clock_out',
-        details: { break_minutes: breaks, gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null },
+        details: { break_minutes: effBreak, break_flagged: effFlagged, gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null },
       });
     } else {
       // Branch B: already clocked out → editing a logged entry.

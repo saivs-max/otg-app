@@ -131,6 +131,13 @@ function ensureSchema(db) {
       WHERE invoice_type = 'vendor' AND vendor_name IS NOT NULL AND TRIM(vendor_name) <> ''
     `);
   } catch (_) { /* vendors table absent on a partial schema — ignore */ }
+
+  // v0.82 — Break timer rework (live-tracked pause/resume). break_started_at is
+  // the pause timestamp on a running entry; break_flagged marks a break that ran
+  // over 60 min. Both default to not-on-break / unflagged, so existing rows are
+  // untouched and read exactly as before. See BREAK_DRIVING_WORKFLOW_DESIGN.md.
+  migrateAddColumn(db, 'time_entries', 'break_started_at', 'TEXT');
+  migrateAddColumn(db, 'time_entries', 'break_flagged',    'INTEGER DEFAULT 0');
 }
 
 // v0.63 — Unplanned tagging. Tags are stored as a JSON array so one item can
@@ -641,6 +648,12 @@ function sumHours(entries) {
     const start = new Date(e.clock_in).getTime();
     const end   = e.clock_out ? new Date(e.clock_out).getTime() : Date.now();
     totalMs += (end - start) - (e.break_minutes || 0) * 60000;
+    // v0.82 — an entry that is still running AND currently on break has an
+    // in-progress break not yet folded into break_minutes; subtract it too so
+    // the live total (and the frozen timer display) don't over-count.
+    if (!e.clock_out && e.break_started_at) {
+      totalMs -= Math.max(0, Date.now() - new Date(e.break_started_at).getTime());
+    }
   }
   return Math.max(0, totalMs / 3600000);
 }
