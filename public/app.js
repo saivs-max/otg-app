@@ -9104,7 +9104,7 @@ async function renderInvoiceDetail(root, invoiceId) {
               const wtTag   = t._from_expense
                 ? (isDrive ? '[🚗 Drive · logged]' : `[${workTypeLabel(t.work_type || 'labor')} · logged]`)
                 : (isDrive ? '[🚗 Drive]' : `[${workTypeLabel(t.work_type)}]`);
-              const meta    = `[${fmtMonthDay(t.clock_in || date)}] ${wtTag} ${t.external_id}`;
+              const meta    = `[${fmtMonthDay(t.clock_in || date)}] ${wtTag} ${woLabel(t)}`;
               return `
                 <tr ${isDrive ? 'class="inv-drive-row"' : ''}>
                   <td>${fmtShortDate(date)}</td>
