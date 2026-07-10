@@ -572,7 +572,7 @@ async function renderHome(root) {
           ${actives.map((a, i) => `
             <div style="background: rgba(255,255,255,0.08); border-radius: 6px; padding: 8px 10px; display:flex; justify-content:space-between; align-items:center;">
               <div>
-                <div style="font-weight:600; font-size: 13px;">${escapeHTML(a.external_id)}</div>
+                <div style="font-weight:600; font-size: 13px;">${escapeHTML(woLabel(a))}</div>
                 <div style="font-size:11px; color:#cde9c9;">${escapeHTML(a.store_name || '')}</div>
               </div>
               <div data-elapsed="${a.clock_in}" style="font-family: 'SF Mono', Menlo, monospace; font-size: 16px; font-weight:700;">00:00:00</div>
@@ -970,7 +970,7 @@ async function renderWoDetail(root, woId) {
 
 // ---- WO PICKER ----
 async function renderWoPick(root) {
-  const wos = await api('/workorders');
+  const wos = await api('/workorders'); _cacheWos(wos);
   const open  = wos.filter(w => ['open','in_progress'].includes(w.status));
   $('#hdrTitle').textContent = 'Pick Work Order';
   root.innerHTML = `
@@ -1049,7 +1049,7 @@ async function renderWoAdd(root) {
         <div class="card" style="border-left: 4px solid var(--ic-orange); background: #fff8f0; padding: 12px 14px; margin-bottom: 14px;">
           <strong style="color: var(--warn-fg);">⚠ This work order already exists locally</strong>
           <div class="meta" style="margin-top: 4px;">
-            ${escapeHTML(form._existing.external_id)} · ${escapeHTML(form._existing.store_name || '')} · status: ${escapeHTML(form._existing.status)}
+            ${escapeHTML(woLabel(form._existing))} · ${escapeHTML(form._existing.store_name || '')} · status: ${escapeHTML(form._existing.status)}
           </div>
           ${form._discrepancies.length === 0
             ? `<div style="margin-top: 8px; font-size: 13px; color: var(--ok-fg);">✓ All pulled values match the local record.</div>`
@@ -1242,8 +1242,8 @@ async function renderWoAdd(root) {
       if (!form.work_type)  return toast('Pick a work type before saving', 'err');
       try {
         const wo = await api('/workorders', { method: 'POST', body: form });
-        toast(`Added ${wo.external_id} ✓`, 'ok');
-        if (confirm(`Clock in to ${wo.external_id} now?`)) {
+        toast(`Added ${woLabel(wo)} ✓`, 'ok');
+        if (confirm(`Clock in to ${woLabel(wo)} now?`)) {
           await clockIn(wo.id);
         } else {
           goto('woDetail', wo.id);
@@ -1251,7 +1251,7 @@ async function renderWoAdd(root) {
       } catch (e) {
         // Friendly handling if the WO already exists
         if (e.data && e.data.existing) {
-          if (confirm(`Work order ${e.data.existing.external_id} already exists${e.data.existing.store_name ? ' (' + e.data.existing.store_name + ')' : ''}. Open it?`)) {
+          if (confirm(`Work order ${woLabel(e.data.existing)} already exists${e.data.existing.store_name ? ' (' + e.data.existing.store_name + ')' : ''}. Open it?`)) {
             return goto('woDetail', e.data.existing.id);
           }
           return;
@@ -1334,7 +1334,7 @@ async function renderTimer(root) {
         <div class="card">
           <div class="flex between" style="margin-bottom:10px;">
             <div>
-              <div class="wo-id">${escapeHTML(a.external_id)}</div>
+              <div class="wo-id">${escapeHTML(woLabel(a))}</div>
               <div class="wo-source">${sourceLabel(a.source_system)} · ${workTypeLabel(a.work_type)}</div>
               <div style="font-size:12px; margin-top:4px;">${escapeHTML(a.store_name || '')} · ${a.cart_count} carts</div>
             </div>
@@ -1580,7 +1580,7 @@ async function renderAdd(root) {
   function previewHTML() {
     const cat   = selected.category;
     const w     = open.find(x => x.id == selected.work_order_id);
-    const woLbl = w ? `${escapeHTML(w.external_id)}${w.store_name ? ' — ' + escapeHTML(w.store_name) : ''}` : '— pick a work order —';
+    const woLbl = w ? `${escapeHTML(woLabel(w))}${w.store_name ? ' — ' + escapeHTML(w.store_name) : ''}` : '— pick a work order —';
     const dateStr = selected.expense_date ? fmtDate(selected.expense_date) : '—';
 
     // Compute preview amount/qty using the same rules the server applies on save.
@@ -1654,7 +1654,7 @@ async function renderAdd(root) {
     `;
   }
   function woOption(w) {
-    return `<option value="${w.id}" ${selected.work_order_id == w.id ? 'selected' : ''}>${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})</option>`;
+    return `<option value="${w.id}" ${selected.work_order_id == w.id ? 'selected' : ''}>${escapeHTML(woLabel(w))} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})</option>`;
   }
 
   // v0.49 — capture every input into `selected` so that any subsequent
@@ -2341,7 +2341,7 @@ function renderWoBudgetsEditor(workOrders, woBudgets, ccCats) {
         <div style="font-size: 12px;">
           ${woBudgets.map(b => `
             <div style="display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--line);">
-              <span>${escapeHTML(b.wo_external_id || `WO #${b.work_order_id}`)} · ${escapeHTML(b.category_label)}</span>
+              <span>${escapeHTML(woLabel(b) || `WO #${b.work_order_id}`)} · ${escapeHTML(b.category_label)}</span>
               <strong>$${b.amount_cap.toFixed(2)}</strong>
             </div>
           `).join('')}
@@ -2723,7 +2723,7 @@ function renderPolicyEditor(pol) {
 }
 
 async function openManualTimeSheet(opts = {}) {
-  const wos = await api('/workorders');
+  const wos = await api('/workorders'); _cacheWos(wos);
   const open = wos.filter(w => ['open','in_progress','completed'].includes(w.status));
   // If we were called from a pinned invoice (e.g. the upload flow), default
   // the date inside its period so the entry attaches to that draft.
@@ -2870,7 +2870,7 @@ function invoiceLineHTML(l, allAttachments = []) {
     <div class="card" data-line="${escapeHTML(l.external_id)}">
       <div class="flex between">
         <div>
-          <div class="wo-id">${escapeHTML(l.external_id)}</div>
+          <div class="wo-id">${escapeHTML(woLabel(l))}</div>
           <div class="wo-source">${sourceLabel(l.source_system)} · ${workTypeLabel(l.work_type)} · ${l.cart_count} carts</div>
           <div style="font-size:12px;color:var(--ink-2);margin-top:4px">${escapeHTML(l.store_name || '')}</div>
         </div>
@@ -3007,7 +3007,7 @@ function editTimeRowHTML(t, invoice, isDrive, opts = {}) {
       <div class="ed-row-icon">${isDrive ? '🚗' : '⏱'}</div>
       <div class="ed-row-body">
         <div class="ed-row-title">
-          <strong>${escapeHTML(t.external_id || '')}</strong>
+          <strong>${escapeHTML(woLabel(t))}</strong>
           ${t.store_name ? ` · <span class="meta">${escapeHTML(t.store_name)}</span>` : ''}
         </div>
         <div class="meta">${start} → ${end} · ${hrs.toFixed(2)} hrs ${isDrive ? '(drive, non-billable)' : ''}</div>
@@ -3052,7 +3052,7 @@ function editExpenseRowHTML(e, invoice, opts = {}) {
       <div class="ed-row-body">
         <div class="ed-row-title">
           <strong>${escapeHTML(cat)}${sub}</strong>
-          ${e.external_id ? ` · <span class="meta">${escapeHTML(e.external_id)}</span>` : ''}
+          ${e.external_id ? ` · <span class="meta">${escapeHTML(woLabel(e))}</span>` : ''}
         </div>
         <div class="meta">${e.store_name ? escapeHTML(e.store_name) + qty : (qty || '').replace(/^ · /, '')}</div>
         ${e.description ? `<div class="ed-row-notes">${escapeHTML(e.description)}</div>` : ''}
@@ -3099,7 +3099,7 @@ async function openEditOneTimeSheet(timeEntryId) {
 
   showSheet(`
     <h3>Edit time entry</h3>
-    <p class="help" style="margin-top:-4px;">Linked to ${escapeHTML(t.external_id || 'WO')} · ${escapeHTML(t.store_name || '')}</p>
+    <p class="help" style="margin-top:-4px;">Linked to ${escapeHTML(woLabel(t) || 'WO')} · ${escapeHTML(t.store_name || '')}</p>
     ${editingOthers ? `<div class="alert" style="margin:0 0 10px;font-size:12px;background:#fff7ef;border:1px solid var(--ic-orange);color:var(--ic-orange-deep);padding:8px 10px;border-radius:8px;">Saving updates the invoice total and notifies the technician that this value changed.</div>` : ''}
 
     <span class="label">Date</span>
@@ -3507,6 +3507,31 @@ function enumerateWeekDays(start, end) {
   while (d <= e) { out.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 1); }
   return out;
 }
+
+// ---- WO display label -------------------------------------------------------
+// Global cache: external_id / wo_external_id → { wo_number, source_system }
+// Populated whenever /workorders is fetched so partial objects (timer entries,
+// invoice lines, time entries) can still show the MaintainX sequential ID.
+const _woLabels = {};
+function _cacheWos(wos) {
+  for (const w of wos || []) {
+    const k = w.external_id || w.wo_external_id;
+    if (k) _woLabels[k] = { wo_number: w.wo_number, source_system: w.source_system };
+  }
+}
+// Returns a human-readable WO label. For MaintainX WOs uses the sequential ID
+// (e.g. 'MX #2722') rather than the internal API ID. Falls back gracefully for
+// non-MX WOs and partial objects that only carry external_id.
+function woLabel(w) {
+  if (!w) return '';
+  const ext = w.external_id || w.wo_external_id || '';
+  const num = w.wo_number || (ext && _woLabels[ext]?.wo_number) || null;
+  const src = w.source_system || (ext && _woLabels[ext]?.source_system)
+              || (ext.startsWith('MX-') ? 'maintainx' : null);
+  if (num && src === 'maintainx') return 'MX #' + num;
+  return ext || ('WO #' + (w.id || w.work_order_id || ''));
+}
+// ---------------------------------------------------------------------------
 function fmtSize(b) {
   if (!b) return '';
   if (b < 1024) return `${b} B`;
@@ -3654,7 +3679,7 @@ async function renderMap(root) {
               <div class="card" style="padding: 10px 12px;">
                 <div class="flex between">
                   <div>
-                    <strong>${escapeHTML(t.external_id)}</strong>
+                    <strong>${escapeHTML(woLabel(t))}</strong>
                     <div class="meta">${escapeHTML(t.store_name || '')} · ${new Date(t.clock_in).toLocaleString()}</div>
                   </div>
                   <div class="meta">${dur} hrs</div>
@@ -3704,7 +3729,7 @@ async function renderMap(root) {
       if (t.gps_lat_in && t.gps_lng_in) {
         const m = L.marker([t.gps_lat_in, t.gps_lng_in], { icon: customIcon('IN', 'in') }).addTo(map);
         m.bindPopup(`
-          <strong>${escapeHTML(t.external_id)}</strong><br/>
+          <strong>${escapeHTML(woLabel(t))}</strong><br/>
           ${escapeHTML(t.store_name || '')}<br/>
           <em>Clocked in</em> ${new Date(t.clock_in).toLocaleString()}<br/>
           Duration: ${dur} hrs
@@ -3714,7 +3739,7 @@ async function renderMap(root) {
       if (t.gps_lat_out && t.gps_lng_out) {
         const m = L.marker([t.gps_lat_out, t.gps_lng_out], { icon: customIcon('OUT', 'out') }).addTo(map);
         m.bindPopup(`
-          <strong>${escapeHTML(t.external_id)}</strong><br/>
+          <strong>${escapeHTML(woLabel(t))}</strong><br/>
           ${escapeHTML(t.store_name || '')}<br/>
           <em>Clocked out</em> ${t.clock_out ? new Date(t.clock_out).toLocaleString() : ''}<br/>
           Duration: ${dur} hrs
@@ -5629,7 +5654,7 @@ async function renderCostTracker(root) {
               ` : `
                 <tr style="border-top: 1px solid var(--line); cursor: pointer;" data-tracker-inv="${v.invoice_id}">
                   <td style="padding: 6px 8px;"><strong>${escapeHTML(v.store_name || '—')}</strong></td>
-                  <td style="padding: 6px 8px; font-family: monospace; font-size: 10.5px;">${escapeHTML(v.wo_external_id)}</td>
+                  <td style="padding: 6px 8px; font-family: monospace; font-size: 10.5px;">${escapeHTML(woLabel(v))}</td>
                   <td style="padding: 6px 8px;">${escapeHTML(v.work_type || '—')}</td>
                   <td style="padding: 6px 8px; text-align: right;">${v.cart_count || ''}</td>
                   <td style="padding: 6px 8px;">${v.scheduled_date ? fmtDate(v.scheduled_date) : ''}</td>
@@ -6211,7 +6236,7 @@ async function renderCorpCard(root) {
                 <td><span class="cc-cat-pill">${escapeHTML(e.category_name)}</span></td>
                 <td>${e.on_behalf_of_name ? escapeHTML(e.on_behalf_of_name) : '<span class="meta">—</span>'}</td>
                 <td>
-                  ${e.wo_external_id ? `<strong>${escapeHTML(e.wo_external_id)}</strong>` : '<span class="meta">—</span>'}
+                  ${e.wo_external_id ? `<strong>${escapeHTML(woLabel(e))}</strong>` : '<span class="meta">—</span>'}
                   ${e.store_name ? `<div class="meta">${escapeHTML(e.store_name)}</div>` : ''}
                 </td>
                 <td>${e.description ? escapeHTML(e.description) : '<span class="meta">—</span>'}</td>
@@ -6328,7 +6353,7 @@ function openCorpCardAddSheet(categories, workorders, techs, onSaved, editing = 
       <option value="">— No work order / store linkage —</option>
       ${woFiltered().map(w => `
         <option value="${w.id}" ${String(sel.work_order_id) === String(w.id) ? 'selected' : ''}>
-          ${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})
+          ${escapeHTML(woLabel(w))} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})
         </option>
       `).join('')}
     </select>
@@ -7169,7 +7194,7 @@ function renderCategoryDashTab(root, data, source, key) {
           return `
             <div style="display: flex; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--line); ${over ? 'color: var(--ic-orange-deep);' : ''}">
               <div>
-                <div>${escapeHTML(b.external_id || `WO #${b.work_order_id}`)}</div>
+                <div>${escapeHTML(woLabel(b) || `WO #${b.work_order_id}`)}</div>
                 <div class="meta" style="font-size: 11px;">${escapeHTML(b.store_name || '—')}</div>
               </div>
               <div style="text-align: right;">
@@ -7187,7 +7212,7 @@ function renderCategoryDashTab(root, data, source, key) {
       <div class="card">
         ${data.over_budget_wos.map(w => `
           <div style="display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--line);">
-            <span>${escapeHTML(w.external_id || `WO #${w.work_order_id}`)} · ${escapeHTML(w.store_name || '—')}</span>
+            <span>${escapeHTML(woLabel(w) || `WO #${w.work_order_id}`)} · ${escapeHTML(w.store_name || '—')}</span>
             <strong style="color: var(--ic-orange-deep);">over by ${fmt(w.overage)}</strong>
           </div>
         `).join('')}
@@ -8127,7 +8152,7 @@ function renderForecastCard(items, total) {
         <tbody>
           ${items.map(it => `
             <tr>
-              <td><strong>${escapeHTML(it.external_id)}</strong>${it.store_name ? `<div class="meta">${escapeHTML(it.store_name)}</div>` : ''}</td>
+              <td><strong>${escapeHTML(woLabel(it))}</strong>${it.store_name ? `<div class="meta">${escapeHTML(it.store_name)}</div>` : ''}</td>
               <td>${escapeHTML(it.work_type || '—')}</td>
               <td class="r">${it.cart_count}</td>
               <td class="r">${fmt$(it.rate_per_cart)}</td>
@@ -8562,7 +8587,7 @@ function openFlagSubmitSheet({ invoice, flags, proxy }) {
 // those WOs in that range. Lets contractors bill bi-weekly or monthly when
 // their cadence doesn't fit a Mon–Sun week.
 async function openCustomPeriodSheet() {
-  const wos = await api('/workorders');
+  const wos = await api('/workorders'); _cacheWos(wos);
   // Only show WOs the tech has actually touched recently or is assigned to;
   // hide cancelled ones to keep the list short.
   const available = wos.filter(w => w.status !== 'cancelled');
@@ -8606,7 +8631,7 @@ async function openCustomPeriodSheet() {
           <label class="cp-wo-row" style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-bottom:1px solid var(--line); cursor:pointer;">
             <input type="checkbox" class="cp-wo-check" data-id="${w.id}" ${picked.has(w.id) ? 'checked' : ''} style="transform: scale(1.2);" />
             <div style="flex:1; min-width:0;">
-              <div style="font-weight:600; font-size:13px;">${escapeHTML(w.external_id)} · ${escapeHTML(w.store_name || '')}</div>
+              <div style="font-weight:600; font-size:13px;">${escapeHTML(woLabel(w))} · ${escapeHTML(w.store_name || '')}</div>
               <div style="font-size:11px; color: var(--ink-2);">${sourceLabel(w.source_system)} · ${workTypeLabel(w.work_type)} · ${w.cart_count || 0} carts · ${escapeHTML((w.description || '').slice(0, 70))}</div>
             </div>
             <span class="badge ${w.status === 'in_progress' ? 'progress' : (w.status === 'completed' ? 'ok' : '')}" style="font-size: 9px;">${w.status}</span>
@@ -9215,7 +9240,7 @@ async function renderInvoiceDetail(root, invoiceId) {
                 return `
                   <tr>
                     <td>${fmtShortDate(e.date)}</td>
-                    <td>${cat}${e.external_id ? `<div class="inv-meta">${escapeHTML(e.external_id)}</div>` : ''}</td>
+                    <td>${cat}${e.external_id ? `<div class="inv-meta">${escapeHTML(woLabel(e))}</div>` : ''}</td>
                     <td class="inv-details">${e.description ? escapeHTML(e.description) : '<span style="color:var(--muted);">—</span>'}${e.store_name ? `<div class="inv-meta">${escapeHTML(e.store_name)}</div>` : ''}</td>
                     <td>${thumbCell}</td>
                     <td class="r amt-pos">${fmt$(e.amount || 0)}</td>
@@ -10132,7 +10157,7 @@ async function renderUnplanned(root) {
   const woRollRows = woRoll.map(w => `
       <tr data-wo-roll="${w.wo_id}" style="cursor:pointer;" title="Open work order ${escapeHTML(w.external_id)}">
         <td style="padding:6px 8px;font-size:12px;color:var(--secondary-text);white-space:nowrap;">${escapeHTML((w.date||'').slice(0,10) || '—')}</td>
-        <td style="padding:6px 8px;max-width:230px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><span style="color:var(--primary);font-weight:600;">${escapeHTML(w.external_id)}</span>${w.title ? ` <span style="font-size:11px;color:var(--secondary-text);">${escapeHTML(w.title)}</span>` : ''}</td>
+        <td style="padding:6px 8px;max-width:230px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><span style="color:var(--primary);font-weight:600;">${escapeHTML(woLabel(w))}</span>${w.title ? ` <span style="font-size:11px;color:var(--secondary-text);">${escapeHTML(w.title)}</span>` : ''}</td>
         <td style="padding:6px 8px;text-transform:capitalize;color:var(--secondary-text);">${escapeHTML(w.work_type||'')}</td>
         <td style="padding:6px 8px;">${escapeHTML(w.store_name||'')}</td>
         <td style="padding:6px 8px;text-align:right;font-weight:700;color:var(--danger,#c0392b);">${fmt$(w.unplanned_cost)}</td>
@@ -10166,7 +10191,7 @@ async function renderUnplanned(root) {
   const teRows = (data.detail?.time_entries || []).slice(0, 50).map(r => `
     <tr>
       <td style="padding:5px 8px;">${unplannedBadges(r.tags || r.unplanned_tag)}</td>
-      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.wo_external_id||'')} — ${escapeHTML(r.wo_title||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(woLabel(r)||'')} — ${escapeHTML(r.wo_title||'')}</td>
       <td style="padding:5px 8px;font-size:12px;text-transform:capitalize;color:var(--secondary-text);">${escapeHTML(r.work_type||'')}</td>
       <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.store_name||'')}</td>
       <td style="padding:5px 8px;font-size:12px;text-align:right;">${fmtH(r.hours)}</td>
@@ -10178,7 +10203,7 @@ async function renderUnplanned(root) {
   const expRows2 = (data.detail?.expenses || []).slice(0, 50).map(r => `
     <tr>
       <td style="padding:5px 8px;">${unplannedBadges(r.tags || r.unplanned_tag)}</td>
-      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.wo_external_id||'')} — ${escapeHTML(r.wo_title||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(woLabel(r)||'')} — ${escapeHTML(r.wo_title||'')}</td>
       <td style="padding:5px 8px;font-size:12px;text-transform:capitalize;color:var(--secondary-text);">${escapeHTML(r.work_type||'')}</td>
       <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.store_name||'')}</td>
       <td style="padding:5px 8px;font-size:12px;font-weight:600;">${escapeHTML(r.category||'')}${r.subcategory ? ` <span style="font-weight:400;">/ ${escapeHTML(r.subcategory)}</span>` : ''}</td>
@@ -10189,7 +10214,7 @@ async function renderUnplanned(root) {
   const woDetailRows = (data.detail?.work_orders || []).slice(0, 50).map(r => `
     <tr>
       <td style="padding:5px 8px;">${unplannedBadges(r.tags || r.unplanned_tag)}</td>
-      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.external_id||'')} — ${escapeHTML(r.title||'')}</td>
+      <td style="padding:5px 8px;font-size:12px;">${escapeHTML(woLabel(r)||'')} — ${escapeHTML(r.title||'')}</td>
       <td style="padding:5px 8px;font-size:12px;text-transform:capitalize;font-weight:600;">${escapeHTML(r.work_type||'')}</td>
       <td style="padding:5px 8px;font-size:12px;">${escapeHTML(r.store_name||'')}</td>
       <td style="padding:5px 8px;font-size:12px;color:var(--secondary-text);">${escapeHTML(r.tagged_by_name||'')}</td>
