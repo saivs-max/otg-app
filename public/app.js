@@ -694,12 +694,11 @@ function stopClockInNudge() {
 // secondary description line. Invoice and detail screens still surface both.
 function woCard(w) {
   const title = w.title || w.description || w.store_name || '';
-  const ticketLabel = sourceLabel(w.source_system) + ' #' + (w.wo_number || w.source_ticket_id || sourceTicketId(w.external_id));
   return `
     <div class="card tap" data-wo="${w.id}" data-act="open-wo" style="padding: 16px;">
       <div class="flex between" style="gap: 12px; align-items: center;">
         <div style="flex: 1; min-width: 0;">
-          <div class="wo-id" style="margin-bottom: 4px;">${escapeHTML(ticketLabel)}</div>
+          <div class="wo-id" style="margin-bottom: 4px;">${escapeHTML(woLabel(w))}</div>
           ${title ? `<div style="font-size: 14px; color: var(--ink-2); line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">${escapeHTML(title)}</div>` : ''}
           <div style="font-size: 11px; color: var(--muted); margin-top: 6px; text-transform: uppercase; letter-spacing: 0.5px;">
             ${workTypeLabel(w.work_type)}${w.cart_count ? ` · ${w.cart_count} carts` : ''}${w.store_name ? ' · ' + escapeHTML(w.store_name) : ''}
@@ -788,12 +787,11 @@ async function renderWoDetail(root, woId) {
     return s + Math.max(0, (ms - (t.break_minutes || 0) * 60000) / 3600000);
   }, 0);
 
-  const ticketLabel = sourceLabel(w.source_system) + ' #' + (w.wo_number || w.source_ticket_id || sourceTicketId(w.external_id));
   root.innerHTML = `
     <div class="card">
       <div class="flex between" style="margin-bottom: 8px; align-items: flex-start;">
         <div style="flex: 1; min-width: 0;">
-          <div class="wo-id" style="font-size:20px;">${escapeHTML(ticketLabel)}</div>
+          <div class="wo-id" style="font-size:20px;">${escapeHTML(woLabel(w))}</div>
           <div style="font-size: 11px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px;">${workTypeLabel(w.work_type)}</div>
         </div>
         <span class="badge ${w.status === 'in_progress' ? 'pending' : (w.status === 'completed' ? 'approved' : 'gray')}">${labelForWoStatus(w.status)}</span>

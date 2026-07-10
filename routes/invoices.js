@@ -138,7 +138,7 @@ module.exports = (db) => {
     // an open timer (clock_out IS NULL) must never contribute to invoice money,
     // since sumHours() would otherwise extrapolate its hours to the current time.
     const allTimes = db.prepare(`
-      SELECT t.*, w.id AS work_order_id, w.external_id, w.source_system, w.work_type, w.store_name, w.cart_count, w.description AS wo_description
+      SELECT t.*, w.id AS work_order_id, w.external_id, w.source_system, w.work_type, w.store_name, w.cart_count, w.description AS wo_description, w.wo_number
       FROM time_entries t JOIN work_orders w ON w.id = t.work_order_id
       WHERE t.invoice_id = ? AND t.clock_out IS NOT NULL
       ORDER BY t.clock_in
@@ -184,6 +184,7 @@ module.exports = (db) => {
       // v0.61 — capture the DB id so the per-WO budget evaluator can look up
       // wo_category_budgets without a second lookup by external_id.
       work_order_id: src.work_order_id,
+      wo_number: src.wo_number || null,
       source_system: src.source_system,
       work_type: src.work_type,
       store_name: src.store_name,
@@ -294,7 +295,8 @@ module.exports = (db) => {
       day.labor_amount += hrs * rate;
       day.work_orders.add(t.external_id);
       day.time_entries.push({
-        id: t.id, external_id: t.external_id, store_name: t.store_name, work_type: t.work_type,
+        id: t.id, external_id: t.external_id, wo_number: t.wo_number || null,
+        source_system: t.source_system, store_name: t.store_name, work_type: t.work_type,
         clock_in: t.clock_in, clock_out: t.clock_out, hours: +hrs.toFixed(2), notes: t.notes,
         mode: 'work', source: t.source || null,
         // v0.64 — surfaced for the review UI only; never rendered on the AP PDF.
