@@ -240,6 +240,32 @@ function parseDisplayDate(s) {
 }
 function todayISO() { return localDateISO(new Date()); }
 
+// v0.87 — Guard an async submit against double-tap duplicates. Synchronously
+// marks the button busy + disabled BEFORE the first await, so extra taps during
+// the save round-trip (common on laggy mobile webviews) can't fire the request
+// again and create duplicate line items. Restores the button in a finally —
+// harmless if the handler navigated away on success, and lets the tech retry
+// after a validation error or failure.
+async function submitOnce(btn, fn, pendingLabel) {
+  if (btn && btn.dataset.busy === '1') return; // a first tap is already in flight
+  let prevHtml;
+  if (btn) {
+    btn.dataset.busy = '1';
+    btn.disabled = true;
+    prevHtml = btn.innerHTML;
+    if (pendingLabel) btn.innerHTML = pendingLabel;
+  }
+  try {
+    await fn();
+  } finally {
+    if (btn) {
+      btn.dataset.busy = '0';
+      btn.disabled = false;
+      if (pendingLabel) btn.innerHTML = prevHtml;
+    }
+  }
+}
+
 // Request browser geolocation. Returns { lat, lng, accuracy } or null.
 function getGPS() {
   return new Promise(resolve => {
@@ -1771,7 +1797,10 @@ async function renderAdd(root) {
     // form inputs aren't on the page, so we skip all the form-input bindings.
     if (previewMode) {
       $('#backToEditBtn')?.addEventListener('click', () => { previewMode = false; rerender(); });
-      $('#confirmSaveBtn')?.addEventListener('click', commitExpense);
+      // v0.87 — guard against double-tap during the save delay (was creating
+      // duplicate line items when techs tapped "Save to invoice" repeatedly).
+      const confirmBtn = $('#confirmSaveBtn');
+      confirmBtn?.addEventListener('click', () => submitOnce(confirmBtn, commitExpense, '⏳ Saving…'));
       return;
     }
     $$('#catChips .chip').forEach(c => c.addEventListener('click', () => {
@@ -2825,7 +2854,8 @@ async function openManualTimeSheet(opts = {}) {
   `, {
     onMount: (wrap) => {
       $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
-      $('#mtSave', wrap).addEventListener('click', async () => {
+      const mtSaveBtn = $('#mtSave', wrap); // v0.87 — double-submit guard
+      mtSaveBtn.addEventListener('click', () => submitOnce(mtSaveBtn, async () => {
         const wo_id = Number($('#mtWO', wrap).value);
         const date  = $('#mtDate', wrap).value;
         const start = $('#mtStart', wrap).value;
@@ -2855,7 +2885,7 @@ async function openManualTimeSheet(opts = {}) {
           if (opts.invoiceId) goto('invDetail', opts.invoiceId);
           else                goto('mine');
         } catch (e) { toast(e.message, 'err'); }
-      });
+      }, '⏳ Saving…'));
     },
   });
 }
@@ -3218,7 +3248,8 @@ async function openEditOneTimeSheet(timeEntryId) {
       };
       ['te_start','te_end','te_break'].forEach(id =>
         $('#'+id, wrap).addEventListener('input', syncHoursFromTimes));
-      $('#te_save', wrap).addEventListener('click', async () => {
+      const teSaveBtn = $('#te_save', wrap); // v0.87 — double-submit guard
+      teSaveBtn.addEventListener('click', () => submitOnce(teSaveBtn, async () => {
         const d  = $('#te_date',  wrap).value;
         const s  = $('#te_start', wrap).value;
         const e  = $('#te_end',   wrap).value;
@@ -3257,7 +3288,7 @@ async function openEditOneTimeSheet(timeEntryId) {
           closeSheet();
           goto('invDetail', t.invoice_id);
         } catch (er) { toast(er.message, 'err'); }
-      });
+      }, '⏳ Saving…'));
     }
   });
 }
