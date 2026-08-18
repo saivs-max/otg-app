@@ -4,6 +4,45 @@ Project context for Claude. Field-cost tracking app: techs log labor / drive /
 expenses → invoices → AP approval pipeline → **Cost Tracker** reconciliation.
 Node backend + vanilla-JS SPA (`public/app.js`).
 
+## How we work — 4-phase delivery (Research → Plan → Code → Review)
+Every feature and non-trivial bug fix runs through four phases, in order. Each
+phase begins from the **written output** of the previous one (findings → plan →
+diff → review) — don't skip ahead: no plan before research, no code before a
+plan, no commit before review.
+
+- **PRD is the product source of truth.** `OTG_FieldCost_App_PRD.docx` lives in
+  the **OTG-App project folder** (`~/Documents/Claude/Projects/OTG-App/`, mounted
+  alongside this repo — **not** in git). Structure: §1 Overview, §2 Personas,
+  §3 User Stories, §4 Functional Requirements (4.1 Auth · 4.2 WO Linking ·
+  4.3 Time Tracking · 4.4 Expense Entry · 4.5 Invoice Lifecycle · 4.6 Approval
+  Routing · 4.7 Ops Dashboard · 4.8 Forecast/Anomaly · 4.9 AP Export ·
+  4.10 Notifications), §5 NFRs, §6 Acceptance Criteria, §7 Rollout, §8 Open
+  Questions, §9 Appendix. Read it before starting any work — it is the authority
+  on intended behavior.
+
+1. **Research** (Explore / general-purpose subagent). Read the PRD + the relevant
+   code, reproduce and confirm the problem, gather any external facts. Output: a
+   findings note — root cause, affected files, requirements + acceptance criteria.
+   **Research OWNS the PRD:** fold new/changed requirements and decisions into the
+   matching §4 section, resolve the relevant §8 Open Question, bump the version
+   line, and add a dated revision-history entry (edit the docx via the `docx`
+   skill). The PRD must reflect reality before Plan starts.
+2. **Plan** (Plan agent). Turn the findings into a step-by-step implementation
+   plan: files to touch, sequence, schema/data changes, test strategy,
+   risks/rollback. No implementation here.
+3. **Code.** Implement strictly to the plan. Honor repo conventions (version tags
+   in comments e.g. `v0.87`; migrations via `ensureSchema()` + `schema.sql`;
+   store UTC and convert at the UI edge). Output: the diff + tests.
+4. **Review** (independent subagent; add the `security-review` skill for anything
+   touching auth, money, or data). Check correctness, regressions, tests, and
+   security against the plan and the PRD's §6 acceptance criteria. Only after
+   review passes is the change ready to commit/deploy.
+
+**Rigor scales with size.** Full chain (a subagent per phase) for features and
+non-trivial fixes. Trivial one-liners/chores may use a fast-path (research + fix
++ self-review inline) but STILL get a PRD revision-history line so the doc never
+drifts. When unsure, run the full chain.
+
 ## Repo & deploy
 - GitHub: `github.com/saivs-max/otg-app`, branch `main`. Git auth via osxkeychain.
 - **Deploy is automatic**: push to `main` → GitHub Actions `.github/workflows/fly-deploy.yml`

@@ -111,7 +111,7 @@ module.exports = (db) => {
     if (!['ops_manager','sr_manager','pm'].includes(me.role)) {
       return res.status(403).json({ error: 'manager role required' });
     }
-    const { name, email, worker_type, hourly_rate, home_address, home_phone } = req.body;
+    const { name, email, worker_type, hourly_rate, home_address, home_phone, ops_manager_id } = req.body;
     if (!name || !email) return res.status(400).json({ error: 'name and email required' });
     if (!['contractor','fte'].includes(worker_type)) {
       return res.status(400).json({ error: 'worker_type must be contractor or fte' });
@@ -122,16 +122,21 @@ module.exports = (db) => {
     if (hourly_rate != null && (!isFinite(rate) || rate < 0 || rate > 500)) {
       return res.status(400).json({ error: 'hourly_rate must be 0–500' });
     }
+    // v0.82 — ops_manager creates their own tech; sr_manager/pm can specify an
+    // ops_manager_id so the new tech lands in the right team immediately.
+    const assignedMgrId = me.role === 'ops_manager'
+      ? userId
+      : (ops_manager_id ? Number(ops_manager_id) : null);
     const r = db.prepare(`
       INSERT INTO users (name, email, role, worker_type, hourly_rate, home_address, home_phone, ops_manager_id)
       VALUES (?, ?, 'technician', ?, ?, ?, ?, ?)
     `).run(name.trim(), email.trim().toLowerCase(), worker_type,
            Number.isFinite(rate) ? rate : 40.0,
            home_address || null, home_phone || null,
-           me.role === 'ops_manager' ? userId : null);
-    if (me.role === 'ops_manager') {
+           assignedMgrId);
+    if (assignedMgrId) {
       db.prepare(`INSERT OR IGNORE INTO manager_team (manager_user_id, tech_user_id) VALUES (?, ?)`)
-        .run(userId, r.lastInsertRowid);
+        .run(assignedMgrId, r.lastInsertRowid);
     }
     logAudit(db, { entity_type: 'users', entity_id: r.lastInsertRowid, user_id: userId,
                    action: 'create_tech', details: { name, email, worker_type } });

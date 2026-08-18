@@ -163,6 +163,20 @@ function ensureSchema(db) {
           AND te2.source != 'maintainx_sync'
       )
   `);
+
+  // v0.82 — Backfill manager_team from ops_manager_id. Any technician whose
+  // ops_manager_id is set but has no manager_team row gets one now. This fixes
+  // FTE/contractor techs created by sr_manager or pm (who didn't trigger the
+  // ops_manager-only auto-insert in POST /api/users), so their submitted
+  // invoices appear immediately in the ops manager's approval queue.
+  // Idempotent — INSERT OR IGNORE is a no-op for rows that already exist.
+  try {
+    db.exec(`
+      INSERT OR IGNORE INTO manager_team (manager_user_id, tech_user_id)
+      SELECT ops_manager_id, id FROM users
+      WHERE ops_manager_id IS NOT NULL AND role = 'technician'
+    `);
+  } catch (_) { /* manager_team absent on partial schema — ignore */ }
 }
 
 // v0.63 — Unplanned tagging. Tags are stored as a JSON array so one item can

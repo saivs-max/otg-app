@@ -2006,7 +2006,7 @@ async function renderInvoice(root) {
           </tr>
         </tbody>
       </table>
-      <div style="font-size: 11px; color: var(--muted); margin-top: 8px;">Drive hours are tracked but not billable as labor.</div>
+      <div style="font-size: 11px; color: var(--muted); margin-top: 8px;">Drive hours are billed at the same hourly rate as labor and tracked separately for reporting.</div>
     </div>
 
     <div class="section-title">Category summary</div>
@@ -3087,7 +3087,7 @@ function editTimeRowHTML(t, invoice, isDrive, opts = {}) {
   const start = t.clock_in  ? new Date(t.clock_in ).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '';
   const end   = t.clock_out ? new Date(t.clock_out).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '';
   const hrs   = t.hours || 0;
-  const amt   = isDrive ? 0 : hrs * (invoice.hourly_rate || 40);
+  const amt   = hrs * (invoice.hourly_rate || 40);  // v0.82 — drive is billable, same rate as labor
   return `
     <div class="ed-row ${isDrive ? 'ed-drive' : ''}">
       <div class="ed-row-icon">${isDrive ? '🚗' : '⏱'}</div>
@@ -3096,11 +3096,11 @@ function editTimeRowHTML(t, invoice, isDrive, opts = {}) {
           <strong>${escapeHTML(woLabel(t))}</strong>
           ${t.store_name ? ` · <span class="meta">${escapeHTML(t.store_name)}</span>` : ''}
         </div>
-        <div class="meta">${start} → ${end} · ${hrs.toFixed(2)} hrs ${isDrive ? '(drive, non-billable)' : ''}</div>
+        <div class="meta">${start} → ${end} · ${hrs.toFixed(2)} hrs ${isDrive ? '(drive)' : ''}</div>
         ${t.notes ? `<div class="ed-row-notes">${escapeHTML(t.notes)}</div>` : ''}
         ${(!opts.readOnly && ['ops_manager','sr_manager','pm'].includes(STATE.user?.role)) ? `<div style="margin-top:6px;">${renderUnplannedTagBtn('time_entry', t.id, t.unplanned_tag, t.unplanned_note, amt, t.unplanned_wasted)}</div>${unplannedNoteLine(t.unplanned_tag, t.unplanned_note)}${unplannedSplitLine(t.unplanned_tag, t.unplanned_wasted, amt)}` : ''}
       </div>
-      <div class="ed-row-amt">${isDrive ? '—' : fmt$(amt)}</div>
+      <div class="ed-row-amt">${fmt$(amt)}</div>
       <div class="ed-row-acts">
         ${(() => {
           // v0.68 — Ops/Sr/PM managers can EDIT a line item's value in the
@@ -3218,7 +3218,7 @@ async function openEditOneTimeSheet(timeEntryId) {
       </div>
     </div>
 
-    <span class="label">Hours${(t.mode||'work')==='drive' ? '' : ' (billable)'}</span>
+    <span class="label">Hours (billable)</span>
     <input class="field" id="te_hours" type="number" min="0" max="24" step="0.25" value="${+curHours.toFixed(2)}" />
     <p class="help" style="margin-top:-6px;">Set hours directly — the end time updates to match. Leave the end time to drive it instead.</p>
 
@@ -3403,7 +3403,7 @@ async function openEditExpenseSheet(exp) {
         } else if (cat === 'labor' || cat === 'drive') {
           body.quantity = Number($('#eqty', wrap)?.value);
           if (!body.quantity) return toast('Enter hours', 'err');
-          // server recomputes amount from quantity × hourly rate (labor) or 0 (drive)
+          // server recomputes amount from quantity × hourly rate (both labor and drive are billable)
         } else {
           body.amount = Number($('#eamt', wrap)?.value);
           if (!body.amount) return toast('Enter amount', 'err');
@@ -9068,7 +9068,7 @@ async function renderInvoiceDetail(root, invoiceId) {
           <button class="btn btn-ghost btn-sm" id="addExpProxy">＋ Expense</button>
           <button class="btn btn-ghost btn-sm" id="addTimeProxy">⏱ Time entry</button>
           <button class="btn btn-ghost btn-sm" id="editInvDetailsBtn">✏️ Period / notes</button>
-          <button class="btn btn-ghost btn-sm" id="extractWoBtn">🔎 Link WOs</button>
+          ${extracted_at ? `<button class="btn btn-ghost btn-sm" id="extractWoBtn">🔎 Link WOs</button>` : ''}
         </div>
       </div>
       ${renderEditableLineItems(by_date, invoice)}
