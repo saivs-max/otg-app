@@ -2798,6 +2798,11 @@ async function openManualTimeSheet(opts = {}) {
     dISO = localDateISO(yest); // v0.87 — local date, not UTC
   }
 
+  // v0.87 — build a WO <option> with a full label (ID — store (type)) and mark
+  // the current pick selected, so filtering the list keeps the tech's choice.
+  const woOpt = (w, curId) =>
+    `<option value="${w.id}" ${String(curId) === String(w.id) ? 'selected' : ''}>${escapeHTML(woLabel(w))} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})</option>`;
+
   showSheet(`
     <h3>Log a past shift${opts.invoiceId ? ` <span style="color: var(--ic-orange); font-size: 12px; font-weight: 400;">(pinned to this invoice)</span>` : ''}</h3>
     <p class="help">Forgot to clock in? Log it retroactively. The hours go to the invoice covering that week (a draft is created automatically if needed).</p>
@@ -2810,9 +2815,11 @@ async function openManualTimeSheet(opts = {}) {
     ` : ''}
 
     <span class="label">Work order</span>
-    <select class="field" id="mtWO">
-      ${open.map(w => `<option value="${w.id}">${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')}</option>`).join('')}
+    <input class="field" id="mtWOSearch" placeholder="🔎 Search by ID, store, type…" style="margin-bottom:6px;" />
+    <select class="field" id="mtWO" size="${Math.min(5, Math.max(2, open.length))}">
+      ${open.map(w => woOpt(w, '')).join('')}
     </select>
+    <div class="help" id="mtWONoMatch" style="display:none; margin-top:-8px; color: var(--muted);">No work orders match — clear the search to see all.</div>
 
     <span class="label">Date</span>
     <input class="field" id="mtDate" type="date" value="${dISO}" max="${todayISO()}"
@@ -2854,6 +2861,24 @@ async function openManualTimeSheet(opts = {}) {
   `, {
     onMount: (wrap) => {
       $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
+      // v0.87 — WO search (mirrors the expense form): filter the <select> as the
+      // tech types so they can find a specific work order instead of scrolling a
+      // long preselected list.
+      const woSel = $('#mtWO', wrap);
+      let curWo = woSel.value;                         // preserve pick across filtering
+      woSel.addEventListener('change', () => { curWo = woSel.value; });
+      $('#mtWOSearch', wrap)?.addEventListener('input', (e) => {
+        const q = e.target.value.trim().toLowerCase();
+        const matches = q
+          ? open.filter(w => (`${w.external_id} ${w.store_name || ''} ${w.work_type || ''} ${w.description || ''} ${woLabel(w)}`)
+                              .toLowerCase().includes(q))
+          : open;
+        woSel.innerHTML = matches.map(w => woOpt(w, curWo)).join('');
+        // Keep the hidden <select> value in sync if the old pick was filtered out.
+        if (!matches.some(w => String(w.id) === String(curWo))) curWo = woSel.value;
+        const none = $('#mtWONoMatch', wrap);
+        if (none) none.style.display = matches.length ? 'none' : 'block';
+      });
       const mtSaveBtn = $('#mtSave', wrap); // v0.87 — double-submit guard
       mtSaveBtn.addEventListener('click', () => submitOnce(mtSaveBtn, async () => {
         const wo_id = Number($('#mtWO', wrap).value);
