@@ -209,7 +209,36 @@ function workTypeLabel(t) {
   return ({ deployment: 'Deployment', retrofit: 'Retrofit', maintenance: 'Maintenance', repair: 'Repair' }[t] || t);
 }
 function sourceLabel(s) { return s === 'maintainx' ? 'MaintainX' : 'Freshdesk'; }
-function todayISO() { return new Date().toISOString().slice(0,10); }
+
+// ── Timezone helpers (v0.87) ──────────────────────────────────────────────
+// The DB stores absolute instants as UTC ISO strings (…Z). All localization
+// happens here, at the UI edge, using the tech's own browser timezone. Never
+// slice raw digits out of a UTC string for display — that shows UTC as if it
+// were local (the "4 hours behind" class of bug).
+function pad2(n) { return String(n).padStart(2, '0'); }
+// Local calendar date (YYYY-MM-DD) for a Date — NOT toISOString().slice(0,10),
+// which returns the UTC date and can be a day off in the evening out West.
+function localDateISO(d = new Date()) {
+  d = (d instanceof Date) ? d : new Date(d);
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+}
+// Local wall-clock "HH:MM" from a UTC ISO string (for time inputs).
+function localHM(v) {
+  const d = (v instanceof Date) ? v : new Date(v);
+  return isNaN(d) ? '' : `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+// Parse a value for DISPLAY. A date-only 'YYYY-MM-DD' is a calendar date and is
+// read in local time (so it never renders a day behind); anything with a time /
+// zone component is a real instant and localizes normally.
+function parseDisplayDate(s) {
+  if (!s) return null;
+  const str = String(s);
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const d = new Date(str);
+  return isNaN(d) ? null : d;
+}
+function todayISO() { return localDateISO(new Date()); }
 
 // Request browser geolocation. Returns { lat, lng, accuracy } or null.
 function getGPS() {
@@ -2731,13 +2760,13 @@ async function openManualTimeSheet(opts = {}) {
   // the date inside its period so the entry attaches to that draft.
   let dISO;
   if (opts.period?.start && opts.period?.end) {
-    const today = new Date(); const todayIso = today.toISOString().slice(0,10);
+    const todayIso = localDateISO(new Date()); // v0.87 — local date, not UTC
     dISO = (todayIso >= opts.period.start && todayIso <= opts.period.end)
       ? todayIso
       : opts.period.end;
   } else {
-    const today = new Date(); const yest = new Date(today); yest.setDate(yest.getDate() - 1);
-    dISO = yest.toISOString().slice(0,10);
+    const yest = new Date(); yest.setDate(yest.getDate() - 1);
+    dISO = localDateISO(yest); // v0.87 — local date, not UTC
   }
 
   showSheet(`
@@ -2835,7 +2864,7 @@ function weekStartISO() {
   const d = new Date();
   const day = d.getDay();
   d.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
-  return d.toISOString().slice(0,10);
+  return localDateISO(d); // v0.87 — local Monday, not UTC (avoids evening-West day shift)
 }
 
 function openRateSheet(currentRate) {
@@ -3095,9 +3124,12 @@ async function openEditOneTimeSheet(timeEntryId) {
     ? allWos
     : (t.work_order_id ? [{ id: t.work_order_id, external_id: t.external_id, store_name: t.store_name }] : []);
 
-  const dateISO = (t.clock_in || '').slice(0, 10);
-  const startT  = (t.clock_in || '').slice(11, 16);
-  const endT    = (t.clock_out || '').slice(11, 16);
+  // v0.87 — clock_in/out are UTC ISO strings; convert to the tech's LOCAL
+  // wall-clock for the date/time inputs. (Slicing the raw UTC digits showed UTC
+  // as if it were local, so techs "corrected" it and saved 4h off.)
+  const dateISO = t.clock_in  ? localDateISO(t.clock_in) : '';
+  const startT  = t.clock_in  ? localHM(t.clock_in)      : '';
+  const endT    = t.clock_out ? localHM(t.clock_out)     : '';
   // Current billable hours (server returns it computed; fall back to derive).
   const curHours = (t.hours != null && isFinite(+t.hours))
     ? +t.hours
@@ -3159,11 +3191,7 @@ async function openEditOneTimeSheet(timeEntryId) {
   `, {
     onMount: (wrap) => {
       $$('[data-act="sheet-close"]', wrap).forEach(b => b.addEventListener('click', closeSheet));
-      // Format a Date as a naive local datetime string — same wall-clock frame
-      // as the clock_in we send, so the server computes the duration tz-safely.
       const pad = n => String(n).padStart(2, '0');
-      const toNaiveLocal = dt =>
-        `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:00`;
       const endDateFromHours = () => {
         const d = $('#te_date', wrap).value, s = $('#te_start', wrap).value;
         const h = parseFloat($('#te_hours', wrap).value);
@@ -3206,13 +3234,17 @@ async function openEditOneTimeSheet(timeEntryId) {
         if (hoursStr !== '' && isFinite(hoursVal) && hoursVal > 0) {
           const endDt = endDateFromHours();
           if (!endDt) return toast('Could not compute end time from hours', 'err');
-          clockOut = toNaiveLocal(endDt);
+          // v0.87 — endDt is a real Date built from the tech's local inputs;
+          // toISOString() sends the unambiguous UTC instant (…Z) so the server
+          // stores exactly what the tech means, regardless of the server's TZ.
+          clockOut = endDt.toISOString();
         } else {
-          clockOut = e ? `${d}T${e}:00` : null;
+          clockOut = e ? new Date(`${d}T${e}:00`).toISOString() : null;
         }
         const woId = Number($('#te_wo', wrap)?.value);
         const body = {
-          clock_in:      `${d}T${s}:00`,
+          // v0.87 — build from local wall-clock inputs, send as UTC ISO (…Z).
+          clock_in:      new Date(`${d}T${s}:00`).toISOString(),
           clock_out:     clockOut,
           break_minutes: bm,
           mode:          md,
@@ -3528,10 +3560,13 @@ function openEditTimeSheet(extId, entries) {
 }
 
 function capitalize(s) { s = (s == null) ? '' : String(s); return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
-function fmtDate(s) { if (!s) return ''; const d = new Date(s); return d.toLocaleDateString(undefined, { month:'short', day:'numeric' }); }
-function fmtShortDate(s) { if (!s) return ''; const d = new Date(s); return `${d.getDate()}-${d.toLocaleDateString('en-US', { month: 'short' })}`; }
-function fmtMonthDay(s)  { if (!s) return ''; const d = new Date(s); return `${d.getMonth()+1}/${d.getDate()}`; }
-function fmtLongDate(s)  { if (!s) return ''; const d = new Date(s); return d.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }); }
+// v0.87 — parse via parseDisplayDate so a date-only 'YYYY-MM-DD' (expense_date,
+// invoice period, etc.) reads as a local calendar date instead of UTC midnight
+// (which renders a day behind west of UTC).
+function fmtDate(s) { const d = parseDisplayDate(s); return d ? d.toLocaleDateString(undefined, { month:'short', day:'numeric' }) : ''; }
+function fmtShortDate(s) { const d = parseDisplayDate(s); return d ? `${d.getDate()}-${d.toLocaleDateString('en-US', { month: 'short' })}` : ''; }
+function fmtMonthDay(s)  { const d = parseDisplayDate(s); return d ? `${d.getMonth()+1}/${d.getDate()}` : ''; }
+function fmtLongDate(s)  { const d = parseDisplayDate(s); return d ? d.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) : ''; }
 function escapeHTML(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 function enumerateWeekDays(start, end) {
   const out = []; const d = new Date(start), e = new Date(end);

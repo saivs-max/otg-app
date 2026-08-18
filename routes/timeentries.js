@@ -4,6 +4,21 @@ const router  = express.Router();
 const { logAudit, sumHours, weekBounds } = require('../db');
 const weekBoundsFor = (d) => weekBounds(new Date(d));
 
+// v0.87 — Normalize a client-supplied timestamp to an absolute instant. The app
+// sends UTC ISO (…Z). If a zone-less datetime ever arrives (older client, a
+// test, or future code), treat it as UTC by appending 'Z' rather than letting
+// new Date() interpret it in the SERVER machine's local timezone — so parsing is
+// deterministic across regions and multiple instances. Returns a Date, or null.
+function toInstant(v) {
+  if (v == null) return null;
+  let s = String(v).trim();
+  if (!s) return null;
+  const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(s);
+  if (s.includes('T') && !hasZone) s += 'Z';
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 // v0.82 — Fold an in-progress live-tracked break into break_minutes. Shared by
 // POST /break/resume and the clock-out path (so "Clock Out" works straight from
 // a break). Flags the entry when THIS break interval exceeded 60 min. Callers
@@ -118,9 +133,9 @@ module.exports = (db) => {
 
     // ----- Manual / backdated entry -----
     if (clock_in && clock_out) {
-      const ci = new Date(clock_in);
-      const co = new Date(clock_out);
-      if (isNaN(ci) || isNaN(co)) return res.status(400).json({ error: 'invalid clock_in or clock_out' });
+      const ci = toInstant(clock_in);
+      const co = toInstant(clock_out);
+      if (!ci || !co) return res.status(400).json({ error: 'invalid clock_in or clock_out' });
       if (co <= ci)               return res.status(400).json({ error: 'clock_out must be after clock_in' });
       if (ci > new Date())        return res.status(400).json({ error: 'clock_in cannot be in the future' });
       // v0.65.1 (F-H4) — reject future clock-outs and absurd shift lengths.
@@ -399,16 +414,16 @@ module.exports = (db) => {
       let clockOut = e.clock_out;
       let mode     = e.mode;
       if (req.body.clock_in)  {
-        const ci = new Date(req.body.clock_in);
-        if (isNaN(ci)) return res.status(400).json({ error: 'invalid clock_in' });
+        const ci = toInstant(req.body.clock_in);
+        if (!ci) return res.status(400).json({ error: 'invalid clock_in' });
         clockIn = ci.toISOString();
       }
       if (req.body.clock_out !== undefined) {
         if (req.body.clock_out === null || req.body.clock_out === '') {
           return res.status(400).json({ error: 'clock_out cannot be cleared on a closed entry' });
         }
-        const co = new Date(req.body.clock_out);
-        if (isNaN(co)) return res.status(400).json({ error: 'invalid clock_out' });
+        const co = toInstant(req.body.clock_out);
+        if (!co) return res.status(400).json({ error: 'invalid clock_out' });
         clockOut = co.toISOString();
       }
       if (req.body.mode !== undefined) {
