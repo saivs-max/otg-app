@@ -22,7 +22,9 @@ primary_region = "lax"
 # Persistent disk. Everything the app must keep — the SQLite database
 # (data/otg.db) AND uploaded receipts/PDFs (data/receipts/) — lives here and
 # survives deploys, restarts, and machine sleep.
-# Create it once with:  fly volume create otg_data --size 1 --region lax
+# Create it once with:  fly volume create otg_data --size 5 --region lax
+# (5 GB gives headroom for vendor PDFs at 20-25 users; resize with
+#  fly volume extend <vol-id> --size <gb> if it fills up)
 [mounts]
   source = "otg_data"
   destination = "/app/data"
@@ -30,11 +32,12 @@ primary_region = "lax"
 [http_service]
   internal_port = 3000
   force_https = true
-  # Scale to zero when idle to keep the bill near $0; the next request wakes it
-  # (a few seconds cold start). Set min_machines_running = 1 for always-on.
-  auto_stop_machines = "stop"
+  # Always-on for 20-25 active users — no cold-start delay on first request.
+  # Drop back to auto_stop_machines = "stop" / min_machines_running = 0 if
+  # the app goes idle for extended periods and cost matters more than latency.
+  auto_stop_machines = "suspend"
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ["app"]
 
   [[http_service.checks]]
@@ -44,12 +47,13 @@ primary_region = "lax"
     method = "GET"
     path = "/api/health"
 
-# This app keeps state in a single SQLite file on one volume and holds sessions
-# + the login throttle in memory, so it must run as exactly ONE machine.
-# Don't scale the count above 1. (`fly scale count 1`)
+# Single machine — SQLite is single-writer so never scale count above 1.
+# performance-1x: 1 dedicated CPU + 2 GB RAM.
+# Handles 20-25 concurrent users comfortably; WAL mode in db.js gives
+# parallel reads so only writes ever queue. (~$31/mo vs $2 shared-cpu-1x)
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = "performance-1x"
+  memory = "2048mb"
   cpus = 1
 
 # With a single volume-backed machine, replace the machine in place on deploy

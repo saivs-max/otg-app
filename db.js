@@ -16,6 +16,14 @@ function open() {
   try { fs.chmodSync(path.dirname(DB_PATH), 0o700); } catch {}
   const db = new DatabaseSync(DB_PATH);
   db.exec('PRAGMA foreign_keys = ON');
+  // v0.82 — WAL mode lets multiple readers proceed concurrently without
+  // blocking each other or the writer, which is critical at 20-25 users.
+  // busy_timeout gives write contention up to 5 s to resolve before
+  // returning SQLITE_BUSY. synchronous=NORMAL is safe with WAL and
+  // meaningfully faster than the default FULL.
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA busy_timeout = 5000');
+  db.exec('PRAGMA synchronous = NORMAL');
   // Tighten file mode on the actual db file (and its WAL/SHM siblings if any).
   try {
     for (const suffix of ['', '-wal', '-shm']) {
