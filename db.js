@@ -177,6 +177,10 @@ function ensureSchema(db) {
       WHERE ops_manager_id IS NOT NULL AND role = 'technician'
     `);
   } catch (_) { /* manager_team absent on partial schema — ignore */ }
+
+  // v0.83 — MaintainX catalog: locations + assets. Tables are created by
+  // schema.sql above (CREATE TABLE IF NOT EXISTS); no column migrations needed.
+  // Nothing to do here — the tables exist on first boot via schema.sql.
 }
 
 // v0.63 — Unplanned tagging. Tags are stored as a JSON array so one item can

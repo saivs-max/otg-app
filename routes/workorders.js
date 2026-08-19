@@ -592,6 +592,19 @@ async function fetchFromSource(source, ticketId, db) {
     const wtFallback = wtResolved.work_type ? null : classifyMxWorkType(w);
     const finalWorkType = wtResolved.work_type || wtFallback;
 
+    // v0.83 — Extract linked asset IDs so the frontend can pre-select carts.
+    // MaintainX may put them in assets[], assetIds[], or parts[].
+    const rawAssets  = Array.isArray(w.assets)   ? w.assets   : [];
+    const rawAssetIds = Array.isArray(w.assetIds) ? w.assetIds : [];
+    const mxAssetIds = [
+      ...rawAssets.map(a => a != null && typeof a === 'object' ? String(a.id ?? a.assetId ?? '') : String(a)),
+      ...rawAssetIds.map(id => String(id)),
+    ].filter(Boolean);
+
+    // Match the MX locationId against our synced mx_locations table so the
+    // frontend can pre-select the location without any extra API call.
+    const mxLocationId = w.locationId != null ? String(w.locationId) : null;
+
     return {
       stubbed: false,
       data: {
@@ -609,6 +622,9 @@ async function fetchFromSource(source, ticketId, db) {
         wo_number:    w.sequentialId != null ? Number(w.sequentialId) : null,
         sub_wo_count: w.isParent ? countSubWOsFromProgress(w.progress) : 0,
         priority:     w.priority || null,
+        // v0.83 — catalog pre-selection hints (matched against synced mx_locations/mx_assets)
+        _mx_location_id: mxLocationId,
+        _mx_asset_ids:   mxAssetIds.length ? mxAssetIds : null,
       },
       raw: redactedFullResponse(w, {
         description_preview: (desc || '').slice(0, 600),

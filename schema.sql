@@ -534,3 +534,43 @@ CREATE INDEX IF NOT EXISTS idx_woadd_invoice ON wo_addition_requests(invoice_id)
 CREATE INDEX IF NOT EXISTS idx_woadd_user    ON wo_addition_requests(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_woadd_status  ON wo_addition_requests(status);
 
+-- v0.83 — MaintainX catalog: locations (store sites) and assets (carts).
+-- Synced from MaintainX via POST /mx/sync-catalog (on-demand) and the daily
+-- scheduler. Both tables are ops-manager-readable; source of truth for store
+-- names, addresses, and cart inventories used when creating work orders.
+CREATE TABLE IF NOT EXISTS mx_locations (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  mx_id         TEXT    NOT NULL UNIQUE,          -- MaintainX location ID (string)
+  name          TEXT    NOT NULL,
+  parent_mx_id  TEXT,                             -- parent location ID for hierarchies
+  address       TEXT,
+  city          TEXT,
+  state         TEXT,
+  zip           TEXT,
+  country       TEXT,
+  latitude      REAL,
+  longitude     REAL,
+  mx_created_at TEXT,
+  mx_updated_at TEXT,
+  synced_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mx_locations_parent ON mx_locations(parent_mx_id);
+
+CREATE TABLE IF NOT EXISTS mx_assets (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  mx_id           TEXT    NOT NULL UNIQUE,        -- MaintainX asset ID (string)
+  name            TEXT    NOT NULL,
+  description     TEXT,
+  serial_number   TEXT,
+  model           TEXT,
+  manufacturer    TEXT,
+  category        TEXT,                           -- category name (e.g. "Carts")
+  status          TEXT,                           -- 'ACTIVE' | 'INACTIVE' | 'ARCHIVED'
+  location_mx_id  TEXT,                           -- FK to mx_locations.mx_id (nullable)
+  mx_created_at   TEXT,
+  mx_updated_at   TEXT,
+  synced_at       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mx_assets_location ON mx_assets(location_mx_id);
+CREATE INDEX IF NOT EXISTS idx_mx_assets_status   ON mx_assets(status);
+

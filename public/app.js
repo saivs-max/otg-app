@@ -417,6 +417,8 @@ function renderTabbar() {
     // v0.65 — 3rd Party tab: review manager-uploaded vendor invoices, spend by vendor.
     { id: 'thirdparty', label: '3rd Party', ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v4H3z"/><path d="M5 11v8h14v-8"/><path d="M10 15h4"/></svg>` },
     { id: 'policy',    label: 'Policy',    ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg>` },
+    // v0.83 — Locations & Assets tab: MaintainX store sites + cart inventory.
+    { id: 'locations', label: 'Locations', ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>` },
     // v0.35 — Admin tab for PM / Sr Mgr only
     ...(['pm','sr_manager'].includes(role) ? [{ id: 'admin', label: 'Admin', ico: `<svg class="tab-ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/><circle cx="18" cy="6" r="2"/></svg>` }] : []),
   ];
@@ -490,6 +492,7 @@ async function render() {
     if (v === 'admin')     return renderAdmin(root);
     if (v === 'corpcard')  return renderCorpCard(root);
     if (v === 'thirdparty') return renderThirdParty(root);
+    if (v === 'locations')  return renderLocations(root);
     if (v === 'woHistory') return renderWoHistory(root);
     // v0.64 — Unplanned moved into the Dashboard. Redirect any stale link there.
     if (v === 'unplanned') { STATE.view = 'dashboard'; STATE._dashSection = 'unplanned'; return renderDashboard(root); }
@@ -1072,6 +1075,102 @@ async function renderWoAdd(root) {
     ? activeWtRows.map(w => w.name)
     : ['deployment','retrofit','maintenance','repair'];
 
+  // v0.83 — MaintainX predefined locations + assets. Loaded once; survive rerenders.
+  let mxLocs      = [];    // [{mx_id, name, city, state, zip, address}]
+  let mxLocsMap   = {};    // name → location row (for auto-fill on selection)
+  let mxCarts       = [];    // all assets at the currently selected location (ACTIVE + INACTIVE)
+  let selectedCarts = [];    // mx_ids of carts the tech has tapped to select
+  let selectedLocation = null; // v0.83 — full mx_locations row once a predefined location is chosen
+  let cartDropOpen  = false;   // v0.83 — cart dropdown panel open?
+  let cartFilterQ   = '';      // v0.83 — search filter inside cart dropdown
+  let locSearchQ    = '';      // v0.83 — search filter for the location picker list
+  api('/mx/locations').then(r => {
+    mxLocs    = r.locations || [];
+    mxLocsMap = Object.fromEntries(mxLocs.map(l => [l.name, l]));
+    // Refresh the location card list in-place if rendered
+    const listEl = document.getElementById('locCardList');
+    if (listEl) { listEl.innerHTML = buildLocCards(mxLocs); bindLocCards(); }
+  }).catch(() => {});
+
+  // Grabs current live input values into form (prevents stale rerender).
+  function grabBeforeRerender() {
+    if ($('#ticket'))    form.ticket_id      = $('#ticket').value.trim();
+    if ($('#title'))     form.title          = $('#title').value.trim();
+    if ($('#store'))     form.store_name     = $('#store').value.trim();
+    if ($('#storeId'))   form.store_id       = $('#storeId').value.trim();
+    if ($('#storeAddr')) form.store_address  = $('#storeAddr').value.trim();
+    if ($('#carts'))     form.cart_count     = $('#carts').value;
+    if ($('#sched'))     form.scheduled_date = $('#sched').value;
+    if ($('#desc'))      form.description    = $('#desc').value;
+  }
+
+  // v0.83 — Build location card HTML for the picker list (used in html() and in-place refresh).
+  function buildLocCards(locs) {
+    if (!locs.length) return '<div style="padding:12px;color:var(--muted);font-size:13px;text-align:center;">No locations found — run a catalog sync in Settings → Integrations.</div>';
+    return locs.map(l => `
+      <div class="card tap" data-loc-id="${escapeHTML(l.mx_id)}" style="padding:12px 14px;margin-bottom:6px;">
+        <div style="font-size:14px;font-weight:600;">${escapeHTML(l.name)}</div>
+        <div style="font-size:12px;color:var(--ink-2);">${escapeHTML([l.city,l.state].filter(Boolean).join(', '))}</div>
+      </div>`).join('');
+  }
+
+  // v0.83 — Attach click handlers to location cards in #locCardList.
+  function bindLocCards() {
+    $$('#locCardList .card.tap[data-loc-id]').forEach(card => {
+      card.addEventListener('click', async () => {
+        const loc = mxLocs.find(l => l.mx_id === card.dataset.locId);
+        if (!loc) return;
+        selectedLocation = loc;
+        form.store_name    = loc.name;
+        form.store_id      = loc.mx_id;
+        form.store_address = [loc.address, loc.city, loc.state, loc.zip].filter(Boolean).join(', ');
+        selectedCarts = []; locSearchQ = '';
+        rerender();
+        await loadCartsForLocation(loc.mx_id);
+      });
+    });
+  }
+
+  async function loadCartsForLocation(mxLocId) {
+    if (!mxLocId) { mxCarts = []; selectedCarts = []; syncCartUI(); return; }
+    try {
+      // Fetch all statuses so the tech can see inactive carts greyed out
+      const r = await api(`/mx/assets?location_mx_id=${encodeURIComponent(mxLocId)}`);
+      mxCarts = (r.assets || []).sort((a, b) => {
+        // Sort: active first, then by natural name order (Cart #1, #2, …)
+        if ((a.status || 'ACTIVE') !== (b.status || 'ACTIVE')) {
+          return (a.status === 'ACTIVE' || !a.status) ? -1 : 1;
+        }
+        return a.name.localeCompare(b.name, undefined, { numeric: true });
+      });
+    } catch (_) { mxCarts = []; }
+    // If the cart trigger button isn't in the DOM yet, a full rerender is needed.
+    if (!document.getElementById('cartDropBtn') && mxCarts.length) {
+      grabBeforeRerender();
+      rerender();
+    } else {
+      syncCartUI();
+    }
+  }
+
+  // Update the cart count field and dropdown button text in-place (no full rerender).
+  function syncCartUI() {
+    const cartsEl = $('#carts');
+    if (cartsEl && selectedCarts.length > 0) cartsEl.value = selectedCarts.length;
+    const cartBtn = document.getElementById('cartDropBtn');
+    if (cartBtn) {
+      const sp = cartBtn.querySelector('span:first-child');
+      if (sp) sp.textContent = selectedCarts.length
+        ? `${selectedCarts.length} cart${selectedCarts.length !== 1 ? 's' : ''} selected`
+        : 'Select carts…';
+    }
+    // Sync checkbox row backgrounds in the open panel
+    $$('#cartDropPanel label').forEach(lbl => {
+      const cb = lbl.querySelector('input[type="checkbox"]');
+      if (cb) lbl.style.background = cb.checked ? 'var(--primary-light,#eff6ff)' : '';
+    });
+  }
+
   let form = {
     source_system: 'maintainx',
     work_type: ACTIVE_WTS.includes('retrofit') ? 'retrofit' : ACTIVE_WTS[0],
@@ -1176,18 +1275,32 @@ async function renderWoAdd(root) {
       <div class="help">Auto-filled from the ticket title; edit if needed.</div>
 
       <span class="label">Store</span>
-      <input class="field" id="store" placeholder="e.g. Whole Foods Edgewater" value="${esc(form.store_name)}" />
-
-      <div class="flex gap-12">
-        <div style="flex:1">
-          <span class="label">Store # / ID</span>
-          <input class="field" id="storeId" placeholder="e.g. WF-EDG or 1234" value="${esc(form.store_id)}" />
+      ${selectedLocation ? `
+        <div class="card" style="padding:14px 16px;display:flex;justify-content:space-between;align-items:center;border:2px solid var(--primary,#2563eb);background:var(--primary-light,#eff6ff);margin-bottom:8px;">
+          <div>
+            <div style="font-size:15px;font-weight:600;color:var(--ink);">${escapeHTML(selectedLocation.name)}</div>
+            <div style="font-size:12px;color:var(--ink-2);margin-top:2px;">${escapeHTML([selectedLocation.address,selectedLocation.city,selectedLocation.state].filter(Boolean).join(', '))}</div>
+          </div>
+          <button type="button" id="changeLocBtn" class="btn btn-ghost btn-sm" style="flex-shrink:0;margin-left:12px;">Change</button>
         </div>
-        <div style="flex:1.4">
-          <span class="label">Address (optional)</span>
-          <input class="field" id="storeAddr" placeholder="123 Main St, Edgewater NJ" value="${esc(form.store_address)}" />
+      ` : mxLocs.length ? `
+        <input class="field" id="locSearch" placeholder="Search locations…" value="${esc(locSearchQ)}" autocomplete="off" style="margin-bottom:8px;" />
+        <div id="locCardList" style="max-height:240px;overflow-y:auto;margin-bottom:8px;">
+          ${buildLocCards(locSearchQ ? mxLocs.filter(l => l.name.toLowerCase().includes(locSearchQ.toLowerCase())) : mxLocs)}
         </div>
-      </div>
+      ` : `
+        <input class="field" id="store" placeholder="e.g. Whole Foods Edgewater" value="${esc(form.store_name)}" autocomplete="off" />
+        <div class="flex gap-12" style="margin-bottom:8px;">
+          <div style="flex:1">
+            <span class="label" style="margin-top:6px;">Store # / ID</span>
+            <input class="field" id="storeId" placeholder="e.g. WF-EDG or 1234" value="${esc(form.store_id)}" />
+          </div>
+          <div style="flex:1.4">
+            <span class="label" style="margin-top:6px;">Address (optional)</span>
+            <input class="field" id="storeAddr" placeholder="123 Main St, Edgewater NJ" value="${esc(form.store_address)}" />
+          </div>
+        </div>
+      `}
 
       <div class="flex gap-12">
         <div style="flex:1">
@@ -1199,6 +1312,29 @@ async function renderWoAdd(root) {
           <input class="field" id="sched" type="date" value="${form.scheduled_date}" />
         </div>
       </div>
+
+      ${mxCarts.length ? `
+      <div style="position:relative;margin-bottom:12px;">
+        <button type="button" id="cartDropBtn" style="width:100%;text-align:left;padding:10px 14px;border-radius:8px;border:1.5px solid var(--border,#d1d5db);background:var(--surface,#fff);cursor:pointer;display:flex;justify-content:space-between;align-items:center;font-size:14px;">
+          <span>${selectedCarts.length ? `${selectedCarts.length} cart${selectedCarts.length!==1?'s':''} selected` : 'Select carts…'}</span>
+          <span style="color:var(--muted);font-size:11px;">${cartDropOpen?'▲':'▼'}</span>
+        </button>
+        ${cartDropOpen ? `
+        <div id="cartDropPanel" style="position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:100;background:var(--surface,#fff);border:1.5px solid var(--border,#d1d5db);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.12);max-height:280px;overflow-y:auto;padding:8px;">
+          <input class="field" id="cartSearchInp" placeholder="Search carts…" value="${esc(cartFilterQ)}" style="margin-bottom:8px;" autocomplete="off" />
+          ${(cartFilterQ ? mxCarts.filter(a => a.name.toLowerCase().includes(cartFilterQ.toLowerCase()) || (a.serial_number||'').toLowerCase().includes(cartFilterQ.toLowerCase())) : mxCarts).map(a => {
+            const sel      = selectedCarts.includes(a.mx_id);
+            const inactive = a.status && a.status !== 'ACTIVE';
+            return `<label style="display:flex;align-items:center;gap:10px;padding:8px 6px;border-radius:6px;cursor:${inactive?'not-allowed':'pointer'};opacity:${inactive?'0.5':'1'};${sel?'background:var(--primary-light,#eff6ff);':''}">
+              <input type="checkbox" data-cart-id="${escapeHTML(a.mx_id)}" ${sel?'checked':''} ${inactive?'disabled':''} style="width:16px;height:16px;accent-color:var(--primary,#2563eb);flex-shrink:0;" />
+              <div>
+                <div style="font-size:13px;font-weight:${sel?'600':'400'};">${escapeHTML(a.name)}</div>
+                ${a.serial_number?`<div style="font-size:11px;color:var(--muted);">SN: ${escapeHTML(a.serial_number)}</div>`:''}
+              </div>
+            </label>`;
+          }).join('')}
+        </div>` : ''}
+      </div>` : ''}
 
       <span class="label">Description</span>
       <textarea class="field" id="desc" rows="3" placeholder="e.g. Replace shelf brackets and recalibrate scanners on 12 carts">${esc(form.description)}</textarea>
@@ -1277,18 +1413,128 @@ async function renderWoAdd(root) {
           toast(`Pulled from ${r.source_system} ✓`, 'ok');
         }
         rerender();
+        // v0.83 — Auto-select location + carts if linked in the MX WO.
+        if (r._mx_location_id && mxLocs.length) {
+          const _pullLoc = mxLocs.find(l => l.mx_id === String(r._mx_location_id));
+          if (_pullLoc) {
+            selectedLocation = _pullLoc;
+            form.store_name    = _pullLoc.name;
+            form.store_id      = _pullLoc.mx_id;
+            form.store_address = [_pullLoc.address, _pullLoc.city, _pullLoc.state, _pullLoc.zip].filter(Boolean).join(', ');
+            rerender();
+            await loadCartsForLocation(_pullLoc.mx_id);
+            if (r._mx_asset_ids && r._mx_asset_ids.length && mxCarts.length) {
+              const preIds = r._mx_asset_ids.map(String);
+              selectedCarts = mxCarts.filter(a => preIds.includes(a.mx_id)).map(a => a.mx_id);
+              if (selectedCarts.length) rerender();
+            }
+          }
+        }
       } catch (e) { toast(e.message, 'err'); }
     });
+
+    // v0.83 — Location picker: search filter (updates card list in-place).
+    const locSearchEl = document.getElementById('locSearch');
+    if (locSearchEl) {
+      locSearchEl.addEventListener('input', () => {
+        locSearchQ = locSearchEl.value;
+        const listEl = document.getElementById('locCardList');
+        if (listEl) {
+          listEl.innerHTML = buildLocCards(locSearchQ ? mxLocs.filter(l => l.name.toLowerCase().includes(locSearchQ.toLowerCase())) : mxLocs);
+          bindLocCards();
+        }
+      });
+    }
+
+    // Location card tap — select predefined location (re-attach after every render).
+    bindLocCards();
+
+    // Change location button — return to the picker.
+    const changeLocBtn = document.getElementById('changeLocBtn');
+    if (changeLocBtn) {
+      changeLocBtn.addEventListener('click', () => {
+        selectedLocation = null;
+        form.store_name = ''; form.store_id = ''; form.store_address = '';
+        mxCarts = []; selectedCarts = []; cartDropOpen = false; locSearchQ = '';
+        rerender();
+      });
+    }
+
+    // Cart dropdown — toggle open/close.
+    const cartDropBtn = document.getElementById('cartDropBtn');
+    if (cartDropBtn) {
+      cartDropBtn.addEventListener('click', () => { cartDropOpen = !cartDropOpen; cartFilterQ = ''; rerender(); });
+    }
+
+    // Cart panel: search filter (in-place) + checkbox change (in-place).
+    const cartDropPanel = document.getElementById('cartDropPanel');
+    if (cartDropPanel) {
+      const cartSearchInp = document.getElementById('cartSearchInp');
+      if (cartSearchInp) {
+        cartSearchInp.addEventListener('input', () => {
+          cartFilterQ = cartSearchInp.value;
+          const q = cartFilterQ.toLowerCase();
+          const filtered = q
+            ? mxCarts.filter(a => a.name.toLowerCase().includes(q) || (a.serial_number||'').toLowerCase().includes(q))
+            : mxCarts;
+          cartDropPanel.querySelectorAll('label, .cart-empty').forEach(el => el.remove());
+          if (filtered.length) {
+            filtered.forEach(a => {
+              const sel = selectedCarts.includes(a.mx_id);
+              const inactive = a.status && a.status !== 'ACTIVE';
+              const lbl = document.createElement('label');
+              lbl.style.cssText = `display:flex;align-items:center;gap:10px;padding:8px 6px;border-radius:6px;cursor:${inactive?'not-allowed':'pointer'};opacity:${inactive?'0.5':'1'};${sel?'background:var(--primary-light,#eff6ff);':''}`;
+              lbl.innerHTML = `<input type="checkbox" data-cart-id="${escapeHTML(a.mx_id)}" ${sel?'checked':''} ${inactive?'disabled':''} style="width:16px;height:16px;accent-color:var(--primary,#2563eb);flex-shrink:0;"/><div><div style="font-size:13px;font-weight:${sel?'600':'400'};">${escapeHTML(a.name)}</div>${a.serial_number?`<div style="font-size:11px;color:var(--muted);">SN: ${escapeHTML(a.serial_number)}</div>`:''}</div>`;
+              cartDropPanel.appendChild(lbl);
+            });
+          } else {
+            const empty = document.createElement('div');
+            empty.className = 'cart-empty';
+            empty.style.cssText = 'padding:12px;color:var(--muted);font-size:13px;text-align:center;';
+            empty.textContent = 'No carts match';
+            cartDropPanel.appendChild(empty);
+          }
+        });
+      }
+      cartDropPanel.addEventListener('change', e => {
+        const cb = e.target.closest('input[type="checkbox"][data-cart-id]');
+        if (!cb) return;
+        const id = cb.dataset.cartId;
+        if (cb.checked) { if (!selectedCarts.includes(id)) selectedCarts.push(id); }
+        else { selectedCarts = selectedCarts.filter(x => x !== id); }
+        const lbl = cb.closest('label');
+        if (lbl) lbl.style.background = cb.checked ? 'var(--primary-light,#eff6ff)' : '';
+        const btn = document.getElementById('cartDropBtn');
+        if (btn) { const sp = btn.querySelector('span:first-child'); if (sp) sp.textContent = selectedCarts.length ? `${selectedCarts.length} cart${selectedCarts.length!==1?'s':''} selected` : 'Select carts…'; }
+        const cartsEl = $('#carts');
+        if (cartsEl && selectedCarts.length > 0) cartsEl.value = selectedCarts.length;
+      });
+    }
 
     const grab = () => {
       form.ticket_id      = $('#ticket').value.trim();
       form.title          = $('#title')?.value.trim() || '';
-      form.store_name     = $('#store').value.trim();
-      form.store_id       = $('#storeId')?.value.trim() || '';
-      form.store_address  = $('#storeAddr')?.value.trim() || '';
+      if (selectedLocation) {
+        form.store_name    = selectedLocation.name;
+        form.store_id      = selectedLocation.mx_id;
+        form.store_address = [selectedLocation.address, selectedLocation.city, selectedLocation.state, selectedLocation.zip].filter(Boolean).join(', ');
+      } else {
+        form.store_name    = $('#store')?.value.trim() || '';
+        form.store_id      = $('#storeId')?.value.trim() || '';
+        form.store_address = $('#storeAddr')?.value.trim() || '';
+      }
       form.cart_count     = $('#carts').value;
       form.scheduled_date = $('#sched').value;
       form.description    = $('#desc').value;
+      // Append selected cart names to description so they're recorded on the WO.
+      if (selectedCarts.length) {
+        const names    = selectedCarts.map(id => mxCarts.find(a => a.mx_id === id)?.name || id);
+        const cartNote = 'Carts: ' + names.join(', ');
+        form.description = form.description ? form.description + '\n' + cartNote : cartNote;
+        // Also update cart_count to match selection if tech left it at default
+        if (!form.cart_count || Number(form.cart_count) === 0)
+          form.cart_count = selectedCarts.length;
+      }
     };
 
     $('#cancelBtn').addEventListener('click', () => goto('woPick'));
@@ -5347,6 +5593,446 @@ async function renderAdmin(root) {
     try { await api(`/admin/users/${b.dataset.enableUser}`, { method: 'PATCH', body: { status: 'active' } }); toast('User re-enabled ✓', 'ok'); goto('admin'); }
     catch (e) { toast(e.message, 'err'); }
   }));
+
+  // ── Data cleanup section (v0.82) ─────────────────────────────────────────
+  // Tabbed panel: Invoices | Work Orders. Lazy-loads on demand.
+  const cleanupSection = document.createElement('div');
+  cleanupSection.id = 'cleanupSection';
+  root.appendChild(cleanupSection);
+  renderCleanupPanel(cleanupSection);
+}
+
+// v0.82 — Tabbed data-cleanup panel (Invoices | Work Orders) for admin view.
+// Rendered below the user list. Each tab lazy-loads its own dataset.
+function renderCleanupPanel(container) {
+  container.innerHTML = `
+    <div class="section-title" style="margin-top: 28px;">
+      Data cleanup
+      <span class="meta" style="font-weight: 400; font-size: 12px; margin-left: 8px;">
+        Bulk-delete test / junk data before go-live. Protected records (approved invoices,
+        WOs with approved lines) cannot be deleted.
+      </span>
+    </div>
+    <div class="card" style="padding: 0; overflow: hidden;">
+      <div style="display: flex; border-bottom: 1px solid var(--border);">
+        <button class="cleanup-tab-btn active" data-tab="invoices"
+                style="flex: 1; padding: 12px; border: none; background: none; cursor: pointer;
+                       font-weight: 600; font-size: 13px; border-bottom: 2px solid var(--primary);">
+          🧾 Invoices
+        </button>
+        <button class="cleanup-tab-btn" data-tab="workorders"
+                style="flex: 1; padding: 12px; border: none; background: none; cursor: pointer;
+                       font-size: 13px; color: var(--text-muted); border-bottom: 2px solid transparent;">
+          📋 Work Orders
+        </button>
+      </div>
+      <div id="cleanupTabBody" style="padding: 16px;"></div>
+    </div>
+  `;
+
+  let activeTab = 'invoices';
+  const tabBody = container.querySelector('#cleanupTabBody');
+
+  function switchTab(tab) {
+    activeTab = tab;
+    container.querySelectorAll('.cleanup-tab-btn').forEach(btn => {
+      const on = btn.dataset.tab === tab;
+      btn.style.fontWeight    = on ? '600' : '400';
+      btn.style.color         = on ? '' : 'var(--text-muted)';
+      btn.style.borderBottom  = on ? '2px solid var(--primary)' : '2px solid transparent';
+    });
+    tabBody.innerHTML = '';
+    if (tab === 'invoices')   renderInvoiceCleanup(tabBody);
+    else                      renderWOCleanup(tabBody);
+  }
+
+  container.querySelectorAll('.cleanup-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  });
+
+  switchTab('invoices');
+}
+
+// ── Invoice cleanup tab ───────────────────────────────────────────────────────
+async function renderInvoiceCleanup(container) {
+  const PROTECTED = new Set(['approved_ops','approved_sr','queued_ap','sent_ap']);
+  const STATUS_LABEL = {
+    draft: 'Draft', submitted: 'Submitted', rejected: 'Rejected',
+    approved_ops: 'Approved (Ops)', approved_sr: 'Approved (Sr)',
+    queued_ap: 'Queued AP', sent_ap: 'Sent AP',
+  };
+
+  container.innerHTML = `
+    <div class="section-title" style="margin-top: 28px;">
+      Invoice cleanup
+      <span class="meta" style="font-weight: 400; font-size: 12px; margin-left: 8px;">
+        Delete test or junk invoices. Approved / sent invoices are protected.
+      </span>
+    </div>
+    <div class="card" id="cleanupCard">
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px;">
+        <select id="cleanupStatusFilter" class="inp" style="width: auto; min-width: 140px;">
+          <option value="">All statuses</option>
+          <option value="draft" selected>Draft only</option>
+          <option value="submitted">Submitted only</option>
+          <option value="rejected">Rejected only</option>
+        </select>
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px;">
+          <input type="checkbox" id="cleanupEmptyOnly"> Empty (no line items)
+        </label>
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px;"
+               title="Allow deleting approved and sent invoices. Use for pre-launch resets only.">
+          <input type="checkbox" id="cleanupForce">
+          <span style="color: var(--err-fg, #c00);">⚠ Include approved/sent</span>
+        </label>
+        <span style="flex: 1;"></span>
+        <button class="btn btn-danger btn-sm" id="cleanupDeleteBtn" disabled style="min-width: 130px;">
+          🗑 Delete selected (0)
+        </button>
+      </div>
+      <div id="cleanupTableWrap">
+        <div class="empty" style="padding: 20px 0;">Loading invoices…</div>
+      </div>
+    </div>
+  `;
+
+  let allInvoices = [];
+  let selected = new Set();
+
+  function isForced()  { return !!$('#cleanupForce')?.checked; }
+  function isLocked(inv) { return !isForced() && PROTECTED.has(inv.status); }
+
+  function currentFilter() {
+    const status = $('#cleanupStatusFilter').value;
+    const emptyOnly = $('#cleanupEmptyOnly').checked;
+    return allInvoices.filter(inv => {
+      if (status && inv.status !== status) return false;
+      if (emptyOnly && (inv.time_entry_count + inv.expense_count) > 0) return false;
+      return true;
+    });
+  }
+
+  function updateDeleteBtn() {
+    const btn = $('#cleanupDeleteBtn');
+    if (!btn) return;
+    const n = [...selected].filter(id => !isLocked(allInvoices.find(i => i.id === id) || {})).length;
+    btn.disabled = n === 0;
+    btn.textContent = `🗑 Delete selected (${n})`;
+  }
+
+  function renderTable() {
+    const wrap = $('#cleanupTableWrap');
+    if (!wrap) return;
+    const rows = currentFilter();
+    if (rows.length === 0) {
+      wrap.innerHTML = `<div class="empty" style="padding: 16px 0;">No invoices match the current filter.</div>`;
+      updateDeleteBtn();
+      return;
+    }
+    const allEligible = rows.filter(inv => !isLocked(inv));
+    const allChecked  = allEligible.length > 0 && allEligible.every(inv => selected.has(inv.id));
+    wrap.innerHTML = `
+      <table class="data-table" style="width: 100%; font-size: 13px;">
+        <thead>
+          <tr>
+            <th style="width: 32px;">
+              <input type="checkbox" id="cleanupSelectAll" ${allChecked ? 'checked' : ''}
+                     ${allEligible.length === 0 ? 'disabled' : ''}>
+            </th>
+            <th>ID</th>
+            <th>Tech</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Time entries</th>
+            <th>Expenses</th>
+            <th>Attachments</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(inv => {
+            const locked = isLocked(inv);
+            const chk    = selected.has(inv.id);
+            const date   = inv.created_at ? new Date(inv.created_at).toLocaleDateString() : '—';
+            return `
+              <tr style="${chk ? 'background: var(--sel-bg, #f0f4ff);' : ''}${locked ? 'opacity: 0.55;' : ''}">
+                <td>
+                  <input type="checkbox" data-cleanup-id="${inv.id}"
+                    ${chk ? 'checked' : ''} ${locked ? 'disabled title="Protected — enable \'Include approved/sent\' to unlock"' : ''}>
+                </td>
+                <td><code>#${inv.id}</code></td>
+                <td>${escapeHTML(inv.tech_name || '—')}</td>
+                <td>
+                  <span style="font-size: 11px; padding: 2px 7px; border-radius: 8px;
+                               background: ${locked ? 'var(--ok-bg,#e8f5e9)' : inv.status === 'draft' ? 'var(--warn-bg,#fef4e7)' : 'var(--chip-bg,#f0f0f0)'};
+                               color: ${locked ? 'var(--ok-fg,#2e7d32)' : inv.status === 'draft' ? 'var(--warn-fg,#b56400)' : 'var(--text-muted,#666)'};">
+                    ${PROTECTED.has(inv.status) && !isForced() ? '🔒 ' : ''}${STATUS_LABEL[inv.status] || inv.status}
+                  </span>
+                </td>
+                <td>${date}</td>
+                <td style="text-align: center;">${inv.time_entry_count}</td>
+                <td style="text-align: center;">${inv.expense_count}</td>
+                <td style="text-align: center;">${inv.attachment_count}</td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <div class="meta" style="margin-top: 8px; font-size: 12px;">
+        ${rows.length} shown · ${allEligible.length} eligible · ${[...selected].filter(id => !isLocked(allInvoices.find(i => i.id === id) || {})).length} selected
+      </div>
+    `;
+
+    // Wire up row checkboxes
+    $$('[data-cleanup-id]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const id = Number(cb.dataset.cleanupId);
+        cb.checked ? selected.add(id) : selected.delete(id);
+        renderTable();
+        updateDeleteBtn();
+      });
+    });
+
+    // Select-all
+    $('#cleanupSelectAll')?.addEventListener('change', e => {
+      allEligible.forEach(inv => e.target.checked ? selected.add(inv.id) : selected.delete(inv.id));
+      renderTable();
+      updateDeleteBtn();
+    });
+
+    updateDeleteBtn();
+  }
+
+  // Load invoices
+  try {
+    allInvoices = await api('/admin/invoices');
+  } catch (e) {
+    $('#cleanupTableWrap').innerHTML = `<div class="empty err">Failed to load invoices: ${escapeHTML(e.message)}</div>`;
+    return;
+  }
+
+  renderTable();
+
+  // Filter controls
+  $('#cleanupStatusFilter')?.addEventListener('change', () => { selected.clear(); renderTable(); });
+  $('#cleanupEmptyOnly')?.addEventListener('change', () => { selected.clear(); renderTable(); });
+  $('#cleanupForce')?.addEventListener('change', () => { selected.clear(); renderTable(); });
+
+  // Delete button
+  $('#cleanupDeleteBtn')?.addEventListener('click', async () => {
+    const force = isForced();
+    const eligible = [...selected].filter(id => !isLocked(allInvoices.find(i => i.id === id) || {}));
+    if (eligible.length === 0) return;
+
+    const hasLines = eligible.some(id => {
+      const inv = allInvoices.find(i => i.id === id);
+      return inv && (inv.time_entry_count + inv.expense_count) > 0;
+    });
+    const hasProtected = force && eligible.some(id => PROTECTED.has(allInvoices.find(i => i.id === id)?.status));
+    const msg = `Delete ${eligible.length} invoice(s)?` +
+      (hasProtected ? `\n\n⚠ This includes approved or sent invoices.` : '') +
+      (hasLines ? `\n\nSome have logged time or expenses — those line items will be unlinked but not deleted.` : '') +
+      `\n\nThis cannot be undone.`;
+    if (!confirm(msg)) return;
+
+    try {
+      const { deleted } = await api('/admin/invoices', { method: 'DELETE', body: { ids: eligible, force } });
+      toast(`Deleted ${deleted} invoice(s) ✓`, 'ok');
+      selected.clear();
+      allInvoices = await api('/admin/invoices');
+      renderTable();
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  });
+}
+
+// ── Work-order cleanup tab (v0.82) ────────────────────────────────────────────
+async function renderWOCleanup(container) {
+  const WO_STATUS_LABEL = {
+    open: 'Open', in_progress: 'In Progress',
+    completed: 'Completed', cancelled: 'Cancelled',
+  };
+
+  container.innerHTML = `
+    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px;">
+      <select id="woStatusFilter" class="inp" style="width: auto; min-width: 140px;">
+        <option value="">All statuses</option>
+        <option value="open">Open</option>
+        <option value="in_progress">In Progress</option>
+        <option value="completed">Completed</option>
+        <option value="cancelled">Cancelled</option>
+      </select>
+      <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px;">
+        <input type="checkbox" id="woEmptyOnly"> Empty (no time or expenses)
+      </label>
+      <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px;">
+        <input type="checkbox" id="woNoInvoiceOnly"> No linked invoice
+      </label>
+      <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px;"
+             title="Allow deleting WOs that have approved invoice lines. Use for pre-launch resets only.">
+        <input type="checkbox" id="woForce">
+        <span style="color: var(--err-fg, #c00);">⚠ Include approved</span>
+      </label>
+      <span style="flex: 1;"></span>
+      <button class="btn btn-danger btn-sm" id="woDeleteBtn" disabled style="min-width: 150px;">
+        🗑 Delete selected (0)
+      </button>
+    </div>
+    <div id="woTableWrap">
+      <div class="empty" style="padding: 20px 0;">Loading work orders…</div>
+    </div>
+  `;
+
+  let allWOs = [];
+  let selected = new Set();
+
+  function currentFilter() {
+    const status    = $('#woStatusFilter').value;
+    const emptyOnly = $('#woEmptyOnly').checked;
+    const noInv     = $('#woNoInvoiceOnly').checked;
+    return allWOs.filter(wo => {
+      if (status && wo.status !== status) return false;
+      if (emptyOnly && (wo.time_entry_count + wo.expense_count) > 0) return false;
+      if (noInv && wo.has_approved_invoice) return false;
+      return true;
+    });
+  }
+
+  function isWOForced()    { return !!$('#woForce')?.checked; }
+  function isWOLocked(wo)  { return !isWOForced() && !!wo.has_approved_invoice; }
+
+  function updateDeleteBtn() {
+    const btn = $('#woDeleteBtn');
+    if (!btn) return;
+    const n = [...selected].filter(id => !isWOLocked(allWOs.find(w => w.id === id) || {})).length;
+    btn.disabled = n === 0;
+    btn.textContent = `🗑 Delete selected (${n})`;
+  }
+
+  function renderTable() {
+    const wrap = $('#woTableWrap');
+    if (!wrap) return;
+    const rows = currentFilter();
+    if (rows.length === 0) {
+      wrap.innerHTML = `<div class="empty" style="padding: 16px 0;">No work orders match the current filter.</div>`;
+      updateDeleteBtn();
+      return;
+    }
+    const allEligible = rows.filter(wo => !wo.has_approved_invoice);
+    const allChecked  = allEligible.length > 0 && allEligible.every(wo => selected.has(wo.id));
+
+    wrap.innerHTML = `
+      <table class="data-table" style="width: 100%; font-size: 13px;">
+        <thead>
+          <tr>
+            <th style="width: 32px;">
+              <input type="checkbox" id="woSelectAll" ${allChecked ? 'checked' : ''}
+                     ${allEligible.length === 0 ? 'disabled' : ''}>
+            </th>
+            <th>WO #</th>
+            <th>Title / Store</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Time</th>
+            <th>Expenses</th>
+            <th>Attachments</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(wo => {
+            const locked = isWOLocked(wo);
+            const chk    = selected.has(wo.id);
+            const date   = wo.created_at ? new Date(wo.created_at).toLocaleDateString() : '—';
+            const title  = wo.title || wo.store_name || '(untitled)';
+            return `
+              <tr style="${chk ? 'background: var(--sel-bg, #f0f4ff);' : ''}${locked ? 'opacity: 0.55;' : ''}">
+                <td>
+                  <input type="checkbox" data-wo-cleanup-id="${wo.id}"
+                    ${chk ? 'checked' : ''} ${locked ? 'disabled title="Has approved invoice — enable \'Include approved\' to unlock"' : ''}>
+                </td>
+                <td><code>${escapeHTML(wo.external_id || String(wo.id))}</code></td>
+                <td style="max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
+                    title="${escapeHTML(title)}">
+                  ${escapeHTML(title)}
+                  ${wo.store_name && wo.title ? `<div class="meta" style="font-size: 11px;">${escapeHTML(wo.store_name)}</div>` : ''}
+                </td>
+                <td>
+                  <span style="font-size: 11px; padding: 2px 7px; border-radius: 8px;
+                               background: ${wo.status === 'completed' ? 'var(--ok-bg,#e8f5e9)' : wo.status === 'open' ? 'var(--warn-bg,#fef4e7)' : 'var(--chip-bg,#f0f0f0)'};
+                               color: ${wo.status === 'completed' ? 'var(--ok-fg,#2e7d32)' : wo.status === 'open' ? 'var(--warn-fg,#b56400)' : 'var(--text-muted,#666)'};">
+                    ${wo.has_approved_invoice && !isWOForced() ? '🔒 ' : ''}${WO_STATUS_LABEL[wo.status] || wo.status}
+                  </span>
+                </td>
+                <td>${date}</td>
+                <td style="text-align: center;">${wo.time_entry_count}</td>
+                <td style="text-align: center;">${wo.expense_count}</td>
+                <td style="text-align: center;">${wo.attachment_count}</td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <div class="meta" style="margin-top: 8px; font-size: 12px;">
+        ${rows.length} shown · ${allEligible.length} eligible · ${[...selected].filter(id => !isWOLocked(allWOs.find(w => w.id === id) || {})).length} selected
+      </div>
+    `;
+
+    $$('[data-wo-cleanup-id]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const id = Number(cb.dataset.woCleanupId);
+        cb.checked ? selected.add(id) : selected.delete(id);
+        renderTable();
+        updateDeleteBtn();
+      });
+    });
+
+    $('#woSelectAll')?.addEventListener('change', e => {
+      allEligible.forEach(wo => e.target.checked ? selected.add(wo.id) : selected.delete(wo.id));
+      renderTable();
+      updateDeleteBtn();
+    });
+
+    updateDeleteBtn();
+  }
+
+  try {
+    allWOs = await api('/admin/work-orders');
+  } catch (e) {
+    $('#woTableWrap').innerHTML = `<div class="empty err">Failed to load work orders: ${escapeHTML(e.message)}</div>`;
+    return;
+  }
+
+  renderTable();
+
+  $('#woStatusFilter')?.addEventListener('change', () => { selected.clear(); renderTable(); });
+  $('#woEmptyOnly')?.addEventListener('change', () => { selected.clear(); renderTable(); });
+  $('#woNoInvoiceOnly')?.addEventListener('change', () => { selected.clear(); renderTable(); });
+  $('#woForce')?.addEventListener('change', () => { selected.clear(); renderTable(); });
+
+  $('#woDeleteBtn')?.addEventListener('click', async () => {
+    const force = isWOForced();
+    const eligible = [...selected].filter(id => !isWOLocked(allWOs.find(w => w.id === id) || {}));
+    if (eligible.length === 0) return;
+
+    const hasLines = eligible.some(id => {
+      const wo = allWOs.find(w => w.id === id);
+      return wo && (wo.time_entry_count + wo.expense_count) > 0;
+    });
+    const hasApproved = force && eligible.some(id => allWOs.find(w => w.id === id)?.has_approved_invoice);
+    const msg = `Delete ${eligible.length} work order(s)?` +
+      (hasApproved ? `\n\n⚠ This includes work orders with approved invoice lines.` : '') +
+      (hasLines ? `\n\nAll time entries and expenses on these work orders will be permanently deleted.` : '') +
+      `\n\nThis cannot be undone.`;
+    if (!confirm(msg)) return;
+
+    try {
+      const { deleted } = await api('/admin/work-orders', { method: 'DELETE', body: { ids: eligible, force } });
+      toast(`Deleted ${deleted} work order(s) ✓`, 'ok');
+      selected.clear();
+      allWOs = await api('/admin/work-orders');
+      renderTable();
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  });
 }
 
 function openAddUserSheet() {
@@ -7179,6 +7865,143 @@ async function renderThirdParty(root) {
     const row = list.find(x => x.id === id);
     if (row) openVendorEditSheet(row, () => renderThirdParty(root));
   }));
+}
+
+// ============================================================
+// v0.83 — Locations & Assets (MaintainX catalog)
+// ============================================================
+async function renderLocations(root) {
+  root.innerHTML = `<div class="page-loading">Loading locations…</div>`;
+  let data, syncedAt;
+  try {
+    const r = await api('/mx/locations');
+    data     = r.locations || [];
+    syncedAt = r.synced_at ? new Date(r.synced_at).toLocaleString() : null;
+  } catch (e) {
+    root.innerHTML = alertHTML('err', '!', escapeHTML(e.message)); return;
+  }
+
+  let selectedLocId = null; // currently expanded location
+
+  function fmt(loc) {
+    const parts = [loc.city, loc.state].filter(Boolean).join(', ');
+    return parts || loc.address || '';
+  }
+
+  async function renderAssets(locId, container) {
+    container.innerHTML = `<div style="padding:8px 16px;color:var(--text-secondary);font-size:13px;">Loading assets…</div>`;
+    try {
+      const r   = await api(`/mx/assets?location_mx_id=${encodeURIComponent(locId)}`);
+      const assets = r.assets || [];
+      if (!assets.length) {
+        container.innerHTML = `<div style="padding:8px 16px;color:var(--text-secondary);font-size:13px;">No assets at this location.</div>`;
+        return;
+      }
+      const active   = assets.filter(a => a.status !== 'INACTIVE' && a.status !== 'ARCHIVED');
+      const inactive = assets.filter(a => a.status === 'INACTIVE' || a.status === 'ARCHIVED');
+      const badge = (a) => {
+        if (a.status === 'ACTIVE' || !a.status) return '';
+        return `<span style="font-size:11px;background:var(--chip-bg,#f3f4f6);color:var(--text-secondary);border-radius:4px;padding:1px 6px;margin-left:6px;">${a.status}</span>`;
+      };
+      const row = (a) => `
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-bottom:1px solid var(--border-light,#f0f0f0);">
+          <svg style="flex-shrink:0;color:var(--text-secondary)" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span style="flex:1;font-size:14px;">${escapeHTML(a.name)}${badge(a)}</span>
+          ${a.serial_number ? `<span style="font-size:12px;color:var(--text-secondary);">SN: ${escapeHTML(a.serial_number)}</span>` : ''}
+          ${a.category ? `<span style="font-size:12px;color:var(--text-secondary);">${escapeHTML(a.category)}</span>` : ''}
+        </div>`;
+      container.innerHTML = active.map(row).join('') + inactive.map(row).join('');
+    } catch (e) {
+      container.innerHTML = `<div style="padding:8px 16px;color:var(--danger,#d32f2f);font-size:13px;">${escapeHTML(e.message)}</div>`;
+    }
+  }
+
+  function draw(locs, q) {
+    const filtered = q ? locs.filter(l => l.name.toLowerCase().includes(q.toLowerCase()) ||
+                                          (l.city||'').toLowerCase().includes(q.toLowerCase())) : locs;
+    const total = locs.length;
+    const body  = filtered.length === 0
+      ? `<div style="padding:32px;text-align:center;color:var(--text-secondary);">No locations found</div>`
+      : filtered.map(loc => {
+          const isOpen = loc.mx_id === selectedLocId;
+          return `
+            <div class="loc-row${isOpen?' loc-open':''}" data-loc="${escapeHTML(loc.mx_id)}"
+                 style="border-bottom:1px solid var(--border-light,#f0f0f0);">
+              <div class="loc-header" style="display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;">
+                <svg style="flex-shrink:0;color:var(--primary,#2563eb)" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+                <div style="flex:1;min-width:0;">
+                  <div style="font-weight:600;font-size:14px;">${escapeHTML(loc.name)}</div>
+                  ${fmt(loc) ? `<div style="font-size:12px;color:var(--text-secondary);">${escapeHTML(fmt(loc))}</div>` : ''}
+                </div>
+                <svg class="loc-chevron" style="flex-shrink:0;color:var(--text-secondary);transition:transform .2s;${isOpen?'transform:rotate(90deg)':''}" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+              </div>
+              <div class="loc-assets" style="display:${isOpen?'block':'none'};background:var(--surface-alt,#fafafa);"></div>
+            </div>`;
+        }).join('');
+
+    root.innerHTML = `
+      <div style="padding:16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border,#e5e7eb);">
+        <h2 style="margin:0;font-size:18px;font-weight:700;flex:1;">Locations &amp; Assets</h2>
+        <button id="locSyncBtn" class="btn btn-sm btn-secondary" style="font-size:13px;">↻ Sync from MaintainX</button>
+      </div>
+      <div style="padding:10px 16px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border-light,#f0f0f0);">
+        <input id="locSearch" type="search" placeholder="Search locations…" value="${escapeHTML(q||'')}"
+               style="flex:1;padding:6px 10px;border:1px solid var(--border,#e5e7eb);border-radius:6px;font-size:13px;">
+        <span style="font-size:12px;color:var(--text-secondary);white-space:nowrap;">${total} location${total!==1?'s':''}</span>
+      </div>
+      ${syncedAt ? `<div style="padding:4px 16px;font-size:11px;color:var(--text-secondary);">Last synced: ${escapeHTML(syncedAt)}</div>` : ''}
+      <div id="locList">${body}</div>`;
+
+    // Search
+    $('#locSearch').addEventListener('input', (e) => draw(locs, e.target.value));
+
+    // Sync button
+    $('#locSyncBtn').addEventListener('click', async (btn) => {
+      const b = $('#locSyncBtn');
+      b.disabled = true; b.textContent = 'Syncing…';
+      try {
+        const r = await api('/mx/sync-catalog', { method: 'POST' });
+        syncedAt = new Date().toLocaleString();
+        // Reload locations after sync
+        const r2 = await api('/mx/locations');
+        data = r2.locations || [];
+        selectedLocId = null;
+        draw(data, '');
+        alert(`Synced ${r.stats?.locations||0} locations, ${r.stats?.assets||0} assets.`);
+      } catch (e) {
+        alert('Sync failed: ' + e.message);
+        b.disabled = false; b.textContent = '↻ Sync from MaintainX';
+      }
+    });
+
+    // Location expand/collapse
+    $$('.loc-header').forEach(h => h.addEventListener('click', async () => {
+      const row   = h.closest('.loc-row');
+      const locId = row.dataset.loc;
+      const assetsDiv = row.querySelector('.loc-assets');
+      if (selectedLocId === locId) {
+        // Collapse
+        selectedLocId = null;
+        row.classList.remove('loc-open');
+        assetsDiv.style.display = 'none';
+        row.querySelector('.loc-chevron').style.transform = '';
+      } else {
+        // Close any open row
+        $$('.loc-row.loc-open').forEach(r2 => {
+          r2.classList.remove('loc-open');
+          r2.querySelector('.loc-assets').style.display = 'none';
+          r2.querySelector('.loc-chevron').style.transform = '';
+        });
+        selectedLocId = locId;
+        row.classList.add('loc-open');
+        assetsDiv.style.display = 'block';
+        row.querySelector('.loc-chevron').style.transform = 'rotate(90deg)';
+        await renderAssets(locId, assetsDiv);
+      }
+    }));
+  }
+
+  draw(data, '');
 }
 
 async function renderDashboard(root) {

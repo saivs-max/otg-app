@@ -129,7 +129,14 @@ app.listen(PORT, () => {
     try {
       await syncAllUsersWithOrgKey(db);
     } catch (e) {
-      console.error('[MaintainX] Scheduled sync error:', e.message);
+      console.error('[MaintainX] Scheduled WO sync error:', e.message);
+    }
+    // v0.83 — Also sync the location + asset catalog on the daily run.
+    try {
+      const { syncCatalog } = require('./lib/maintainx/sync');
+      await syncCatalog(db);
+    } catch (e) {
+      console.error('[MaintainX] Scheduled catalog sync error:', e.message);
     }
     // Schedule next run exactly 24 hours from now.
     setTimeout(runSync, 24 * 60 * 60 * 1000);

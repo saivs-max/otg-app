@@ -20,7 +20,7 @@ const { makeClient } = require('../lib/maintainx/client');
 const {
   syncForUser, syncSingleWorkOrder, loadIntegration,
   syncForUserWithOrgKey, syncSingleWorkOrderWithOrgKey,
-  getOrgKey,
+  getOrgKey, syncCatalog,
 } = require('../lib/maintainx/sync');
 
 const DEFAULT_MX_ORG_ID = '477835';
@@ -155,6 +155,72 @@ module.exports = (db) => {
     db.prepare("DELETE FROM user_integrations WHERE user_id = ? AND provider = 'maintainx'").run(u.id);
     logAudit(db, { entity_type: 'user_integrations', entity_id: u.id, user_id: u.id, action: 'maintainx_disconnect' });
     res.json({ ok: true, connected: false });
+  });
+
+  // ─── v0.83 — Catalog (locations + assets) ────────────────────────────────
+  // All routes below are manager-only.
+
+  function requireManager(req, res) {
+    const u = requireUser(req, res); if (!u) return null;
+    if (!['ops_manager','sr_manager','pm'].includes(u.role)) {
+      res.status(403).json({ error: 'managers only' }); return null;
+    }
+    return u;
+  }
+
+  // GET /mx/locations?q=&parent_mx_id=
+  // Returns all synced locations. Readable by ALL authenticated users so
+  // technicians can pick a predefined location when creating a work order.
+  router.get('/mx/locations', (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    const q          = (req.query.q || '').trim();
+    const parentId   = req.query.parent_mx_id || null;
+    let sql = 'SELECT * FROM mx_locations';
+    const params = [];
+    const where = [];
+    if (q)        { where.push('name LIKE ?'); params.push(`%${q}%`); }
+    if (parentId) { where.push('parent_mx_id = ?'); params.push(parentId); }
+    if (where.length) sql += ' WHERE ' + where.join(' AND ');
+    sql += ' ORDER BY name';
+    const rows = db.prepare(sql).all(...params);
+    const synced_at = db.prepare("SELECT value FROM settings WHERE key = 'mx_catalog_synced_at'").get()?.value || null;
+    res.json({ locations: rows, synced_at });
+  });
+
+  // GET /mx/assets?location_mx_id=&q=&status=
+  // Returns assets for a location (or all). Readable by ALL authenticated users
+  // so technicians can pick predefined carts when creating a work order.
+  router.get('/mx/assets', (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    const q          = (req.query.q || '').trim();
+    const locationId = req.query.location_mx_id || null;
+    const status     = req.query.status || null;
+    let sql = 'SELECT * FROM mx_assets';
+    const params = [];
+    const where = [];
+    if (locationId) { where.push('location_mx_id = ?'); params.push(locationId); }
+    if (status)     { where.push('status = ?'); params.push(status.toUpperCase()); }
+    if (q)          { where.push('(name LIKE ? OR serial_number LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
+    if (where.length) sql += ' WHERE ' + where.join(' AND ');
+    sql += ' ORDER BY name';
+    const rows = db.prepare(sql).all(...params);
+    res.json({ assets: rows });
+  });
+
+  // POST /mx/sync-catalog
+  // On-demand sync of locations + assets from MaintainX. Manager-only.
+  router.post('/mx/sync-catalog', async (req, res) => {
+    const u = requireManager(req, res); if (!u) return;
+    try {
+      const stats = await syncCatalog(db);
+      logAudit(db, {
+        entity_type: 'settings', entity_id: 0, user_id: u.id,
+        action: 'mx_catalog_sync', details: stats,
+      });
+      res.json({ ok: true, stats });
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
   });
 
   return router;

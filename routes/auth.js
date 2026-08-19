@@ -379,5 +379,191 @@ module.exports = (db) => {
     res.json({ ok: true });
   });
 
+  // ── Invoice cleanup (v0.82) ───────────────────────────────────────────────
+  // PM / Sr Mgr can list and bulk-delete invoices from the admin panel.
+  // Protected statuses (approved_ops / approved_sr / queued_ap / sent_ap) are
+  // never deleted — only draft, submitted, and rejected invoices are eligible.
+
+  // GET /admin/invoices — full list with line-item counts for the cleanup UI
+  router.get('/admin/invoices', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const rows = db.prepare(`
+      SELECT i.id, i.status, i.invoice_type, i.created_at, i.submitted_at,
+             u.name AS tech_name,
+             (SELECT COUNT(*) FROM time_entries te WHERE te.invoice_id = i.id) AS time_entry_count,
+             (SELECT COUNT(*) FROM expenses e WHERE e.invoice_id = i.id)        AS expense_count,
+             (SELECT COUNT(*) FROM attachments a WHERE a.invoice_id = i.id)     AS attachment_count
+      FROM invoices i
+      JOIN users u ON u.id = i.user_id
+      ORDER BY i.created_at DESC
+    `).all();
+    res.json(rows);
+  });
+
+  // DELETE /admin/invoices — safe bulk hard-delete by ID list.
+  // Handles FK child rows in the correct order:
+  //   wo_addition_requests (NOT NULL FK) → deleted
+  //   time_entries / expenses            → invoice_id NULLed (they belong to WOs)
+  //   attachments / notifications        → deleted
+  //   invoices                           → deleted
+  router.delete('/admin/invoices', (req, res) => {
+    const me = requireAdmin(req, res); if (!me) return;
+    const ids = req.body?.ids;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids array required' });
+    }
+    const numIds = [...new Set(ids.map(Number).filter(n => Number.isFinite(n) && n > 0))];
+    if (numIds.length === 0) return res.status(400).json({ error: 'no valid ids' });
+    const ph = numIds.map(() => '?').join(',');
+
+    // v0.82 — force:true lets admins delete approved/sent invoices (pre-launch
+    // reset). Without it, approved/sent invoices are refused.
+    const force = req.body?.force === true;
+    if (!force) {
+      const PROTECTED = ['approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'];
+      const blocked = db.prepare(
+        `SELECT id, status FROM invoices WHERE id IN (${ph}) AND status IN (${PROTECTED.map(() => '?').join(',')})`
+      ).all(...numIds, ...PROTECTED);
+      if (blocked.length > 0) {
+        return res.status(400).json({
+          error: `Cannot delete ${blocked.length} invoice(s) with approved/sent status (pass force:true to override)`,
+          blocked_ids: blocked.map(r => r.id),
+        });
+      }
+    }
+
+    // Confirm every ID exists in the DB (ignore phantoms silently)
+    const existing = db.prepare(`SELECT id FROM invoices WHERE id IN (${ph})`).all(...numIds).map(r => r.id);
+    if (existing.length === 0) return res.status(404).json({ error: 'none of the given ids found' });
+    const eph = existing.map(() => '?').join(',');
+
+    db.exec('BEGIN');
+    try {
+      // 1. wo_addition_requests — NOT NULL FK must be removed first
+      db.prepare(`DELETE FROM wo_addition_requests WHERE invoice_id IN (${eph})`).run(...existing);
+      db.prepare(`UPDATE wo_addition_requests SET new_invoice_id = NULL WHERE new_invoice_id IN (${eph})`).run(...existing);
+      // 2. Unlink line items (preserve data — they're attached to work orders too)
+      db.prepare(`UPDATE time_entries SET invoice_id = NULL WHERE invoice_id IN (${eph})`).run(...existing);
+      db.prepare(`UPDATE expenses SET invoice_id = NULL WHERE invoice_id IN (${eph})`).run(...existing);
+      // 3. Delete invoice-owned child rows
+      db.prepare(`DELETE FROM attachments WHERE invoice_id IN (${eph})`).run(...existing);
+      db.prepare(`DELETE FROM notifications WHERE invoice_id IN (${eph})`).run(...existing);
+      // 4. Delete the invoices
+      const result = db.prepare(`DELETE FROM invoices WHERE id IN (${eph})`).run(...existing);
+      db.exec('COMMIT');
+      logAudit(db, { entity_type: 'invoices', entity_id: null, user_id: me.id,
+                     action: 'bulk_delete', details: { ids: existing, deleted: result.changes } });
+      res.json({ deleted: result.changes });
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+  });
+
+  // ── Work-order cleanup (v0.82) ────────────────────────────────────────────
+
+  // GET /admin/work-orders — list WOs with child-row counts for the cleanup UI
+  router.get('/admin/work-orders', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const rows = db.prepare(`
+      SELECT w.id, w.external_id, w.title, w.store_name, w.status,
+             w.work_type, w.created_at, w.scheduled_date,
+             (SELECT COUNT(*) FROM time_entries te WHERE te.work_order_id = w.id) AS time_entry_count,
+             (SELECT COUNT(*) FROM expenses e WHERE e.work_order_id = w.id)        AS expense_count,
+             (SELECT COUNT(*) FROM attachments a WHERE a.work_order_id = w.id)     AS attachment_count,
+             -- has any approved invoice line (not safe to wipe)
+             CASE WHEN EXISTS (
+               SELECT 1 FROM time_entries te
+               JOIN invoices i ON i.id = te.invoice_id
+               WHERE te.work_order_id = w.id
+                 AND i.status IN ('approved_ops','approved_sr','queued_ap','sent_ap')
+             ) THEN 1 ELSE 0 END AS has_approved_invoice
+      FROM work_orders w
+      ORDER BY w.created_at DESC
+    `).all();
+    res.json(rows);
+  });
+
+  // DELETE /admin/work-orders — safe bulk cascade-delete by ID list.
+  // Refuses WOs that have approved/sent invoice lines.
+  // Cascade order:
+  //   attachments (via WO, time_entry, expense) → deleted
+  //   time_entries → deleted
+  //   expenses → deleted
+  //   wo_category_budgets → deleted
+  //   cost_tracker_overrides → deleted
+  //   corp_card_expenses → work_order_id NULLed (expense record kept)
+  //   wo_sync_state → deleted
+  //   notifications (entity_type=work_order) → deleted
+  //   work_orders → deleted
+  router.delete('/admin/work-orders', (req, res) => {
+    const me = requireAdmin(req, res); if (!me) return;
+    const ids = req.body?.ids;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids array required' });
+    }
+    const numIds = [...new Set(ids.map(Number).filter(n => Number.isFinite(n) && n > 0))];
+    if (numIds.length === 0) return res.status(400).json({ error: 'no valid ids' });
+    const ph = numIds.map(() => '?').join(',');
+
+    // v0.82 — force:true lets admins delete WOs with approved/sent invoice
+    // lines (pre-launch reset). Without it those WOs are refused.
+    const force = req.body?.force === true;
+    if (!force) {
+      const blocked = db.prepare(`
+        SELECT DISTINCT w.id, w.external_id FROM work_orders w
+        JOIN time_entries te ON te.work_order_id = w.id
+        JOIN invoices i ON i.id = te.invoice_id
+        WHERE w.id IN (${ph})
+          AND i.status IN ('approved_ops','approved_sr','queued_ap','sent_ap')
+      `).all(...numIds);
+      if (blocked.length > 0) {
+        return res.status(400).json({
+          error: `${blocked.length} work order(s) have approved/sent invoice lines and cannot be deleted (pass force:true to override)`,
+          blocked_ids: blocked.map(r => r.id),
+        });
+      }
+    }
+
+    const existing = db.prepare(`SELECT id FROM work_orders WHERE id IN (${ph})`).all(...numIds).map(r => r.id);
+    if (existing.length === 0) return res.status(404).json({ error: 'none of the given ids found' });
+    const eph = existing.map(() => '?').join(',');
+
+    db.exec('BEGIN');
+    try {
+      // 1. Attachments linked via time_entry or expense rows on these WOs
+      db.prepare(`
+        DELETE FROM attachments WHERE time_entry_id IN
+          (SELECT id FROM time_entries WHERE work_order_id IN (${eph}))
+      `).run(...existing);
+      db.prepare(`
+        DELETE FROM attachments WHERE expense_id IN
+          (SELECT id FROM expenses WHERE work_order_id IN (${eph}))
+      `).run(...existing);
+      // Attachments linked directly to the WO
+      db.prepare(`DELETE FROM attachments WHERE work_order_id IN (${eph})`).run(...existing);
+      // 2. Line items
+      db.prepare(`DELETE FROM time_entries WHERE work_order_id IN (${eph})`).run(...existing);
+      db.prepare(`DELETE FROM expenses WHERE work_order_id IN (${eph})`).run(...existing);
+      // 3. WO-specific tables
+      db.prepare(`DELETE FROM wo_category_budgets WHERE work_order_id IN (${eph})`).run(...existing);
+      db.prepare(`DELETE FROM cost_tracker_overrides WHERE work_order_id IN (${eph})`).run(...existing);
+      // 4. Corp-card expenses: unlink (keep the spend record, detach from WO)
+      db.prepare(`UPDATE corp_card_expenses SET work_order_id = NULL WHERE work_order_id IN (${eph})`).run(...existing);
+      // 5. Sync state + notifications
+      db.prepare(`DELETE FROM wo_sync_state WHERE work_order_id IN (${eph})`).run(...existing);
+      db.prepare(`DELETE FROM notifications WHERE entity_type = 'work_order' AND entity_id IN (${eph})`).run(...existing);
+      // 6. Work orders
+      const result = db.prepare(`DELETE FROM work_orders WHERE id IN (${eph})`).run(...existing);
+      db.exec('COMMIT');
+      logAudit(db, { entity_type: 'work_orders', entity_id: null, user_id: me.id,
+                     action: 'bulk_delete', details: { ids: existing, deleted: result.changes } });
+      res.json({ deleted: result.changes });
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+  });
+
   return router;
 };
