@@ -8362,34 +8362,34 @@ async function renderDashboardOverview(root) {
       </div>
     `; })() : ''}
 
-    <div class="dash-grid-2">
-      ${renderDonutCard('Work-type mix', r.by_work_type, 'work_type', 'total',
-        (t) => `${t.wo_count} WOs · ${fmt$(t.dollars_per_cart)}/cart`)}
-      ${renderStackedTechCard('Tech × Work-type comparison', r.by_tech_work_type)}
-    </div>
+    <!-- v0.88 — one chart per row; full-width for scalability with large data sets -->
+    ${renderDonutCard('Work-type mix', r.by_work_type, 'work_type', 'total',
+      (t) => `${t.wo_count} WOs · ${fmt$(t.dollars_per_cart)}/cart`)}
+
+    ${renderStackedTechCard('Tech × Work-type comparison', r.by_tech_work_type)}
 
     ${renderMultiLineCard('Weekly spend by technician', r.trend_by_tech, r.trend, null)}
 
-    <div class="dash-grid-2">
-      ${renderColumnCard('Spend by cart-count bucket', r.by_cart_bucket)}
-      ${renderVerticalBarCard('Top stores by spend', r.by_store, 'store_name', 'total',
-        (s) => `${s.wo_count} ${s.wo_count===1?'visit':'visits'} · avg ${fmtMoneyFull(s.total / Math.max(1, s.wo_count))}/visit`,
-        { drillKey: 'store', drillValue: (s) => s.store_name, maxBars: 10 })}
-    </div>
+    ${renderColumnCard('Spend by cart-count bucket', r.by_cart_bucket)}
 
-    <!-- Store-focused metrics (v0.33) -->
-    <div class="section-title">Store metrics</div>
-    <div class="dash-grid-2">
-      ${renderBarCard('Most active stores', [...r.by_store].sort((a,b) => b.wo_count - a.wo_count).slice(0, 10),
-        'store_name', 'wo_count', Math.max(1, ...r.by_store.map(s => s.wo_count)),
-        (s) => `${fmtMoneyFull(s.total)} total · ${fmtMoneyFull(s.total / Math.max(1, s.wo_count))} per visit`,
-        { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => `${n} visit${n===1?'':'s'}`, axisFmt: (n) => String(Math.round(n)) })}
-      ${renderBarCard('Highest $ per visit', [...r.by_store].map(s => ({...s, per_visit: s.total / Math.max(1, s.wo_count)}))
-          .sort((a,b) => b.per_visit - a.per_visit).slice(0, 10),
-        'store_name', 'per_visit', Math.max(1, ...r.by_store.map(s => s.total / Math.max(1, s.wo_count))),
-        (s) => `${s.wo_count} ${s.wo_count===1?'visit':'visits'} · ${fmtMoneyFull(s.total)} total`,
-        { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => fmtMoneyFull(n) })}
-    </div>
+    <!-- Store-focused metrics (v0.33 / v0.88 full-width) -->
+    <div class="section-title" style="margin-top: 22px;">Store metrics</div>
+
+    ${renderBarCard('Top stores by spend', [...r.by_store].sort((a,b) => b.total - a.total),
+      'store_name', 'total', Math.max(1, ...r.by_store.map(s => s.total)),
+      (s) => `${s.wo_count} ${s.wo_count===1?'visit':'visits'} · avg ${fmtMoneyFull(s.total / Math.max(1, s.wo_count))}/visit`,
+      { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => fmtMoneyFull(n) })}
+
+    ${renderBarCard('Most active stores', [...r.by_store].sort((a,b) => b.wo_count - a.wo_count),
+      'store_name', 'wo_count', Math.max(1, ...r.by_store.map(s => s.wo_count)),
+      (s) => `${fmtMoneyFull(s.total)} total · ${fmtMoneyFull(s.total / Math.max(1, s.wo_count))} per visit`,
+      { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => `${n} visit${n===1?'':'s'}`, axisFmt: (n) => String(Math.round(n)) })}
+
+    ${renderBarCard('Highest $ per visit', [...r.by_store].map(s => ({...s, per_visit: s.total / Math.max(1, s.wo_count)}))
+        .sort((a,b) => b.per_visit - a.per_visit),
+      'store_name', 'per_visit', Math.max(1, ...r.by_store.map(s => s.total / Math.max(1, s.wo_count))),
+      (s) => `${s.wo_count} ${s.wo_count===1?'visit':'visits'} · ${fmtMoneyFull(s.total)} total`,
+      { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => fmtMoneyFull(n) })}
 
     ${(r.trend_by_store || []).length ? renderMultiLineStoresCard('Spend trend per store (top 5)', r.trend_by_store) : ''}
 
@@ -8672,26 +8672,33 @@ function seqGreen(t) { return lerpHex('#cfe9c2', '#16531f', Math.max(0, Math.min
 // Highest $ per visit. Sorts desc, shades by magnitude, draws a quantitative
 // axis + dashed average reference line, and direct-labels each bar. Each row
 // carries the same data-drill/data-value hooks the old bars did.
+// v0.88 — wider label column (220px) so full store names fit; auto-height
+// grows with the number of bars; no artificial row cap by default.
 // opts: { rows, labelKey, valueKey, subFn, fmtV, fmtAxis, drillKey, drillValue, maxBars }
 function tableauHBars(opts) {
   const { rows, labelKey, valueKey, subFn, drillKey, drillValue } = opts;
   const fmtV = opts.fmtV || fmtMoneyFull;
   const fmtAxis = opts.fmtAxis || fmtMoneyShort;
-  const maxBars = opts.maxBars || 10;
+  const maxBars = opts.maxBars || 50;          // v0.88 — show all rows by default
   const data = (rows || []).filter(r => (r[valueKey] || 0) > 0)
     .slice().sort((a, b) => b[valueKey] - a[valueKey]).slice(0, maxBars);
   if (!data.length) return '';
   const max = Math.max(...data.map(r => r[valueKey]), 1);
   const nmax = niceMax(max);
   const avg = data.reduce((s, r) => s + r[valueKey], 0) / data.length;
-  const W = 540, padL = 168, padR = 78, padT = 44, padB = 34, rowH = 48, barH = 29;
+  // v0.88 — padL scales with max label length so no name is ever clipped.
+  const maxLabelChars = Math.max(...data.map(r => String(r[labelKey] || '').length), 10);
+  const padL = Math.min(260, Math.max(160, maxLabelChars * 8 + 36));
+  const W = 720, padR = 90, padT = 44, padB = 34, rowH = 44, barH = 27;
   const baseY = padT + data.length * rowH;
   const H = baseY + padB, plotW = W - padL - padR;
   const xAt = v => padL + (v / nmax) * plotW;
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(p => p * nmax);
-  const trunc = (s, n) => (s && s.length > n) ? s.slice(0, n - 1) + '…' : (s || '');
   const mid = y0 => y0 + barH / 2 + 4.5;
+  // v0.88 — wrap in a scrollable container when there are many rows
+  const scrollClass = data.length > 12 ? ' hbar-scroll' : '';
   return `
+    <div class="${scrollClass}">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="hbar-svg" style="width:100%;height:auto;display:block;">
       ${ticks.map(t => { const x = xAt(t); return `
         <line x1="${x}" y1="${padT - 8}" x2="${x}" y2="${baseY}" stroke="#eef0f4" stroke-width="1"/>
@@ -8702,7 +8709,7 @@ function tableauHBars(opts) {
         const v = r[valueKey], y = padT + i * rowH + (rowH - barH) / 2;
         const w = Math.max((v / nmax) * plotW, 2);
         const fill = seqGreen(0.35 + 0.65 * (max > 0 ? v / max : 0));
-        const lab = trunc(String(r[labelKey] || ''), 22);
+        const lab = String(r[labelKey] || '');  // v0.88 — full name, no truncation
         const sub = subFn ? subFn(r) : '';
         const drillAttrs = drillKey
           ? `data-drill="${escapeHTML(drillKey)}" data-value="${escapeHTML(String(drillValue ? drillValue(r) : r[labelKey]))}" role="button" tabindex="0" style="cursor:pointer;"`
@@ -8717,7 +8724,8 @@ function tableauHBars(opts) {
             <text class="hb-val" x="${padL + w + 7}" y="${mid(y)}">${fmtV(v)}</text>
           </g>`;
       }).join('')}
-    </svg>`;
+    </svg>
+    </div>`;
 }
 
 // v0.75 — work-type mix donut: slices sorted largest-first, slimmer + larger
@@ -9032,7 +9040,7 @@ function renderBarCard(title, rows, labelKey, valueKey, max, subLineFn, opts = {
   return `
     <div class="card dash-card">
       <div class="section-title" style="margin-top: 0;">${escapeHTML(title)}${helpText}</div>
-      ${tableauHBars({ rows: data, labelKey, valueKey, subFn: subLineFn, fmtV, fmtAxis: opts.axisFmt, drillKey: opts.drillKey, drillValue: opts.drillValue, maxBars: opts.maxBars || 10 })}
+      ${tableauHBars({ rows: data, labelKey, valueKey, subFn: subLineFn, fmtV, fmtAxis: opts.axisFmt, drillKey: opts.drillKey, drillValue: opts.drillValue, maxBars: opts.maxBars || 50 })}
     </div>
   `;
 }
