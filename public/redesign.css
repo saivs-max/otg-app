@@ -247,7 +247,7 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
 /* v0.88 — all chart cards are now full-width rows; dash-card-wide is the canonical style */
 .dash-card, .dash-card-wide { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 18px 20px; box-shadow: 0 1px 2px rgba(16,40,32,.04), 0 2px 12px rgba(16,40,32,.05); margin: 0 0 18px; }
 /* Donut: in full-width mode the SVG can be larger */
-.donut-svg { width: 240px; height: 240px; flex-shrink: 0; }
+.donut-svg { width: 200px; height: 200px; flex-shrink: 0; }
 /* hbar charts: constrain max height and scroll when there are many stores */
 .hbar-scroll { max-height: 640px; overflow-y: auto; border-radius: 6px; }
 .bar-fill { background: linear-gradient(90deg, var(--ic-green) 0%, var(--ic-green-deep) 100%); }

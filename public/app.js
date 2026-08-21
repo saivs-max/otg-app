@@ -8006,19 +8006,26 @@ async function renderLocations(root) {
 
 async function renderDashboard(root) {
   const isManager = ['ops_manager','sr_manager','pm'].includes(STATE.user?.role);
-  // v0.64 — Unplanned work is now a sub-section of the Dashboard (previously its
-  // own left-nav tab). Managers get an Overview | Unplanned toggle up top.
-  const section = (isManager && STATE._dashSection === 'unplanned') ? 'unplanned' : 'overview';
+  // v0.89 — three-tab toggle: Overview | Queue | Unplanned work (managers only).
+  const rawSection = STATE._dashSection || 'overview';
+  const section = isManager ? rawSection : 'overview';
   const sectionToggle = isManager ? `
     <div style="display:flex;gap:8px;margin-bottom:14px;">
-      <button data-dashsection="overview" class="btn btn-sm ${section === 'overview' ? 'btn-primary' : 'btn-ghost'}">Overview</button>
-      <button data-dashsection="unplanned" class="btn btn-sm ${section === 'unplanned' ? 'btn-primary' : 'btn-ghost'}">⚠ Unplanned work</button>
+      <button data-dashsection="overview"  class="btn btn-sm ${section === 'overview'  ? 'btn-primary' : 'btn-ghost'}">Overview</button>
+      <button data-dashsection="queue"     class="btn btn-sm ${section === 'queue'     ? 'btn-primary' : 'btn-ghost'}">📋 Queue</button>
+      <button data-dashsection="unplanned" class="btn btn-sm ${section === 'unplanned' ? 'btn-primary' : 'btn-ghost'}">⚠ Unplanned</button>
     </div>` : '';
 
   if (section === 'unplanned') {
     root.innerHTML = `${sectionToggle}<div id="dashBody"></div>`;
     bindDashSectionToggle();
     return renderUnplanned($('#dashBody'));
+  }
+
+  if (section === 'queue') {
+    root.innerHTML = `${sectionToggle}<div id="dashBody"></div>`;
+    bindDashSectionToggle();
+    return renderDashboardQueue($('#dashBody'));
   }
 
   const tab = STATE._dashCatTab || 'overview';
@@ -8394,33 +8401,12 @@ async function renderDashboardOverview(root) {
     ${(r.trend_by_store || []).length ? renderMultiLineStoresCard('Spend trend per store (top 5)', r.trend_by_store) : ''}
 
     ${r.aging.length ? `
-      <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-orange);">
-        <div class="section-title" style="margin-top: 0;">⏰ Aging in queue (${r.aging.length})</div>
-        <p class="help" style="margin: 0 0 10px;">Submitted &gt; 3 days ago. Take action to keep the AP cycle on schedule.</p>
-        ${r.aging.map(a => `
-          <div class="dash-list-row tap" data-inv="${a.id}">
-            <div style="flex: 1; min-width: 0;">
-              <strong>${escapeHTML(a.tech_name)}</strong>
-              <div class="meta">${escapeHTML(a.invoice_number)} · ${a.days_in_queue} days waiting</div>
-            </div>
-            <strong>${fmt$(a.total)}</strong>
-          </div>
-        `).join('')}
-      </div>
-    ` : ''}
-
-    ${r.top_invoices.length ? `
-      <div class="card" style="margin-top: 14px;">
-        <div class="section-title" style="margin-top: 0;">Top invoices in period</div>
-        ${r.top_invoices.map(inv => `
-          <div class="dash-list-row tap" data-inv="${inv.id}">
-            <div style="flex: 1; min-width: 0;">
-              <strong>${escapeHTML(inv.tech_name)}</strong>
-              <div class="meta">${escapeHTML(inv.invoice_number)} · ${escapeHTML(labelForStatus(inv.status))} · ${fmtDate(inv.period_start)} → ${fmtDate(inv.period_end)}</div>
-            </div>
-            <strong>${fmt$(inv.total)}</strong>
-          </div>
-        `).join('')}
+      <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-orange); display:flex; align-items:center; justify-content:space-between; gap:12px; padding: 14px 18px;">
+        <div>
+          <span style="font-weight:700; color:var(--ic-orange);">⏰ ${r.aging.length} invoice${r.aging.length===1?'':'s'} aging in queue</span>
+          <span class="meta" style="margin-left:8px;">Submitted &gt;3 days ago</span>
+        </div>
+        <button class="btn btn-sm btn-ghost" data-dashsection="queue" style="white-space:nowrap;">View Queue →</button>
       </div>
     ` : ''}
   `;
@@ -8457,6 +8443,11 @@ async function renderDashboardOverview(root) {
     STATE._dashTech = ''; STATE._dashStore = ''; STATE._dashWt = '';
     goto('dashboard');
   });
+
+  // v0.89 — "View Queue" banner button in overview navigates to queue tab.
+  $$('[data-dashsection="queue"]', root).forEach(b => b.addEventListener('click', () => {
+    STATE._dashSection = 'queue'; goto('dashboard');
+  }));
 
   // v0.37 — Push to Drive. Asks the server whether Google Sheets is configured;
   // if yes, push the current slice; if no, show a sheet explaining how to set it up.
@@ -8530,6 +8521,64 @@ async function renderDashboardOverview(root) {
   $('#forecastHelpBtn')?.addEventListener('click', openForecastExplainer);
 
   $$('.dash-list-row[data-inv]').forEach(r => r.addEventListener('click', () => goto('invDetail', Number(r.dataset.inv))));
+}
+
+// v0.89 — Queue tab: aging invoices + top invoices in period.
+async function renderDashboardQueue(root) {
+  const period     = STATE._dashPeriod || 'last_90';
+  const qs = new URLSearchParams({ period });
+  root.innerHTML = `<div class="spinner" style="margin:40px auto;"></div>`;
+  let r;
+  try { r = await api(`/dashboard?${qs.toString()}`); }
+  catch(e) { root.innerHTML = `<p class="help">Failed to load queue: ${escapeHTML(e.message)}</p>`; return; }
+
+  const agingHtml = r.aging?.length ? `
+    <div class="dash-card" style="border-left: 4px solid var(--ic-orange);">
+      <div class="section-title" style="margin-top:0; color:var(--ic-orange);">⏰ Aging in queue (${r.aging.length})</div>
+      <p class="help" style="margin: 0 0 12px;">Submitted &gt;3 days ago — take action to keep the AP cycle on schedule.</p>
+      ${r.aging.map(a => `
+        <div class="dash-list-row tap" data-inv="${a.id}">
+          <div style="flex:1; min-width:0;">
+            <strong>${escapeHTML(a.tech_name)}</strong>
+            <div class="meta">${escapeHTML(a.invoice_number)} · ${a.days_in_queue} day${a.days_in_queue===1?'':'s'} waiting</div>
+          </div>
+          <strong style="color:var(--ic-orange);">${fmt$(a.total)}</strong>
+        </div>
+      `).join('')}
+    </div>
+  ` : `<div class="dash-card" style="border-left: 4px solid var(--ok-fg);">
+    <p style="margin:0; font-weight:600; color:var(--ok-fg);">✓ No invoices aging in queue</p>
+  </div>`;
+
+  const topHtml = r.top_invoices?.length ? `
+    <div class="dash-card" style="margin-top:0;">
+      <div class="section-title" style="margin-top:0;">Top invoices in period</div>
+      ${r.top_invoices.map(inv => `
+        <div class="dash-list-row tap" data-inv="${inv.id}">
+          <div style="flex:1; min-width:0;">
+            <strong>${escapeHTML(inv.tech_name)}</strong>
+            <div class="meta">${escapeHTML(inv.invoice_number)} · ${escapeHTML(labelForStatus(inv.status))} · ${fmtDate(inv.period_start)} → ${fmtDate(inv.period_end)}</div>
+          </div>
+          <strong>${fmt$(inv.total)}</strong>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  root.innerHTML = `
+    <div style="display:flex; gap:12px; align-items:center; margin-bottom:14px;">
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        ${[['mtd','MTD'],['last_30','Last 30d'],['last_90','Last 90d'],['qtd','QTD'],['ytd','YTD'],['all','All time']].map(([v,l]) =>
+          `<button class="chip${period===v?' selected':''}" data-period="${v}">${l}</button>`
+        ).join('')}
+      </div>
+    </div>
+    ${agingHtml}
+    ${topHtml}
+  `;
+
+  $$('[data-period]', root).forEach(b => b.addEventListener('click', () => { STATE._dashPeriod = b.dataset.period; goto('dashboard'); }));
+  $$('.dash-list-row[data-inv]', root).forEach(el => el.addEventListener('click', () => goto('invDetail', Number(el.dataset.inv))));
 }
 
 function renderKpiTiles(s) {
@@ -8689,7 +8738,7 @@ function tableauHBars(opts) {
   // v0.88 — padL scales with max label length so no name is ever clipped.
   const maxLabelChars = Math.max(...data.map(r => String(r[labelKey] || '').length), 10);
   const padL = Math.min(260, Math.max(160, maxLabelChars * 8 + 36));
-  const W = 720, padR = 90, padT = 44, padB = 34, rowH = 44, barH = 27;
+  const W = 720, padR = 90, padT = 36, padB = 28, rowH = 36, barH = 22;
   const baseY = padT + data.length * rowH;
   const H = baseY + padB, plotW = W - padL - padR;
   const xAt = v => padL + (v / nmax) * plotW;

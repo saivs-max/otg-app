@@ -161,10 +161,13 @@ module.exports = (db) => {
         const orgId = get(db, 'maintainx_organization_id') || process.env.MAINTAINX_ORG_ID || DEFAULT_MX_ORG_ID;
         if (!key) return res.status(400).json({ ok: false, error: 'MaintainX token not set.' });
 
-        // v0.47 — MaintainX JWTs embed the organization id, so we no longer
-        // send the speculative X-*-Organization-Id headers that earlier
-        // tripped MaintainX's validator with "Invalid token". Bearer only.
-        const baseHeaders = { 'Authorization': `Bearer ${key}` };
+        // v0.87 — MaintainX now requires x-organization-id on all requests.
+        // (v0.47 dropped these headers because they caused "Invalid token" with
+        // old JWTs, but MaintainX's API now mandates the header explicitly.)
+        const baseHeaders = {
+          'Authorization': `Bearer ${key}`,
+          ...(orgId ? { 'x-organization-id': String(orgId) } : {}),
+        };
         const candidates = [
           'https://api.getmaintainx.com/v1/workorders?limit=1',
         ];
