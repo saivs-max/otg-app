@@ -18,7 +18,12 @@ const { hashPassword, verifyPassword, createSession, deleteSession } = require('
 const { logAudit } = require('../db');
 
 // v0.65.1 (F-L3) — simple in-memory login throttle (single-process app). Locks a
-// username or IP after repeated failures so credentials can't be brute-forced.
+// username or IP+username after repeated failures so credentials can't be brute-forced.
+// v0.65.2 (TC-NEG-002) — IP key is now scoped to IP+username ("ipu:") instead of
+// IP alone ("ip:"). The old flat IP key caused shared-NAT/proxy environments to lock
+// out all users the moment any one account exceeded the failure threshold. With the
+// combined key, each (IP, username) pair is tracked independently, so User A's
+// failures never affect User B's login attempts.
 const _loginFails = new Map();   // key -> { fails, first, lockedUntil }
 const LOGIN_MAX_FAILS = 8, LOGIN_WINDOW_MS = 15 * 60 * 1000, LOGIN_LOCK_MS = 15 * 60 * 1000;
 function loginLockSeconds(key) { const r = _loginFails.get(key); return (r && r.lockedUntil && r.lockedUntil > Date.now()) ? Math.ceil((r.lockedUntil - Date.now()) / 1000) : 0; }
@@ -44,8 +49,10 @@ module.exports = (db) => {
     if (!lookup)   return res.status(400).json({ error: 'username cannot be blank' });
     if (!String(password).length) return res.status(400).json({ error: 'password cannot be blank' });
     // v0.65.1 (F-L3) — throttle brute-force / credential-stuffing per username + IP.
+    // v0.65.2 — second key is "ipu:IP:username" (not "ip:IP") so a lockout on one
+    // account never bleeds over to other users sharing the same IP address.
     const ip = req.ip || req.socket?.remoteAddress || 'unknown';
-    const lockKeys = [`u:${lookup.toLowerCase()}`, `ip:${ip}`];
+    const lockKeys = [`u:${lookup.toLowerCase()}`, `ipu:${ip}:${lookup.toLowerCase()}`];
     const lockedFor = lockKeys.map(loginLockSeconds).reduce((a, b) => Math.max(a, b), 0);
     if (lockedFor > 0) { res.set('Retry-After', String(lockedFor)); return res.status(429).json({ error: `too many attempts — try again in ${Math.ceil(lockedFor / 60)} min` }); }
     const u = db.prepare(`SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE`)
