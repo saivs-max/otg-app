@@ -421,11 +421,15 @@ module.exports = (db) => {
     const now = new Date().toISOString();
     // Returns to draft so the tech can edit and re-submit. Reason + reviewer are recorded.
     // v0.44 — BUG-006 fix: re-assert the prior status in WHERE clause.
+    // v0.89 — BUG-race-reject fix: bind WHERE to the exact status read above (not a
+    // broad IN set). If a concurrent approve moved the invoice from 'submitted' →
+    // 'approved_ops' between our read and this UPDATE, changes===0 → 409, preventing
+    // a reject from silently winning on a status it never observed.
     const r = db.prepare(`
       UPDATE invoices
       SET status = 'draft', rejected_at = ?, rejected_by = ?, rejection_reason = ?
-      WHERE id = ? AND status IN ('submitted','approved_ops')
-    `).run(now, userId, reason, id);
+      WHERE id = ? AND status = ?
+    `).run(now, userId, reason, id, inv.status);
     if (r.changes === 0) return res.status(409).json({ error: 'invoice state changed — refresh and retry' });
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId,
                    action: 'reject', details: { reason, prior_status: inv.status } });
