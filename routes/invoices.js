@@ -1050,7 +1050,8 @@ module.exports = (db) => {
     if (!userId) return res.status(401).json({ error: 'no user selected' });
     const rows = db.prepare(`
       SELECT id, invoice_number, period_start, period_end, status, total, submitted_at,
-             approved_ops_at, approved_sr_at, rejected_at, rejection_reason
+             approved_ops_at, approved_sr_at, rejected_at, rejection_reason,
+             sent_to_ap_at, escalated_at
       FROM invoices WHERE user_id = ?
       ORDER BY period_start DESC
     `).all(userId);
@@ -1870,6 +1871,19 @@ module.exports = (db) => {
           missing,
         });
       }
+      // v0.88 — vendor must exist in the Vendor Master List. For PDF-backed
+      // drafts, skip this check (user fixes the vendor in the edit step before
+      // submitting; vendor-submit validates at that point).
+      if (vendor_name) {
+        const knownVendor = db.prepare(
+          `SELECT 1 FROM vendors WHERE TRIM(name) = TRIM(?) COLLATE NOCASE AND archived_at IS NULL`
+        ).get(vendor_name);
+        if (!knownVendor) {
+          return res.status(400).json({
+            error: `"${vendor_name}" is not in the Vendor Master List. Add the vendor in Settings → Vendors first.`,
+          });
+        }
+      }
     }
 
     // Period defaults to the week containing the vendor invoice date when
@@ -1919,9 +1933,8 @@ module.exports = (db) => {
            vendor_category || null);
     const invoiceId = r.lastInsertRowid;
 
-    // v0.73 — auto-save the vendor into the master list so it's available in the
-    // filter dropdown + the vendor picker on future invoices.
-    upsertVendor(db, vendor_name, { category: vendor_category, userId: me.id });
+    // v0.88 — vendor must already be in the master list (validated above for
+    // manual uploads). Do NOT auto-create vendors from invoice uploads.
 
     // Attach the original file if provided
     let attachmentId = null;
@@ -2042,6 +2055,18 @@ module.exports = (db) => {
     if (typeof updates.notes === 'string' && updates.notes.length > 2000)
       return res.status(400).json({ error: 'Notes must be 2000 characters or fewer' });
 
+    // v0.88 — if changing vendor_name, it must exist in the Vendor Master List.
+    if (updates.vendor_name) {
+      const knownVendor = db.prepare(
+        `SELECT 1 FROM vendors WHERE TRIM(name) = TRIM(?) COLLATE NOCASE AND archived_at IS NULL`
+      ).get(updates.vendor_name);
+      if (!knownVendor) {
+        return res.status(400).json({
+          error: `"${updates.vendor_name}" is not in the Vendor Master List. Add the vendor in Settings → Vendors first.`,
+        });
+      }
+    }
+
     if (Object.keys(updates).length === 0) {
       return res.json(inv); // nothing to change
     }
@@ -2052,9 +2077,7 @@ module.exports = (db) => {
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId,
                    action: 'vendor_update', details: updates });
 
-    // v0.73 — keep the vendor master list in sync with any (re)named vendor.
-    upsertVendor(db, updates.vendor_name ?? inv.vendor_name,
-                 { category: updates.vendor_category ?? inv.vendor_category, userId });
+    // v0.88 — vendor master list is managed separately; do not auto-upsert from edits.
 
     res.json(db.prepare("SELECT * FROM invoices WHERE id = ?").get(id));
   });
@@ -2201,6 +2224,19 @@ module.exports = (db) => {
       return res.status(400).json({
         error: `${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} required before submitting to Sr Mgr.`,
       });
+    }
+
+    // v0.88 — vendor must be in the Vendor Master List before the invoice can
+    // be submitted (catches PDF-parsed names that were never corrected).
+    if (inv.vendor_name) {
+      const knownVendor = db.prepare(
+        `SELECT 1 FROM vendors WHERE TRIM(name) = TRIM(?) COLLATE NOCASE AND archived_at IS NULL`
+      ).get(inv.vendor_name);
+      if (!knownVendor) {
+        return res.status(400).json({
+          error: `Vendor "${inv.vendor_name}" is not in the Vendor Master List. Edit the invoice to select an approved vendor before submitting.`,
+        });
+      }
     }
 
     // v0.44 — BUG-006 fix: race-safe state transition. The UPDATE asserts the
