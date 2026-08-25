@@ -73,10 +73,22 @@ module.exports = (db) => {
 
     // For "billable" stats we exclude pure drafts (they're work in progress and
     // have not been validated). Counted statuses match real spend.
-    const BILLABLE_STATUSES = "('submitted','approved_ops','approved_sr','queued_ap','sent_ap')";
+    // v0.91 — include 'in_review' (manager actively editing line items before approval):
+    // previously these invoices were invisible in all KPI tiles while being reviewed.
+    const BILLABLE_STATUSES = "('submitted','in_review','approved_ops','approved_sr','queued_ap','sent_ap')";
     // v0.36 — labor-only filter so the dashboard's tech-labor totals don't
     // double-count 3rd-party vendor spend (which has its own KPI tile).
     const LABOR_TYPE_SQL = "AND (i.invoice_type IS NULL OR i.invoice_type = 'tech_labor')";
+    // v0.90 — every dashboard TOTAL-SPEND aggregate below (by store, by work type,
+    // per invoice, weekly/store trends, cart-count buckets) values clocked time with
+    // `t.mode IN ('work','drive')` — i.e. work AND drive time both count toward spend.
+    // Previously drive-mode clocks were dropped (mode='work' only), so any WO whose
+    // drive time was clocked (not logged as an expense) undercounted by its drive
+    // labor and the graphs didn't reconcile with the Cost Tracker / invoice totals.
+    // NOTE: the buildCostTrackerRows() calcs further down intentionally KEEP the
+    // work-only filter — they split Act Labor (work) from Act Travel (drive), so
+    // there the two modes must stay separate. Only the single-figure spend rollups
+    // count both.
 
     // Store + work_type filter SQL fragments applied to WO-joined aggregations.
     const storeFilterSql = storeFilter ? `AND w.store_name = ?` : '';
@@ -102,7 +114,7 @@ module.exports = (db) => {
                  (julianday(t.clock_out)-julianday(t.clock_in))*24 *
                    COALESCE((SELECT u.hourly_rate FROM users u WHERE u.id = t.user_id), 40) AS amount
           FROM time_entries t
-          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
           UNION ALL
           SELECT e.invoice_id AS iid, e.work_order_id AS wo_id, e.amount
           FROM expenses e
@@ -112,12 +124,28 @@ module.exports = (db) => {
       `).get(...params, ...storeParam);
       sumRow.avg_total = sumRow.avg_total || 0;
     } else {
+      // v0.92 — recompute from time_entries + expenses (same method as byWorkType /
+      // the donut) so the KPI always reconciles with the chart. Reading i.total was
+      // stale: invoices closed before v0.90 excluded drive-mode clocks, causing a
+      // systematic under-count in the KPI vs the donut.
       sumRow = db.prepare(`
-        SELECT COUNT(*) AS n, COALESCE(SUM(i.total),0) AS sum_total,
-               COALESCE(AVG(i.total),0) AS avg_total
+        SELECT COUNT(DISTINCT i.id) AS n,
+               COALESCE(SUM(spend.amount),0) AS sum_total,
+               COALESCE(SUM(spend.amount),0) / NULLIF(COUNT(DISTINCT i.id), 0) AS avg_total
         FROM invoices i
+        JOIN (
+          SELECT t.invoice_id AS iid,
+                 (julianday(t.clock_out)-julianday(t.clock_in))*24 *
+                   COALESCE((SELECT u.hourly_rate FROM users u WHERE u.id = t.user_id), 40) AS amount
+          FROM time_entries t
+          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
+          UNION ALL
+          SELECT e.invoice_id AS iid, e.amount
+          FROM expenses e
+        ) spend ON spend.iid = i.id
         WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql} ${LABOR_TYPE_SQL}
       `).get(...params);
+      sumRow.avg_total = sumRow.avg_total || 0;
     }
 
     // pending/draft tiles always reflect the team-or-tech scope but stay
@@ -127,7 +155,7 @@ module.exports = (db) => {
       SELECT COUNT(*) AS n, COALESCE(SUM(i.total),0) AS sum_total,
              COALESCE(AVG(julianday('now') - julianday(i.submitted_at)), 0) AS avg_age
       FROM invoices i
-      WHERE i.status IN ('submitted','approved_ops') ${scopeSql} ${LABOR_TYPE_SQL}
+      WHERE i.status IN ('submitted','in_review','approved_ops') ${scopeSql} ${LABOR_TYPE_SQL}
     `).get(...noStoreParams);
 
     const draftRow = db.prepare(`
@@ -159,7 +187,7 @@ module.exports = (db) => {
                  (julianday(t.clock_out)-julianday(t.clock_in))*24 *
                    COALESCE((SELECT u2.hourly_rate FROM users u2 WHERE u2.id = t.user_id), 40) AS amount
           FROM time_entries t
-          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
           UNION ALL
           SELECT e.invoice_id AS iid, e.work_order_id AS wo_id, e.amount
           FROM expenses e
@@ -201,7 +229,7 @@ module.exports = (db) => {
                  COALESCE((SELECT u.hourly_rate FROM users u WHERE u.id = t.user_id), 40) AS amount
         FROM time_entries t
         JOIN invoices i ON i.id = t.invoice_id
-        WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+        WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
           AND i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
         UNION ALL
         SELECT e.work_order_id AS wo_id, e.amount
@@ -225,7 +253,8 @@ module.exports = (db) => {
     const byStore = db.prepare(`
       SELECT w.store_name,
              COUNT(DISTINCT w.id) AS wo_count,
-             COALESCE(SUM(spend.amount),0) AS total
+             COALESCE(SUM(spend.amount),0) AS total,
+             MAX(w.cart_count) AS max_cart_count
       FROM work_orders w
       JOIN (
         SELECT t.work_order_id AS wo_id,
@@ -233,7 +262,7 @@ module.exports = (db) => {
                  COALESCE((SELECT u.hourly_rate FROM users u WHERE u.id = t.user_id), 40) AS amount
         FROM time_entries t
         JOIN invoices i ON i.id = t.invoice_id
-        WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+        WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
           AND i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
         UNION ALL
         SELECT e.work_order_id AS wo_id, e.amount
@@ -245,7 +274,7 @@ module.exports = (db) => {
         ${woFilterSql}
       GROUP BY w.store_name
       ORDER BY total DESC
-      LIMIT 15
+      LIMIT 200
     `).all(...params, ...params, ...storeParam);
 
     // ---- By cart-count bucket ----
@@ -270,7 +299,7 @@ module.exports = (db) => {
                    COALESCE((SELECT u.hourly_rate FROM users u WHERE u.id = t.user_id), 40) AS amount
           FROM time_entries t
           JOIN invoices i ON i.id = t.invoice_id
-          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
             AND i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
           UNION ALL
           SELECT e.work_order_id AS wo_id, e.amount
@@ -297,7 +326,7 @@ module.exports = (db) => {
                (julianday(t.clock_out)-julianday(t.clock_in))*24 *
                  COALESCE((SELECT u2.hourly_rate FROM users u2 WHERE u2.id = t.user_id), 40) AS amount
         FROM time_entries t
-        WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+        WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
         UNION ALL
         SELECT e.invoice_id AS iid, e.work_order_id AS wo_id, e.amount FROM expenses e
       ) spend ON spend.iid = i.id
@@ -330,7 +359,7 @@ module.exports = (db) => {
                      (julianday(t.clock_out)-julianday(t.clock_in))*24 *
                        COALESCE((SELECT u2.hourly_rate FROM users u2 WHERE u2.id = t.user_id), 40) AS amount
               FROM time_entries t
-              WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+              WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
               UNION ALL
               SELECT e.invoice_id AS iid, e.work_order_id AS wo_id, e.amount FROM expenses e
             ) spend ON spend.iid = i.id
@@ -387,7 +416,7 @@ module.exports = (db) => {
     // Vendor invoices currently awaiting Sr Mgr approval (informational tile)
     const vendorPending = db.prepare(`
       SELECT COUNT(*) AS n, COALESCE(SUM(total),0) AS total
-      FROM invoices WHERE invoice_type = 'vendor' AND status = 'submitted'
+      FROM invoices WHERE invoice_type = 'vendor' AND status IN ('submitted','in_review')
     `).get();
 
     // ---- Per-store weekly trend (top 5 stores by total spend) ----
@@ -406,7 +435,7 @@ module.exports = (db) => {
                  (julianday(t.clock_out)-julianday(t.clock_in))*24 *
                    COALESCE((SELECT u2.hourly_rate FROM users u2 WHERE u2.id = t.user_id), 40) AS amount
           FROM time_entries t
-          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
           UNION ALL
           SELECT e.invoice_id AS iid, e.work_order_id AS wo_id, e.amount FROM expenses e
         ) spend ON spend.iid = i.id
@@ -453,7 +482,7 @@ module.exports = (db) => {
                  (julianday(t.clock_out)-julianday(t.clock_in))*24 *
                    COALESCE((SELECT u.hourly_rate FROM users u WHERE u.id = t.user_id), 40) AS amount
           FROM time_entries t
-          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode = 'work')
+          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
           UNION ALL
           SELECT e.invoice_id AS iid, e.work_order_id AS wo_id, e.amount FROM expenses e
         ) spend ON spend.iid = i.id

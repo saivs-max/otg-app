@@ -295,7 +295,17 @@ module.exports = (db) => {
                      action: 'admin_created_user', details: { role } });
       res.json({ ok: true, id: r.lastInsertRowid });
     } catch (e) {
-      if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'username or email already in use' });
+      if (String(e.message).includes('UNIQUE')) {
+        // v0.87.2 — identify which field caused the constraint violation
+        const msg = String(e.message);
+        const field = msg.includes('users.email') ? 'email'
+                    : msg.includes('users.username') ? 'username'
+                    : null;
+        const label = field === 'email' ? 'Email already in use'
+                    : field === 'username' ? 'Username already in use'
+                    : 'Username or email already in use';
+        return res.status(409).json({ error: label, field });
+      }
       return res.status(500).json({ error: e.message });
     }
   });
@@ -339,7 +349,17 @@ module.exports = (db) => {
     try {
       db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
     } catch (e) {
-      if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'username or email already in use' });
+      if (String(e.message).includes('UNIQUE')) {
+        // v0.87.2 — identify which field caused the constraint violation
+        const msg = String(e.message);
+        const field = msg.includes('users.email') ? 'email'
+                    : msg.includes('users.username') ? 'username'
+                    : null;
+        const label = field === 'email' ? 'Email already in use'
+                    : field === 'username' ? 'Username already in use'
+                    : 'Username or email already in use';
+        return res.status(409).json({ error: label, field });
+      }
       return res.status(500).json({ error: e.message });
     }
     // v0.44 — Disabling someone also kills their existing sessions so old

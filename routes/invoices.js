@@ -122,10 +122,70 @@ module.exports = (db) => {
     return db.prepare("SELECT * FROM invoices WHERE id = ?").get(r.lastInsertRowid);
   }
 
+  // v0.92 — Never strand a logged entry. Return a DRAFT invoice covering
+  // `dateStr` (YYYY-MM-DD). If a draft already covers the date, reuse it — the
+  // happy path is unchanged and repeated backdated entries for the same week
+  // consolidate onto one draft. Otherwise (that week's invoice is already
+  // submitted/approved, or none exists) mint a fresh supplemental draft for the
+  // week containing `dateStr` and sweep any OTHER in-range orphans onto it. The
+  // sweep only ever touches invoice_id IS NULL rows, so it can never steal from
+  // — or otherwise mutate — a submitted/approved invoice. Bugfix: before this,
+  // a time/expense logged into an already-submitted week was inserted with
+  // invoice_id = NULL and was invisible on every invoice (shown as $0 / 0.00h).
+  function ensureDraftForEntry(userId, dateStr) {
+    const existing = db.prepare(`
+      SELECT * FROM invoices
+      WHERE user_id = ? AND status = 'draft'
+        AND ? BETWEEN period_start AND period_end
+      ORDER BY id DESC LIMIT 1
+    `).get(userId, dateStr);
+    if (existing) return existing;
+
+    const { start, end } = weekBounds(new Date(dateStr));
+    const baseNum = invoiceNumber(userId, end);
+    let num = baseNum;
+    const used = new Set(db.prepare(
+      "SELECT invoice_number FROM invoices WHERE user_id = ? AND invoice_number LIKE ?"
+    ).all(userId, `${baseNum}%`).map(r => r.invoice_number));
+    if (used.has(num)) {
+      let picked = false;
+      for (let c = 'A'.charCodeAt(0); c <= 'Z'.charCodeAt(0); c++) {
+        const cand = `${baseNum}-${String.fromCharCode(c)}`;
+        if (!used.has(cand)) { num = cand; picked = true; break; }
+      }
+      if (!picked) num = `${baseNum}-${Date.now()}`;
+    }
+    const r = db.prepare(`
+      INSERT INTO invoices (invoice_number, user_id, period_start, period_end, status, total, origin, created_by, notes)
+      VALUES (?, ?, ?, ?, 'draft', 0, 'tech_self', ?, ?)
+    `).run(num, userId, start, end, userId, `Auto-created for a backdated entry · ${dateStr}`);
+    const invId = r.lastInsertRowid;
+
+    // Self-heal: pull any other orphaned in-range rows onto this new draft so a
+    // week's late entries land on one invoice (mirrors ensureDraftForWeek's
+    // sweep). invoice_id IS NULL guard keeps submitted/approved rows untouched.
+    db.prepare(`
+      UPDATE time_entries SET invoice_id = ?
+      WHERE user_id = ? AND invoice_id IS NULL
+        AND clock_out IS NOT NULL
+        AND date(clock_in) BETWEEN ? AND ?
+    `).run(invId, userId, start, end);
+    db.prepare(`
+      UPDATE expenses SET invoice_id = ?
+      WHERE user_id = ? AND invoice_id IS NULL
+        AND date(expense_date) BETWEEN ? AND ?
+    `).run(invId, userId, start, end);
+
+    return db.prepare("SELECT * FROM invoices WHERE id = ?").get(invId);
+  }
+
   // v0.64 — share computeInvoice with sibling route modules (expenses,
   // timeentries) so a line-item edit there can refresh the persisted invoice
   // total. computeInvoice is hoisted, so this reference resolves at call time.
   db.__computeInvoice = (invoiceId, hourlyRate) => computeInvoice(invoiceId, hourlyRate);
+  // v0.92 — share the get-or-create-draft helper so the time-entry / expense
+  // create paths never strand a logged row. Resolved at call time.
+  db.__ensureDraftForEntry = (userId, dateStr) => ensureDraftForEntry(userId, dateStr);
 
   function computeInvoice(invoiceId, hourlyRate) {
     const inv  = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoiceId);
@@ -934,8 +994,54 @@ module.exports = (db) => {
     const d = new Date(date);
     if (isNaN(d)) return res.status(400).json({ error: 'invalid date' });
     if (d > new Date()) return res.status(400).json({ error: 'cannot create an invoice for a future week' });
-    const inv = ensureDraftForWeek(userId, d);
-    res.json(stripFlagsForTech(computeInvoice(inv.id), userId));
+
+    // v0.93 — BUG FIX: only reuse an existing DRAFT for the week. If a
+    // submitted/approved invoice already covers this week but no open draft
+    // exists, mint a new supplemental draft so the tech can file additional
+    // work without the system silently redirecting them to the old invoice.
+    // Previously ensureDraftForWeek() found any invoice (any status), causing
+    // "Create invoice for past week" to navigate to the old submitted invoice
+    // and show a misleading "Draft created" toast.
+    const { start, end } = weekBounds(d);
+    let inv = db.prepare(
+      `SELECT * FROM invoices WHERE user_id = ? AND period_start = ? AND status = 'draft'`
+    ).get(userId, start);
+    let created = false;
+
+    if (!inv) {
+      // Resolve invoice_number collision — a submitted invoice for the same week
+      // already owns the base number, so append an alphabetic suffix (A, B, …).
+      const baseNum = invoiceNumber(userId, end);
+      const used = new Set(
+        db.prepare(`SELECT invoice_number FROM invoices WHERE user_id = ? AND invoice_number LIKE ?`)
+          .all(userId, `${baseNum}%`)
+          .map(r => r.invoice_number)
+      );
+      let num = baseNum;
+      for (let s = 'A'.charCodeAt(0); used.has(num); s++) {
+        if (s > 'Z'.charCodeAt(0)) { num = `${baseNum}-${Date.now()}`; break; }
+        num = `${baseNum}-${String.fromCharCode(s)}`;
+      }
+      const r = db.prepare(
+        `INSERT INTO invoices (invoice_number, user_id, period_start, period_end, status, total)
+         VALUES (?, ?, ?, ?, 'draft', 0)`
+      ).run(num, userId, start, end);
+      inv = db.prepare(`SELECT * FROM invoices WHERE id = ?`).get(r.lastInsertRowid);
+      // Sweep orphan time entries and expenses from the target week onto the new draft.
+      db.prepare(
+        `UPDATE time_entries SET invoice_id = ? WHERE user_id = ? AND invoice_id IS NULL
+         AND date(clock_in) BETWEEN ? AND ? AND clock_out IS NOT NULL`
+      ).run(inv.id, userId, start, end);
+      db.prepare(
+        `UPDATE expenses SET invoice_id = ? WHERE user_id = ? AND invoice_id IS NULL
+         AND date(expense_date) BETWEEN ? AND ?`
+      ).run(inv.id, userId, start, end);
+      created = true;
+    }
+
+    const computed = stripFlagsForTech(computeInvoice(inv.id), userId);
+    computed.created = created;   // frontend uses this to show "Draft created" vs "Opened existing draft"
+    res.json(computed);
   });
 
   // GET /api/invoices  → all my invoices (list view)

@@ -132,8 +132,10 @@ document.addEventListener('click', e => {
 
 // ---- Bottom sheet ----
 let _sheetPrevFocus = null, _sheetKeyHandler = null;
+let _sheetDismissable = false;  // v0.90 — lets a Back gesture close a dismissable sheet
 function showSheet(html, { onMount, dismissable = true } = {}) {
   closeSheet();
+  _sheetDismissable = dismissable;
   // v0.65.1 (A11Y) — remember focus so we can restore it when the sheet closes.
   _sheetPrevFocus = document.activeElement;
   const wrap = document.createElement('div');
@@ -167,6 +169,7 @@ function showSheet(html, { onMount, dismissable = true } = {}) {
   if (onMount) onMount(wrap);
 }
 function closeSheet() {
+  _sheetDismissable = false;  // v0.90
   if (_sheetKeyHandler) { document.removeEventListener('keydown', _sheetKeyHandler); _sheetKeyHandler = null; }
   // v0.94 — release any blob: object URLs a sheet created (e.g. the AP
   // attachment preview) so they don't leak when the sheet closes.
@@ -433,12 +436,63 @@ function renderTabbar() {
   $$('.tab-btn').forEach(b => b.addEventListener('click', () => { if (STATE.onBehalfOf) exitProxy({ silent: true }); goto(b.dataset.tab); }));
 }
 
+// v0.90 — top-level (bottom-tab) destinations. Navigating to one of these
+// resets the drill-down stack, so Back never appears between peer tabs; every
+// other view is a drill-in that pushes onto the stack.
+const ROOT_VIEWS = new Set([
+  // technician tabs
+  'home', 'timer', 'add', 'mine', 'woHistory',
+  // manager tabs
+  'dashboard', 'forecast', 'tracker', 'queue', 'launch', 'team',
+  'allInv', 'corpcard', 'thirdparty', 'policy', 'locations', 'admin',
+]);
+
+// v0.90 — show the header Back (‹) whenever there is somewhere to go back to
+// (i.e. we have drilled in past a root). Replaces the old fixed per-view list.
+function syncBackBtn() {
+  const show = Array.isArray(STATE._nav) && STATE._nav.length > 1;
+  $('#backBtn')?.classList.toggle('hidden', !show);
+}
+
+// v0.90 — a Back gesture (hardware/browser back) should first dismiss an open,
+// dismissable sheet; a forced/non-dismissable sheet is left in place.
+function closeDismissableSheet() {
+  if (document.querySelector('.sheet-backdrop') && _sheetDismissable) { closeSheet(); return true; }
+  return false;
+}
+
 function goto(view, arg=null) {
-  STATE._prevView = STATE.view;  // v0.86 — track for back-nav (e.g. woHistory → woDetail → back)
+  STATE._nav = STATE._nav || [];
+  // snapshot the scroll position of the screen we're leaving so Back can restore it
+  if (STATE._nav.length) STATE._nav[STATE._nav.length - 1].scrollY = window.scrollY || 0;
+  const { stack, action } = NAV.navReduce(STATE._nav, view, arg, ROOT_VIEWS.has(view));
+  STATE._nav = stack;
+  STATE._prevView = STATE.view;  // v0.86 compat — retained for any legacy reads
   STATE.view = view; STATE.view_arg = arg;
+  // Keep the browser/device Back gesture in sync: a genuine drill-in adds a
+  // history entry (so hardware Back maps to goBack); roots/replaces/pops don't.
+  try {
+    if (action === 'push' || action === 'init') history.pushState({ otg: 1 }, '');
+    else history.replaceState({ otg: 1 }, '');
+  } catch (_) {}
   $$('.tab-btn').forEach(t => t.classList.toggle('active', t.dataset.tab === view));
-  $('#backBtn').classList.add('hidden');
+  syncBackBtn();
   render();
+}
+
+// v0.90 — pop one level and render the previous screen, restoring its scroll.
+// Used by both the header ‹ button and the browser/device Back gesture, so they
+// behave identically. Sheet dismissal is handled by the popstate listener.
+async function goBackCore() {
+  const { stack, entry, changed } = NAV.navBack(STATE._nav || []);
+  if (!changed || !entry) return;
+  STATE._nav = stack;
+  STATE._prevView = STATE.view;
+  STATE.view = entry.view; STATE.view_arg = entry.arg;
+  $$('.tab-btn').forEach(t => t.classList.toggle('active', t.dataset.tab === entry.view));
+  syncBackBtn();
+  await render();
+  if (entry.scrollY) requestAnimationFrame(() => { try { window.scrollTo(0, entry.scrollY); } catch (_) {} });
 }
 
 async function render() {
@@ -472,7 +526,7 @@ async function render() {
     thirdparty:  '3rd Party Invoices',
     woHistory:   'Work Order History',
   })[v] || '';
-  if (['woPick','woAdd','woDetail','invDetail','settings'].includes(v)) $('#backBtn').classList.remove('hidden');
+  syncBackBtn();  // v0.90 — Back visibility is driven by the nav stack, not a fixed view list
 
   const root = $('#view'); root.dataset.view = v; root.innerHTML = `<div class="empty">Loading…</div>`;
   try {
@@ -1137,6 +1191,7 @@ async function renderWoAdd(root) {
         form.store_id      = loc.mx_id;
         form.store_address = [loc.address, loc.city, loc.state, loc.zip].filter(Boolean).join(', ');
         selectedCarts = []; locSearchQ = '';
+        grabBeforeRerender();
         rerender();
         await loadCartsForLocation(loc.mx_id);
       });
@@ -1468,6 +1523,7 @@ async function renderWoAdd(root) {
         selectedLocation = null;
         form.store_name = ''; form.store_id = ''; form.store_address = '';
         mxCarts = []; selectedCarts = []; cartDropOpen = false; locSearchQ = '';
+        grabBeforeRerender();
         rerender();
       });
     }
@@ -1475,7 +1531,7 @@ async function renderWoAdd(root) {
     // Cart dropdown — toggle open/close.
     const cartDropBtn = document.getElementById('cartDropBtn');
     if (cartDropBtn) {
-      cartDropBtn.addEventListener('click', () => { cartDropOpen = !cartDropOpen; cartFilterQ = ''; rerender(); });
+      cartDropBtn.addEventListener('click', () => { grabBeforeRerender(); cartDropOpen = !cartDropOpen; cartFilterQ = ''; rerender(); });
     }
 
     // Cart panel: search filter (in-place) + checkbox change (in-place).
@@ -1662,7 +1718,7 @@ async function renderTimer(root) {
             ${paused
               ? `<div class="wo" style="color:#b26b00;">On break <strong data-breakclock data-break-start="${a.break_started_at}">00:00:00</strong> · typical 30 min — deducted from ${isDrive ? 'billable driving time' : 'your timesheet'}</div>
                  <div class="alert warn" data-break-warn style="display:none; margin-top:8px;"><span class="ico">⚠</span><div class="body">Break over 60 min — this entry will be flagged for review.</div></div>`
-              : `<div class="wo">${isDrive ? 'Drive time — billable, tracked separately from labor' : `Expected ${expected.toFixed(1)} hrs · flag if > ${(expected * 1.5).toFixed(1)} hrs`}</div>`}
+              : `<div class="wo">${isDrive ? 'Drive time — billable, tracked separately from labor' : `Expected ${expected.toFixed(1)} hrs · maximum ${(expected * 1.5).toFixed(1)} hrs`}</div>`}
           </div>
           ${gpsChip(a.gps_lat_in, a.gps_lng_in, a.gps_accuracy_in, 'Clock-in location')}
           <div class="actions">
@@ -1785,6 +1841,36 @@ async function renderAdd(root) {
   ]);
   const target = pinned || current;
   const open = wos.filter(w => ['open','in_progress'].includes(w.status));
+
+  // v0.89 — if the resolved invoice is not a draft, the tech cannot add to it.
+  // Show a clear locked message instead of a form whose submission would succeed
+  // on the client but silently discard the data on the server.
+  // v0.93 — message now reflects the exact invoice status (Approved vs Submitted)
+  // so techs understand why modification is blocked.
+  if (target?.invoice && target.invoice.status !== 'draft') {
+    const isApproved = ['approved_ops','approved_sr','queued_ap','sent_ap'].includes(target.invoice.status);
+    root.innerHTML = `
+      <div class="card" style="border-left: 4px solid var(--err-fg, #c00); background: var(--err-bg, #fff0f0); padding: 16px 18px; margin-bottom: 14px;">
+        <div style="font-size: 14px; font-weight: 700; color: var(--err-fg, #c00); margin-bottom: 6px;">
+          🔒 Invoice ${isApproved ? 'approved' : 'submitted'} — no changes allowed
+        </div>
+        <div style="font-size: 13px; color: var(--ink-2); margin-bottom: 12px;">
+          <strong>${escapeHTML(target.invoice.invoice_number)}</strong> is
+          <strong>${escapeHTML(labelForStatus(target.invoice.status))}</strong>
+          and cannot be modified. New expenses or time entries cannot be added
+          to ${isApproved ? 'an approved' : 'a submitted'} invoice.
+        </div>
+        <div style="font-size: 12px; color: var(--ink-2);">
+          ${isApproved
+            ? 'This invoice has been approved by your Ops Manager. Contact them if a correction is needed.'
+            : 'This invoice is under review. Contact your Ops Manager if a correction is needed.'}
+        </div>
+      </div>
+      <button class="btn btn-ghost btn-block" id="backToInvBtn">← Back to invoice</button>
+    `;
+    $('#backToInvBtn').addEventListener('click', () => goto('invDetail', target.invoice.id));
+    return;
+  }
 
   // Default the expense date into the target invoice's period so the server's
   // auto-attach logic finds the right draft.
@@ -5481,16 +5567,26 @@ async function openUploadInvoiceSheet() {
   });
 }
 
+// v0.88 — renderTeam: credential status badges + available-list search
 async function renderTeam(root) {
   const [team, available] = await Promise.all([
     api('/team'),
     api('/team/available'),
   ]);
+  const noCreds = team.filter(t => !t.has_password);
   root.innerHTML = `
     <div class="card">
       <p class="help" style="margin: 0 0 10px;">Add existing technicians to your approval queue, or create a brand-new technician account.</p>
       <button class="btn btn-primary btn-block" id="newTechBtn">＋ Create new technician</button>
     </div>
+
+    ${noCreds.length ? `
+      <div class="alert" style="background:#fff7ef;border:1px solid var(--ic-orange);color:#b56400;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:13px;">
+        <strong>⚠️ ${noCreds.length} tech${noCreds.length > 1 ? 's need' : ' needs'} login credentials</strong>
+        — ask a PM to open Admin → User Management and set a temporary password for:
+        ${noCreds.map(t => escapeHTML(t.name)).join(', ')}.
+      </div>
+    ` : ''}
 
     <div class="section-title">My team (${team.length})</div>
     ${team.length === 0
@@ -5501,6 +5597,7 @@ async function renderTeam(root) {
               <div>
                 <div style="font-weight: 700;">${escapeHTML(t.name)}</div>
                 <div class="meta">${escapeHTML(t.email)} · ${t.worker_type || 'unknown'} · $${(t.hourly_rate || 0).toFixed(0)}/hr</div>
+                ${!t.has_password ? `<span style="display:inline-block;margin-top:5px;font-size:11px;padding:2px 7px;border-radius:8px;background:#fef4e7;color:#b56400;border:1px solid #f5c87a;">⚠️ No login credentials</span>` : ''}
               </div>
               <button class="btn btn-ghost btn-sm" data-remove="${t.id}">Remove</button>
             </div>
@@ -5508,13 +5605,17 @@ async function renderTeam(root) {
         `).join('')}</div>`}
 
     ${available.length ? `
-      <div class="section-title">Available to add (${available.length})</div>
-      <div class="card-grid">${available.map(t => `
-        <div class="card" style="padding: 12px 14px; background: #fafafa;">
+      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <span>Available to add (${available.length})</span>
+        <input id="availSearch" type="search" placeholder="Search by name or email…"
+          style="flex:1;min-width:150px;max-width:280px;padding:5px 9px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg);color:var(--fg);">
+      </div>
+      <div class="card-grid" id="availGrid">${available.map(t => `
+        <div class="card avail-card" data-avail-key="${escapeHTML((t.name+' '+t.email).toLowerCase())}" style="padding: 12px 14px; background: #fafafa;">
           <div class="flex between" style="align-items: center;">
             <div>
               <div style="font-weight: 700;">${escapeHTML(t.name)}</div>
-              <div class="meta">${escapeHTML(t.email)} · ${t.worker_type || 'unknown'}</div>
+              <div class="meta">${escapeHTML(t.email)} · ${t.worker_type || 'unknown'}${!t.has_password ? ' · <span style="color:#b56400;">no credentials yet</span>' : ''}</div>
             </div>
             <button class="btn btn-primary btn-sm" data-add="${t.id}">+ Add</button>
           </div>
@@ -5522,6 +5623,14 @@ async function renderTeam(root) {
       `).join('')}</div>
     ` : ''}
   `;
+
+  // Issue 2 — search filter for available list
+  $('#availSearch')?.addEventListener('input', e => {
+    const q = e.target.value.trim().toLowerCase();
+    $$('.avail-card').forEach(card => {
+      card.style.display = (!q || card.dataset.availKey.includes(q)) ? '' : 'none';
+    });
+  });
 
   $$('[data-add]').forEach(b => b.addEventListener('click', async () => {
     try {
@@ -5541,10 +5650,11 @@ async function renderTeam(root) {
   $('#newTechBtn')?.addEventListener('click', openNewTechSheet);
 }
 
+// v0.88 — updated handoff message after tech creation
 function openNewTechSheet() {
   showSheet(`
     <h3>Create new technician</h3>
-    <p class="help">The new tech is added to your team automatically and can sign in immediately (single-machine prototype mode).</p>
+    <p class="help">The new account is added to your team. <strong>A PM must set a temporary password</strong> before the technician can sign in — you'll see a reminder badge until that's done.</p>
     <span class="label">Full name</span>
     <input class="field" id="ntName" placeholder="John Brennan" />
     <span class="label">Email</span>
@@ -5590,9 +5700,10 @@ function openNewTechSheet() {
         if (!body.name || !body.email) return toast('Name and email required', 'err');
         try {
           await api('/users', { method: 'POST', body });
-          toast(`Created ${body.name} ✓`, 'ok');
           closeSheet();
           goto('team');
+          // v0.88 — remind Ops Manager that credentials still need provisioning
+          setTimeout(() => toast(`${body.name} created — ask a PM to set their login password`, 'warn'), 200);
         } catch (e) { toast(e.message, 'err'); }
       });
     },
@@ -5677,15 +5788,25 @@ async function renderAdmin(root) {
     return;
   }
   const users = await api('/admin/users');
+  // v0.88 — surface technicians with no password so PMs can action them
+  const needsCreds = users.filter(u => u.role === 'technician' && u.status === 'active' && !u.has_password);
   const groups = [
     { key: 'active',   label: 'Active users',   filter: u => u.status === 'active' },
     { key: 'disabled', label: 'Disabled',       filter: u => u.status === 'disabled' },
   ];
   root.innerHTML = `
-    <div class="card" style="display: flex; justify-content: space-between; align-items: center;">
+    ${needsCreds.length ? `
+      <div class="alert" style="background:#fff7ef;border:1px solid var(--ic-orange);color:#b56400;border-radius:8px;padding:12px 16px;margin-bottom:12px;">
+        <div style="font-weight:700;margin-bottom:4px;">⚠️ ${needsCreds.length} technician${needsCreds.length > 1 ? 's' : ''} need login credentials</div>
+        <div style="font-size:13px;">Use <em>Reset password</em> below to set a temporary password for each. They won't be able to sign in until this is done.</div>
+      </div>
+    ` : ''}
+    <div class="card" style="display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
       <div>
         <strong>${users.length}</strong> total · <strong>${users.filter(u => u.status==='active').length}</strong> active
       </div>
+      <input id="userSearchInput" type="search" placeholder="Search by name, username or email…"
+        style="flex:1; min-width:180px; max-width:320px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; background:var(--bg); color:var(--fg);">
       <button class="btn btn-primary btn-sm" id="addUserBtn">＋ Add user</button>
     </div>
 
@@ -5693,14 +5814,14 @@ async function renderAdmin(root) {
       const list = users.filter(g.filter);
       if (!list.length) return '';
       return `
-        <div class="section-title">${escapeHTML(g.label)} (${list.length})</div>
+        <div class="section-title" data-group="${g.key}">${escapeHTML(g.label)} (${list.length})</div>
         ${list.map(u => `
-          <div class="card" style="padding: 14px 16px;${u.status==='disabled'?' opacity:0.6;':''}">
+          <div class="card" data-user-card data-search-key="${escapeHTML((u.name+' '+u.username+' '+u.email).toLowerCase())}" style="padding: 14px 16px;${u.status==='disabled'?' opacity:0.6;':''}">
             <div class="flex between" style="align-items: flex-start;">
               <div style="flex: 1; min-width: 0;">
                 <div style="font-weight: 700;">${escapeHTML(u.name)}</div>
-                <div class="meta">
-                  <code>${escapeHTML(u.username || '(no username)')}</code> · ${escapeHTML(u.email)}
+                <div class="meta" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                  <code title="${escapeHTML(u.username || '')}">${escapeHTML(u.username || '(no username)')}</code> · ${escapeHTML(u.email)}
                 </div>
                 <div style="margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap;">
                   <span class="role-tag ${u.role}">${escapeHTML(roleLabel(u.role))}</span>
@@ -5725,6 +5846,24 @@ async function renderAdmin(root) {
       `;
     }).join('')}
   `;
+
+  // v0.83 — live search: filter user cards by name / username / email
+  $('#userSearchInput')?.addEventListener('input', e => {
+    const q = e.target.value.trim().toLowerCase();
+    $$('[data-user-card]').forEach(card => {
+      card.style.display = (!q || card.dataset.searchKey.includes(q)) ? '' : 'none';
+    });
+    // hide section headers when all their cards are hidden
+    $$('[data-group]').forEach(hdr => {
+      let next = hdr.nextElementSibling;
+      let anyVisible = false;
+      while (next && next.hasAttribute('data-user-card')) {
+        if (next.style.display !== 'none') anyVisible = true;
+        next = next.nextElementSibling;
+      }
+      hdr.style.display = anyVisible ? '' : 'none';
+    });
+  });
 
   $('#addUserBtn')?.addEventListener('click', () => openAddUserSheet());
   $$('[data-edit-user]').forEach(b => b.addEventListener('click', () => {
@@ -6194,13 +6333,13 @@ function openAddUserSheet() {
     <input class="field" id="auName" autofocus />
 
     <div class="flex gap-12">
-      <div style="flex:1;">
+      <div style="flex:1; min-width:0;">
         <span class="label">Email</span>
         <input class="field" id="auEmail" type="email" />
       </div>
-      <div style="flex:1;">
+      <div style="flex:1; min-width:0;">
         <span class="label">Username</span>
-        <input class="field" id="auUsername" />
+        <input class="field" id="auUsername" maxlength="50" />
       </div>
     </div>
 
@@ -6257,12 +6396,35 @@ function openAddUserSheet() {
           body.worker_type = $('#auWorkerType', wrap).value;
           body.hourly_rate = Number($('#auRate', wrap).value) || 40;
         }
+        // v0.87.2 — clear any prior field errors before submitting
+        ['auEmail','auUsername'].forEach(id => {
+          const el = $(`#${id}`, wrap);
+          if (el) { el.style.borderColor = ''; const err = wrap.querySelector(`#${id}Err`); if (err) err.remove(); }
+        });
         try {
           await api('/admin/users', { method: 'POST', body });
           toast('User created ✓', 'ok');
           closeSheet();
           goto('admin');
-        } catch (e) { toast(e.message, 'err'); }
+        } catch (e) {
+          // v0.87.2 — highlight the duplicate field if the server identified it
+          const field = e.data && e.data.field;
+          if (field === 'email' || field === 'username') {
+            const inputId = field === 'email' ? 'auEmail' : 'auUsername';
+            const el = $(`#${inputId}`, wrap);
+            if (el) {
+              el.style.borderColor = 'var(--color-err, #e53)';
+              el.focus();
+              const errMsg = document.createElement('span');
+              errMsg.id = `${inputId}Err`;
+              errMsg.style.cssText = 'color:var(--color-err,#e53);font-size:12px;margin-top:-6px;display:block;';
+              errMsg.textContent = e.message;
+              el.insertAdjacentElement('afterend', errMsg);
+            }
+          } else {
+            toast(e.message, 'err');
+          }
+        }
       });
     },
   });
@@ -6274,13 +6436,13 @@ function openEditUserSheet(u) {
     <span class="label">Full name</span>
     <input class="field" id="euName" value="${escapeHTML(u.name)}" />
     <div class="flex gap-12">
-      <div style="flex:1;">
+      <div style="flex:1; min-width:0;">
         <span class="label">Email</span>
         <input class="field" id="euEmail" type="email" value="${escapeHTML(u.email)}" />
       </div>
-      <div style="flex:1;">
+      <div style="flex:1; min-width:0;">
         <span class="label">Username</span>
-        <input class="field" id="euUsername" value="${escapeHTML(u.username || '')}" />
+        <input class="field" id="euUsername" maxlength="50" value="${escapeHTML(u.username || '')}" />
       </div>
     </div>
     <span class="label">Role</span>
@@ -6299,6 +6461,11 @@ function openEditUserSheet(u) {
     onMount: (wrap) => {
       $$('[data-act="sheet-close"]', wrap).forEach(b => b.addEventListener('click', closeSheet));
       $('#euSave', wrap).addEventListener('click', async () => {
+        // v0.87.2 — clear any prior field errors before submitting
+        ['euEmail','euUsername'].forEach(id => {
+          const el = $(`#${id}`, wrap);
+          if (el) { el.style.borderColor = ''; const err = wrap.querySelector(`#${id}Err`); if (err) err.remove(); }
+        });
         try {
           await api(`/admin/users/${u.id}`, { method: 'PATCH', body: {
             name:     $('#euName', wrap).value.trim(),
@@ -6309,7 +6476,25 @@ function openEditUserSheet(u) {
           toast('User updated ✓', 'ok');
           closeSheet();
           goto('admin');
-        } catch (e) { toast(e.message, 'err'); }
+        } catch (e) {
+          // v0.87.2 — highlight the duplicate field if the server identified it
+          const field = e.data && e.data.field;
+          if (field === 'email' || field === 'username') {
+            const inputId = field === 'email' ? 'euEmail' : 'euUsername';
+            const el = $(`#${inputId}`, wrap);
+            if (el) {
+              el.style.borderColor = 'var(--color-err, #e53)';
+              el.focus();
+              const errMsg = document.createElement('span');
+              errMsg.id = `${inputId}Err`;
+              errMsg.style.cssText = 'color:var(--color-err,#e53);font-size:12px;margin-top:-6px;display:block;';
+              errMsg.textContent = e.message;
+              el.insertAdjacentElement('afterend', errMsg);
+            }
+          } else {
+            toast(e.message, 'err');
+          }
+        }
       });
     },
   });
@@ -10133,7 +10318,9 @@ function openPastInvoiceSheet() {
         if (!d) return toast('Pick a date', 'err');
         try {
           const r = await api('/invoices/for-week', { method: 'POST', body: { week_of: d } });
-          toast(`Draft created: ${r.invoice.invoice_number}`, 'ok');
+          // v0.93 — server sets r.created=true only when a new draft was minted;
+          // false means an existing open draft for that week was returned.
+          toast(r.created ? `Draft created: ${r.invoice.invoice_number}` : `Opening existing draft: ${r.invoice.invoice_number}`, 'ok');
           closeSheet();
           goto('invDetail', r.invoice.id);
         } catch (e) { toast(e.message, 'err'); }
@@ -10257,6 +10444,22 @@ async function renderInvoiceDetail(root, invoiceId) {
           ${invoice.status === 'draft' ? `Open invoice ${idx + 1} of ${navList.length}` : `${idx + 1} of ${navList.length}`}
         </span>
         <button class="btn btn-ghost btn-sm" id="nextInv" ${!older ? 'disabled' : ''}>Older ›</button>
+      </div>
+    ` : ''}
+
+    <!-- v0.93 — Locked invoice notice for technicians viewing an approved/queued/
+         sent invoice. Makes it unambiguous that the record is final, and links
+         to the current week's draft so the tech knows where to add new entries. -->
+    ${['approved_ops','approved_sr','queued_ap','sent_ap'].includes(invoice.status) && invoice.invoice_type !== 'vendor' && (me.role === 'technician' || isManagerProxy) ? `
+      <div class="card" style="border-left: 4px solid var(--err-fg, #c00); background: var(--err-bg, #fff0f0); padding: 14px 16px; margin-bottom: 14px;">
+        <div style="font-size: 13px; font-weight: 700; color: var(--err-fg, #c00); margin-bottom: 6px;">
+          🔒 This invoice is ${escapeHTML(labelForStatus(invoice.status))} — no changes allowed
+        </div>
+        <div style="font-size: 12px; color: var(--ink-2); margin-bottom: 10px;">
+          Entries for <strong>${escapeHTML(fmtDate(invoice.period_start))} → ${escapeHTML(fmtDate(invoice.period_end))}</strong> are locked.
+          Any new labor or expense entries will go to your <strong>current week's invoice</strong>, not this one.
+        </div>
+        <button class="btn btn-ghost btn-sm" id="goCurrentInvBtn">Open current invoice →</button>
       </div>
     ` : ''}
 
@@ -10929,6 +11132,8 @@ async function renderInvoiceDetail(root, invoiceId) {
 
   $('#prevInv')?.addEventListener('click', () => { if (newer) goto('invDetail', newer.id); });
   $('#nextInv')?.addEventListener('click', () => { if (older) goto('invDetail', older.id); });
+  // v0.93 — locked invoice notice: takes tech to their current week's draft.
+  $('#goCurrentInvBtn')?.addEventListener('click', () => goto('invoice'));
   $('#exitProxy')?.addEventListener('click', () => {
     STATE.onBehalfOf = null; STATE.onBehalfOfName = null;
     toast('Exited proxy mode');
@@ -11266,11 +11471,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (act === 'change-password') openChangePasswordSheet({ forced: false });
     if (act === 'settings') { goto('settings'); }
     if (act === 'back')     {
-      if (STATE.view === 'woAdd')     return goto('woPick');
-      if (STATE.view === 'woDetail')  return goto(STATE._prevView === 'woHistory' ? 'woHistory' : 'home');
-      if (STATE.view === 'invDetail') return goto('mine');
-      if (STATE.view === 'settings')  return goto('home');
-      goto('home');
+      // v0.90 — route the header ‹ through the browser history so the button and
+      // the hardware/browser Back gesture share one code path (the popstate
+      // listener below). Back now returns to the true previous screen.
+      history.back();
+      return;
     }
   });
   // v0.65.1 (F-M7) — guard against accidental double-submits: swallow a second
@@ -11283,6 +11488,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (_lastClick.el === btn && now - _lastClick.t < 500) { e.stopImmediatePropagation(); e.preventDefault(); return; }
     _lastClick = { el: btn, t: now };
   }, true);
+  // v0.90 — hardware/browser Back gesture shares one path with the header ‹.
+  // First dismiss an open dismissable sheet; otherwise pop the nav stack. At the
+  // root, re-arm a history entry so the gesture keeps working and the app isn't
+  // unexpectedly exited mid-session.
+  try { history.scrollRestoration = 'manual'; } catch (_) {}
+  window.addEventListener('popstate', () => {
+    if (closeDismissableSheet()) { try { history.pushState({ otg: 1 }, ''); } catch (_) {} return; }
+    if (Array.isArray(STATE._nav) && STATE._nav.length > 1) goBackCore();
+    else { try { history.pushState({ otg: 1 }, ''); } catch (_) {} }
+  });
   initA11y();
   boot();
 });

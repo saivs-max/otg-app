@@ -34,6 +34,31 @@ function finalizeBreak(db, e) {
   return { break_minutes, break_flagged, minutes };
 }
 
+// v0.93 — Returns the first time entry for `userId`+`workOrderId` that overlaps
+// the interval [clockIn, clockOut). Excludes `excludeId` (pass 0 on create).
+// Active (running) entries are treated as open-ended: they overlap anything that
+// starts before "now" (i.e. clock_in < clockOut). A null clockOut means the
+// active entry extends to the future, so any new entry whose start is before
+// the active entry's clock_out (or its current time, if still running) overlaps.
+function findOverlap(db, userId, workOrderId, clockIn, clockOut, excludeId) {
+  const ciISO = clockIn instanceof Date ? clockIn.toISOString() : clockIn;
+  const coISO = clockOut instanceof Date ? clockOut.toISOString() : clockOut;
+  return db.prepare(`
+    SELECT id, clock_in, clock_out, mode FROM time_entries
+    WHERE user_id        = ?
+      AND work_order_id  = ?
+      AND id            != ?
+      AND (
+        -- completed entry whose range intersects [ciISO, coISO)
+        (clock_out IS NOT NULL AND clock_in < ? AND clock_out > ?)
+        OR
+        -- running entry: open-ended, overlaps anything starting before coISO
+        (clock_out IS NULL AND clock_in < ?)
+      )
+    LIMIT 1
+  `).get(userId, workOrderId, excludeId || 0, coISO, ciISO, coISO);
+}
+
 module.exports = (db) => {
   // GET /api/timeentries/active   → ALL currently-running entries (array)
   // Multiple active timers are allowed: a tech may run 2 jobs at one site.
@@ -142,23 +167,75 @@ module.exports = (db) => {
       if (co.getTime() > Date.now() + 5*60*1000) return res.status(400).json({ error: 'clock_out cannot be in the future' });
       if (co.getTime() - ci.getTime() > 24*60*60*1000) return res.status(400).json({ error: 'a single time entry cannot exceed 24 hours — split it into multiple entries' });
 
+      // v0.89 — same locked-invoice guard as POST /expenses: auto-attach only
+      // finds draft invoices, so a manual entry against a locked-invoice period
+      // would succeed silently but never appear. Reject with a 409 instead.
+      const ciDate = ci.toISOString().slice(0, 10);
+      {
+        const hasDraft = db.prepare(`
+          SELECT id FROM invoices
+          WHERE user_id = ? AND status = 'draft'
+            AND ? BETWEEN period_start AND period_end
+          ORDER BY id DESC LIMIT 1
+        `).get(effectiveUserId, ciDate);
+        if (!hasDraft) {
+          const locked = db.prepare(`
+            SELECT invoice_number, status FROM invoices
+            WHERE user_id = ? AND status NOT IN ('draft')
+              AND ? BETWEEN period_start AND period_end
+            ORDER BY id DESC LIMIT 1
+          `).get(effectiveUserId, ciDate);
+          if (locked) {
+            return res.status(409).json({
+              error: `This invoice (${locked.invoice_number}) has already been submitted and cannot be modified. Contact your manager if a correction is needed.`,
+              invoice_locked: true,
+            });
+          }
+        }
+      }
+
+      // v0.93 — reject manual entries that overlap an existing time entry on the
+      // same user + WO. Prevents double-billing when a completed live timer and a
+      // backdated manual entry cover the same interval.
+      {
+        const conflict = findOverlap(db, effectiveUserId, Number(work_order_id), ci, co, 0);
+        if (conflict) {
+          const from = conflict.clock_in.replace('T', ' ').slice(0, 16);
+          const to   = conflict.clock_out ? conflict.clock_out.replace('T', ' ').slice(0, 16) : 'still running';
+          return res.status(409).json({
+            error: `This entry overlaps an existing ${conflict.mode} entry (${from} – ${to}). ` +
+                   `Please adjust the times to avoid duplicate billing.`,
+            conflicting_entry_id: conflict.id,
+          });
+        }
+      }
+
       const r = db.prepare(`
         INSERT INTO time_entries (user_id, work_order_id, clock_in, clock_out, break_minutes, notes, mode)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(effectiveUserId, Number(work_order_id), ci.toISOString(), co.toISOString(),
              Number(break_minutes) || 0, notes || null, mode);
       const newId = r.lastInsertRowid;
-      // Auto-attach to a draft invoice whose period contains the clock_in
-      // date — date-in-range so non-Mon-Sun periods (e.g. fortnightly
-      // contractor invoices) still match.
-      const ciDate = ci.toISOString().slice(0, 10);
-      const draft = db.prepare(`
-        SELECT id FROM invoices
-        WHERE user_id = ? AND status = 'draft'
-          AND ? BETWEEN period_start AND period_end
-        ORDER BY id DESC LIMIT 1
-      `).get(effectiveUserId, ciDate);
-      if (draft) db.prepare(`UPDATE time_entries SET invoice_id = ? WHERE id = ?`).run(draft.id, newId);
+      // v0.92 — never strand the entry: get-or-create a DRAFT covering ciDate
+      // (mints a supplemental draft when the week's invoice is already
+      // submitted/approved) so logged labor always lands on an invoice. Falls
+      // back to the legacy conditional attach if the invoices module isn't
+      // mounted (e.g. a minimal test harness) — mirrors the db.__computeInvoice
+      // guard used elsewhere in this file.
+      let draft = null;
+      if (typeof db.__ensureDraftForEntry === 'function') {
+        draft = db.__ensureDraftForEntry(effectiveUserId, ciDate);
+        db.prepare(`UPDATE time_entries SET invoice_id = ? WHERE id = ?`).run(draft.id, newId);
+        try { if (typeof db.__computeInvoice === 'function') db.__computeInvoice(draft.id); } catch (_) {}
+      } else {
+        draft = db.prepare(`
+          SELECT id FROM invoices
+          WHERE user_id = ? AND status = 'draft'
+            AND ? BETWEEN period_start AND period_end
+          ORDER BY id DESC LIMIT 1
+        `).get(effectiveUserId, ciDate);
+        if (draft) db.prepare(`UPDATE time_entries SET invoice_id = ? WHERE id = ?`).run(draft.id, newId);
+      }
 
       logAudit(db, { entity_type: 'time_entries', entity_id: newId, user_id: userId,
                      action: 'manual_entry',
@@ -376,17 +453,39 @@ module.exports = (db) => {
       }
       const now = new Date().toISOString();
       const gps = req.body.gps;
-      db.prepare(`
-        UPDATE time_entries
-        SET clock_out = ?, break_minutes = ?, break_flagged = ?, notes = ?,
-            gps_lat_out = ?, gps_lng_out = ?, gps_accuracy_out = ?
-        WHERE id = ?
-      `).run(now, effBreak || 0, effFlagged, notes,
-             gps?.lat ?? null, gps?.lng ?? null, gps?.accuracy ?? null,
-             id);
+      // v0.93 — if this running entry is already attached to a locked invoice
+      // (approved, queued, sent), detach it on clock-out so the completed entry
+      // re-attaches to the current draft instead of silently modifying an
+      // already-approved invoice. The tech is always allowed to clock out.
+      const LOCKED_STATUSES = ['approved_ops','approved_sr','queued_ap','sent_ap'];
+      let shouldDetach = false;
+      if (e.invoice_id) {
+        const inv = db.prepare("SELECT status FROM invoices WHERE id = ?").get(e.invoice_id);
+        if (inv && LOCKED_STATUSES.includes(inv.status)) shouldDetach = true;
+      }
+      if (shouldDetach) {
+        db.prepare(`
+          UPDATE time_entries
+          SET clock_out = ?, break_minutes = ?, break_flagged = ?, notes = ?,
+              gps_lat_out = ?, gps_lng_out = ?, gps_accuracy_out = ?,
+              invoice_id = NULL
+          WHERE id = ?
+        `).run(now, effBreak || 0, effFlagged, notes,
+               gps?.lat ?? null, gps?.lng ?? null, gps?.accuracy ?? null,
+               id);
+      } else {
+        db.prepare(`
+          UPDATE time_entries
+          SET clock_out = ?, break_minutes = ?, break_flagged = ?, notes = ?,
+              gps_lat_out = ?, gps_lng_out = ?, gps_accuracy_out = ?
+          WHERE id = ?
+        `).run(now, effBreak || 0, effFlagged, notes,
+               gps?.lat ?? null, gps?.lng ?? null, gps?.accuracy ?? null,
+               id);
+      }
       logAudit(db, {
         entity_type: 'time_entries', entity_id: id, user_id: userId, action: 'clock_out',
-        details: { break_minutes: effBreak, break_flagged: effFlagged, gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null },
+        details: { break_minutes: effBreak, break_flagged: effFlagged, gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null, detached_from_locked_invoice: shouldDetach },
       });
     } else {
       // Branch B: already clocked out → editing a logged entry.
@@ -446,6 +545,19 @@ module.exports = (db) => {
       }
       if (new Date(clockOut).getTime() - new Date(clockIn).getTime() > 24*60*60*1000) {
         return res.status(400).json({ error: 'a single time entry cannot exceed 24 hours — split it into multiple entries' });
+      }
+      // v0.93 — overlap guard on edit: exclude self (id) from the check.
+      {
+        const conflict = findOverlap(db, e.user_id, workOrderId, clockIn, clockOut, id);
+        if (conflict) {
+          const from = conflict.clock_in.replace('T', ' ').slice(0, 16);
+          const to   = conflict.clock_out ? conflict.clock_out.replace('T', ' ').slice(0, 16) : 'still running';
+          return res.status(409).json({
+            error: `Edited times overlap an existing ${conflict.mode} entry (${from} – ${to}). ` +
+                   `Please adjust the times to avoid duplicate billing.`,
+            conflicting_entry_id: conflict.id,
+          });
+        }
       }
       db.prepare(`
         UPDATE time_entries
