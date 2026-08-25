@@ -5817,12 +5817,12 @@ async function renderAdmin(root) {
       return `
         <div class="section-title" data-group="${g.key}">${escapeHTML(g.label)} (${list.length})</div>
         ${list.map(u => `
-          <div class="card" data-user-card data-search-key="${escapeHTML((u.name+' '+u.username+' '+u.email).toLowerCase())}" style="padding: 14px 16px;${u.status==='disabled'?' opacity:0.6;':''}">
+          <div class="card" data-user-card data-search-key="${escapeHTML((u.name+' '+(u.username||'')+' '+u.email).toLowerCase())}" style="padding: 14px 16px;${u.status==='disabled'?' opacity:0.6;':''}">
             <div class="flex between" style="align-items: flex-start;">
               <div style="flex: 1; min-width: 0;">
                 <div style="font-weight: 700;">${escapeHTML(u.name)}</div>
                 <div class="meta" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-                  <code title="${escapeHTML(u.username || '')}">${escapeHTML(u.username || '(no username)')}</code> · ${escapeHTML(u.email)}
+                  ${u.username ? `<code title="${escapeHTML(u.username)}">${escapeHTML(u.username)}</code> · ` : ''}<span style="${u.username ? '' : 'color:var(--fg-muted,#888);font-style:italic;'}">${escapeHTML(u.email)}</span>${!u.username ? `&ensp;<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:var(--warn-bg,#fef4e7);color:var(--warn-fg,#b56400);border:1px solid var(--warn-border,#f5c87a);font-style:normal;">no username</span>` : ''}
                 </div>
                 <div style="margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap;">
                   <span class="role-tag ${u.role}">${escapeHTML(roleLabel(u.role))}</span>
