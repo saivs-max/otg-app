@@ -4560,16 +4560,16 @@ async function renderApprovalQueue(root) {
 // it (Sr Mgr approval is optional); the creator still can't self-approve.
 async function openVendorInvoiceSheet() {
   let pendingFile = null;
-  // v0.75 — saved-vendor picker. A real <select> dropdown of saved vendors
-  // (reliable to open/select) PLUS a text input to add a brand-new vendor not in
-  // the list. Replaces the datalist, which some browsers wouldn't open.
+  // v0.88 — vendor must come from the Vendor Master List only. The free-text
+  // input has been removed; only approved vendors may be selected.
   let vendorOptions = [];
   try { vendorOptions = (await api('/vendors')).vendors || []; } catch (_) {}
-  const vendorSelectHtml = vendorOptions.length ? `
-          <select class="field" id="vnVendorSelect" style="margin-bottom: 6px;">
-            <option value="">— Pick a saved vendor —</option>
+  const vendorSelectHtml = vendorOptions.length
+    ? `<select class="field" id="vnVendorSelect">
+            <option value="">— Select vendor —</option>
             ${vendorOptions.map(v => `<option value="${escapeHTML(v.name)}">${escapeHTML(v.name)}${v.invoice_count ? ` (${v.invoice_count})` : ''}</option>`).join('')}
-          </select>` : '';
+          </select>`
+    : `<p class="help" style="color: var(--red, #c00); margin: 4px 0 8px;">No vendors in the master list. Add a vendor in <strong>Settings → Vendors</strong> before uploading an invoice.</p>`;
   function html() {
     const isPdf = pendingFile && /pdf/i.test(pendingFile.mime_type || '') || /\.pdf$/i.test(pendingFile?.filename || '');
     return `
@@ -4596,7 +4596,6 @@ async function openVendorInvoiceSheet() {
         <div style="margin-top: 10px; padding: 12px; background: #fafbfc; border-radius: 8px;">
           <span class="label">Vendor name</span>
           ${vendorSelectHtml}
-          <input class="field" id="vnName" type="text" autocomplete="off" placeholder="${vendorOptions.length ? '…or type a new vendor name' : 'Vendor name'}" />
 
           <div class="flex gap-12" style="margin-top: 8px;">
             <div style="flex:2;">
@@ -4633,7 +4632,7 @@ async function openVendorInvoiceSheet() {
 
       <div class="actions">
         <button class="btn btn-ghost" data-act="sheet-close">Cancel</button>
-        <button class="btn btn-primary" id="vnSave">${pendingFile && isPdf ? '📄 Parse PDF & open preview' : 'Create draft &rarr;'}</button>
+        <button class="btn btn-primary" id="vnSave" ${!vendorOptions.length ? 'disabled title="Add a vendor to the master list first"' : ''}>${pendingFile && isPdf ? '📄 Parse PDF & open preview' : 'Create draft &rarr;'}</button>
       </div>
     `;
   }
@@ -4642,8 +4641,7 @@ async function openVendorInvoiceSheet() {
       function rerender() { wrap.querySelector('.sheet').innerHTML = `<div class="sheet-handle"></div>${html()}`; bindAll(); }
       function bindAll() {
         $$('[data-act="sheet-close"]', wrap).forEach(b => b.addEventListener('click', closeSheet));
-        // v0.75 — picking a saved vendor fills the name input (still editable / typeable).
-        $('#vnVendorSelect', wrap)?.addEventListener('change', (e) => { if (e.target.value) $('#vnName', wrap).value = e.target.value; });
+        // v0.88 — vendor is select-only; no free-text input.
         $('#vnClearFile', wrap)?.addEventListener('click', () => { pendingFile = null; rerender(); });
         const fp = $('#vnFilePicker', wrap);
         if (fp && !pendingFile) {
@@ -4655,7 +4653,7 @@ async function openVendorInvoiceSheet() {
         $('#vnSave', wrap).addEventListener('click', async () => {
           const isPdf = pendingFile && (/pdf/i.test(pendingFile.mime_type || '') || /\.pdf$/i.test(pendingFile.filename));
           const body = {
-            vendor_name:           $('#vnName',   wrap).value.trim() || undefined,
+            vendor_name:           ($('#vnVendorSelect', wrap)?.value || '').trim() || undefined,
             vendor_invoice_number: $('#vnNum',    wrap).value.trim() || undefined,
             vendor_invoice_date:   $('#vnDate',   wrap).value         || undefined,
             total:                 Number($('#vnTotal', wrap).value) || undefined,
@@ -4665,7 +4663,7 @@ async function openVendorInvoiceSheet() {
           };
           // If no PDF, manual fields are required.
           if (!isPdf) {
-            if (!body.vendor_name)           return toast('Vendor name required (or attach a PDF)', 'err');
+            if (!body.vendor_name)           return toast('Select a vendor from the master list', 'err');
             if (!body.vendor_invoice_number) return toast('Invoice # required (or attach a PDF)', 'err');
             if (!body.vendor_invoice_date)   return toast('Invoice date required (or attach a PDF)', 'err');
             if (!(body.total > 0))           return toast('Total required (or attach a PDF)', 'err');
@@ -4704,22 +4702,26 @@ async function openVendorInvoiceSheet() {
 // v0.38 — Edit a vendor invoice draft (vendor name, #, date, total, period, notes).
 // PATCHes the row and re-renders invDetail so the preview shows the new values.
 async function openVendorEditSheet(invoice, onSaved) {
-  // v0.75 — saved-vendor dropdown + free-text input (pick an existing vendor or
-  // type a new one). Replaces the datalist that some browsers wouldn't open.
+  // v0.88 — vendor must come from the Vendor Master List only (no free-text).
   let vendorOptions = [];
   try { vendorOptions = (await api('/vendors')).vendors || []; } catch (_) {}
-  const vendorSelectHtml = vendorOptions.length ? `
-    <select class="field" id="veVendorSelect" style="margin-bottom: 6px;">
-      <option value="">— Pick a saved vendor —</option>
+  const vendorSelectHtml = `
+    <select class="field" id="veVendorSelect">
+      <option value="">— Select vendor —</option>
       ${vendorOptions.map(v => `<option value="${escapeHTML(v.name)}"${invoice.vendor_name === v.name ? ' selected' : ''}>${escapeHTML(v.name)}${v.invoice_count ? ` (${v.invoice_count})` : ''}</option>`).join('')}
-    </select>` : '';
+      ${invoice.vendor_name && !vendorOptions.find(v => v.name === invoice.vendor_name)
+        ? `<option value="${escapeHTML(invoice.vendor_name)}" selected>${escapeHTML(invoice.vendor_name)} ⚠ not in master list</option>`
+        : ''}
+    </select>`;
   showSheet(`
     <h3>Edit vendor invoice details</h3>
     <p class="help" style="margin-bottom: 14px;">Adjust anything that needs fixing. Changes save when you click <strong>Save</strong>.</p>
 
     <span class="label">Vendor name</span>
     ${vendorSelectHtml}
-    <input class="field" id="veName"  type="text" autocomplete="off" value="${escapeHTML(invoice.vendor_name || '')}" placeholder="${vendorOptions.length ? '…or type a new vendor name' : 'Vendor name'}" />
+    ${!vendorOptions.find(v => v.name === invoice.vendor_name) && invoice.vendor_name
+      ? `<p class="help" style="color: var(--red, #c00); margin: 2px 0 8px; font-size: 11px;">This vendor is not in the master list. Select an approved vendor before saving.</p>`
+      : ''}
 
     <div class="flex gap-12" style="margin-top: 8px;">
       <div style="flex:1;">
@@ -4769,11 +4771,10 @@ async function openVendorEditSheet(invoice, onSaved) {
   `, {
     onMount: (wrap) => {
       $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
-      // v0.75 — picking a saved vendor fills the name input (still editable).
-      $('#veVendorSelect', wrap)?.addEventListener('change', (e) => { if (e.target.value) $('#veName', wrap).value = e.target.value; });
+      // v0.88 — vendor is select-only; no free-text input.
       $('#veSave', wrap).addEventListener('click', async () => {
         const body = {
-          vendor_name:           $('#veName',         wrap).value.trim(),
+          vendor_name:           ($('#veVendorSelect', wrap)?.value || '').trim(),
           vendor_invoice_number: $('#veNum',          wrap).value.trim(),
           vendor_invoice_date:   $('#veDate',         wrap).value,
           total:                 Number($('#veTotal', wrap).value),
@@ -6330,12 +6331,12 @@ function openAddUserSheet() {
     <p class="help">Issues a temporary password. The user will be forced to change it on first login.</p>
 
     <span class="label">Full name</span>
-    <input class="field" id="auName" autofocus />
+    <input class="field" id="auName" autofocus maxlength="100" />
 
     <div class="flex gap-12">
       <div style="flex:1; min-width:0;">
         <span class="label">Email</span>
-        <input class="field" id="auEmail" type="email" />
+        <input class="field" id="auEmail" type="email" maxlength="254" />
       </div>
       <div style="flex:1; min-width:0;">
         <span class="label">Username</span>
@@ -6396,6 +6397,13 @@ function openAddUserSheet() {
           body.worker_type = $('#auWorkerType', wrap).value;
           body.hourly_rate = Number($('#auRate', wrap).value) || 40;
         }
+        // v0.88 — client-side validation before hitting the server
+        if (!body.name) { toast('Name is required', 'err'); $('#auName', wrap).focus(); return; }
+        if (body.name.length > 100) { toast('Name cannot exceed 100 characters', 'err'); $('#auName', wrap).focus(); return; }
+        if (!body.email || !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(body.email)) {
+          toast('Please enter a valid email address', 'err'); $('#auEmail', wrap).focus(); return;
+        }
+        if (body.email.length > 254) { toast('Email cannot exceed 254 characters', 'err'); $('#auEmail', wrap).focus(); return; }
         // v0.87.2 — clear any prior field errors before submitting
         ['auEmail','auUsername'].forEach(id => {
           const el = $(`#${id}`, wrap);
@@ -6434,11 +6442,11 @@ function openEditUserSheet(u) {
   const html = `
     <h3>Edit ${escapeHTML(u.name)}</h3>
     <span class="label">Full name</span>
-    <input class="field" id="euName" value="${escapeHTML(u.name)}" />
+    <input class="field" id="euName" maxlength="100" value="${escapeHTML(u.name)}" />
     <div class="flex gap-12">
       <div style="flex:1; min-width:0;">
         <span class="label">Email</span>
-        <input class="field" id="euEmail" type="email" value="${escapeHTML(u.email)}" />
+        <input class="field" id="euEmail" type="email" maxlength="254" value="${escapeHTML(u.email)}" />
       </div>
       <div style="flex:1; min-width:0;">
         <span class="label">Username</span>
@@ -6461,6 +6469,15 @@ function openEditUserSheet(u) {
     onMount: (wrap) => {
       $$('[data-act="sheet-close"]', wrap).forEach(b => b.addEventListener('click', closeSheet));
       $('#euSave', wrap).addEventListener('click', async () => {
+        // v0.88 — client-side validation before hitting the server
+        const euNameVal  = $('#euName',  wrap).value.trim();
+        const euEmailVal = $('#euEmail', wrap).value.trim();
+        if (!euNameVal) { toast('Name is required', 'err'); $('#euName', wrap).focus(); return; }
+        if (euNameVal.length > 100) { toast('Name cannot exceed 100 characters', 'err'); $('#euName', wrap).focus(); return; }
+        if (!euEmailVal || !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(euEmailVal)) {
+          toast('Please enter a valid email address', 'err'); $('#euEmail', wrap).focus(); return;
+        }
+        if (euEmailVal.length > 254) { toast('Email cannot exceed 254 characters', 'err'); $('#euEmail', wrap).focus(); return; }
         // v0.87.2 — clear any prior field errors before submitting
         ['euEmail','euUsername'].forEach(id => {
           const el = $(`#${id}`, wrap);
@@ -6468,8 +6485,8 @@ function openEditUserSheet(u) {
         });
         try {
           await api(`/admin/users/${u.id}`, { method: 'PATCH', body: {
-            name:     $('#euName', wrap).value.trim(),
-            email:    $('#euEmail', wrap).value.trim(),
+            name:     euNameVal,
+            email:    euEmailVal,
             username: $('#euUsername', wrap).value.trim(),
             role:     $('#euRole', wrap).value,
           }});
@@ -9961,8 +9978,12 @@ async function renderMine(root) {
     d.setDate(d.getDate() - (d.getDay() === 0 ? 6 : d.getDay() - 1));
     return d.toISOString().slice(0,10);
   })();
-  const currentDraft = all.find(i => i.status === 'draft' && i.period_start === thisWeekStart);
-  const others = all.filter(i => i.id !== (currentDraft && currentDraft.id));
+  // v0.94 — match ANY invoice for the current week (draft or submitted/sent/etc.),
+  // not just drafts; a sent_ap invoice was invisible here and produced the
+  // "No invoice for this week yet" false-negative alongside the real invoice in All.
+  const currentWeekInv = all.find(i => i.period_start === thisWeekStart);
+  const currentDraft = currentWeekInv?.status === 'draft' ? currentWeekInv : null;
+  const others = all.filter(i => i.id !== (currentWeekInv && currentWeekInv.id));
   // v0.67 — invoices the Ops Mgr approved that now await this tech's final step:
   // verify the details and send to AP.
   const awaitingSend = all.filter(readyToSendToAp);
@@ -10018,20 +10039,34 @@ async function renderMine(root) {
 
       <!-- THIS WEEK card (always shown, prominent) -->
       <div class="section-title">This week</div>
-      ${currentDraft
-        ? `<div class="card tap" id="openCurrent" style="border-left: 4px solid var(--ic-green); padding: 16px;">
-             <div class="flex between" style="align-items: flex-start;">
-               <div>
-                 <div style="font-size: 11px; color: var(--ic-green-deep); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700;">Current invoice · ${fmtDate(currentDraft.period_start)} → ${fmtDate(currentDraft.period_end)}</div>
-                 <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">${currentDraft.invoice_number}</div>
+      ${currentWeekInv
+        ? (currentDraft
+          ? `<div class="card tap" id="openCurrent" style="border-left: 4px solid var(--ic-green); padding: 16px;">
+               <div class="flex between" style="align-items: flex-start;">
+                 <div>
+                   <div style="font-size: 11px; color: var(--ic-green-deep); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700;">Current invoice · ${fmtDate(currentDraft.period_start)} → ${fmtDate(currentDraft.period_end)}</div>
+                   <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">${currentDraft.invoice_number}</div>
+                 </div>
+                 <div style="text-align: right;">
+                   <span class="badge draft">Draft</span>
+                   <div style="font-size: 22px; font-weight: 700; margin-top: 8px;">${fmt$(currentDraft.total)}</div>
+                 </div>
                </div>
-               <div style="text-align: right;">
-                 <span class="badge draft">Draft</span>
-                 <div style="font-size: 22px; font-weight: 700; margin-top: 8px;">${fmt$(currentDraft.total)}</div>
+               <div style="font-size: 12px; color: var(--muted); margin-top: 8px;">Tap to edit · add expenses · review &amp; submit</div>
+             </div>`
+          : `<div class="card tap" id="openCurrent" style="border-left: 4px solid var(--ic-green); padding: 16px;">
+               <div class="flex between" style="align-items: flex-start;">
+                 <div>
+                   <div style="font-size: 11px; color: var(--ic-green-deep); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700;">Current invoice · ${fmtDate(currentWeekInv.period_start)} → ${fmtDate(currentWeekInv.period_end)}</div>
+                   <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">${currentWeekInv.invoice_number}</div>
+                 </div>
+                 <div style="text-align: right;">
+                   <span class="badge ${badgeForStatus(currentWeekInv.status)}">${labelForStatus(currentWeekInv.status)}</span>
+                   <div style="font-size: 22px; font-weight: 700; margin-top: 8px;">${fmt$(currentWeekInv.total)}</div>
+                 </div>
                </div>
-             </div>
-             <div style="font-size: 12px; color: var(--muted); margin-top: 8px;">Tap to edit · add expenses · review &amp; submit</div>
-           </div>`
+               <div style="font-size: 12px; color: var(--muted); margin-top: 8px;">Tap to view</div>
+             </div>`)
         : `<div class="card" style="border-left: 4px solid var(--ic-orange); padding: 16px; background: #fff8f0;">
              <div style="font-size: 14px; font-weight: 600;">No invoice for this week yet</div>
              <div style="font-size: 12px; color: var(--ink-2); margin-top: 4px;">Clock in or add an expense and a draft will be created automatically. Or tap below to start one now.</div>
@@ -10096,7 +10131,11 @@ async function renderMine(root) {
   }
 
   function bind() {
-    $('#openCurrent')?.addEventListener('click', () => goto('invoice'));
+    // v0.94 — if the current-week invoice is a draft, `goto('invoice')` loads
+    // /invoices/current (the draft edit view). For any other status (sent_ap,
+    // approved, etc.) navigate straight to invDetail so the tech sees the
+    // correct record rather than getting a "no draft" error.
+    $('#openCurrent')?.addEventListener('click', () => currentDraft ? goto('invoice') : goto('invDetail', currentWeekInv.id));
     $('#openCurrentNew')?.addEventListener('click', () => goto('invoice'));
     $$('[data-send-inv]').forEach(b => b.addEventListener('click', () => goto('invDetail', Number(b.dataset.sendInv))));
     $$('[data-go-inv]').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); goto('invDetail', Number(a.dataset.goInv)); }));
