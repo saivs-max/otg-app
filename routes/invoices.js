@@ -1642,6 +1642,12 @@ module.exports = (db) => {
   // GET /api/invoices/:id/pdf  → on-demand PDF (re-generated each call so any
   // late edits / approvals are reflected).
   router.get('/invoices/:id/pdf', async (req, res) => {
+    // v0.94 — Strip the global X-Frame-Options: DENY for EVERY response on this
+    // route (success and error alike), not just the success path. A framed error
+    // response that keeps DENY renders as Chrome's misleading "…refused to
+    // connect" inside a preview iframe. Doing it first covers the 401/403/500
+    // returns below too; a JSON/binary body has nothing clickjackable to protect.
+    res.removeHeader('X-Frame-Options');
     // v0.35 — auth middleware sets x-user-id from the bearer token (or ?token= for <a href>)
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
@@ -1661,9 +1667,9 @@ module.exports = (db) => {
       const filename = `${inv.invoice_number || `invoice-${id}`}.pdf`;
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
-      // v0.87 — same as attachments download: remove global DENY so Chrome's
-      // OOPIF PDF viewer sub-frame can render the generated PDF inline.
-      res.removeHeader('X-Frame-Options');
+      // v0.87 — Chrome's OOPIF PDF viewer sub-frame needs the global DENY gone to
+      // render the generated PDF inline; v0.94 moved that removeHeader to the top
+      // of the handler so error responses are framable-safe too.
       res.send(buf);
     } catch (e) {
       res.status(500).json({ error: `PDF generation failed: ${e.message}` });

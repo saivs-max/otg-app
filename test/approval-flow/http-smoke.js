@@ -53,6 +53,10 @@ const invB = addSubmittedInvoice('INV-B-002'); // escalation path
 const app = express();
 app.use(express.json({ limit: '20mb' }));
 app.use((req, _res, next) => { if (req.headers['x-test-uid']) req.headers['x-user-id'] = req.headers['x-test-uid']; next(); });
+// v0.94 — mirror production's global clickjacking header so the /pdf route's
+// X-Frame-Options strip (which prevents Chrome's "refused to connect" inside the
+// AP preview iframe) is actually exercised by the assertions below.
+app.use((_req, res, next) => { res.set('X-Frame-Options', 'DENY'); next(); });
 app.use('/api', require('../../routes/invoices')(db));
 app.use('/api', require('../../routes/approvals')(db));
 
@@ -101,6 +105,22 @@ const statusOf = (id) => db.prepare("SELECT status, escalated_at, approved_ops_a
     r = await call(`/api/invoices/${invA}/ap-preview`, tech, 'GET');
     ok(r.status === 200 && r.json.can_send === true,
        `Tech can send A to AP after Ops approval (can_send=${r.json.can_send})`);
+
+    // v0.94 — AP attachment preview: the /pdf endpoint must be framable (no
+    // X-Frame-Options: DENY) so the send-to-AP iframe never shows Chrome's
+    // "refused to connect". Verify on BOTH the success and the error path.
+    let pr = await fetch(`${base}/api/invoices/${invA}/pdf`, { headers: { 'x-test-uid': String(tech) } });
+    await pr.arrayBuffer();
+    ok(pr.status === 200, `GET /pdf for approved A -> 200 (got ${pr.status})`);
+    ok((pr.headers.get('content-type') || '').includes('application/pdf'), 'GET /pdf returns application/pdf');
+    ok(!/DENY/i.test(pr.headers.get('x-frame-options') || ''),
+       `GET /pdf (success) drops X-Frame-Options: DENY (got "${pr.headers.get('x-frame-options')}")`);
+
+    pr = await fetch(`${base}/api/invoices/999999/pdf`, { headers: { 'x-test-uid': String(tech) } });
+    await pr.text();
+    ok(pr.status >= 400, `GET /pdf for a missing invoice -> error (got ${pr.status})`);
+    ok(!/DENY/i.test(pr.headers.get('x-frame-options') || ''),
+       `GET /pdf (error) also drops X-Frame-Options: DENY (got "${pr.headers.get('x-frame-options')}")`);
 
     // Ops Mgr can no longer approve their own non-escalated decision twice; also
     // confirm a SECOND ops approval is rejected (state already moved on).
