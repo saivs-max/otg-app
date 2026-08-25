@@ -249,7 +249,7 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
 /* Donut: in full-width mode the SVG can be larger */
 .donut-svg { width: 200px; height: 200px; flex-shrink: 0; }
 /* hbar charts: constrain max height and scroll when there are many stores */
-.hbar-scroll { max-height: 640px; overflow-y: auto; border-radius: 6px; }
+.hbar-scroll { max-height: 400px; overflow-y: auto; border-radius: 6px; }
 .bar-fill { background: linear-gradient(90deg, var(--ic-green) 0%, var(--ic-green-deep) 100%); }
 .legend-pill { background: var(--surface-2); font-variant-numeric: tabular-nums; }
 .cc-widget { border-radius: var(--radius-lg); border: 1px solid var(--line); border-left: 4px solid var(--ic-green-deep); box-shadow: 0 2px 12px rgba(16,40,32,.05); }

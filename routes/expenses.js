@@ -93,6 +93,33 @@ module.exports = (db) => {
     const wo = db.prepare("SELECT id FROM work_orders WHERE id = ?").get(Number(work_order_id));
     if (!wo) return res.status(404).json({ error: 'work order not found' });
 
+    // v0.89 — prevent silently-lost entries. Auto-attach only finds *draft*
+    // invoices; if none exists for this period but a locked invoice does, the
+    // expense would be created in the DB but never appear on any invoice.
+    // Reject early with a clear 409 so the tech knows the invoice is locked.
+    {
+      const hasDraft = db.prepare(`
+        SELECT id FROM invoices
+        WHERE user_id = ? AND status = 'draft'
+          AND ? BETWEEN period_start AND period_end
+        ORDER BY id DESC LIMIT 1
+      `).get(effectiveUserId, expense_date);
+      if (!hasDraft) {
+        const locked = db.prepare(`
+          SELECT invoice_number, status FROM invoices
+          WHERE user_id = ? AND status NOT IN ('draft')
+            AND ? BETWEEN period_start AND period_end
+          ORDER BY id DESC LIMIT 1
+        `).get(effectiveUserId, expense_date);
+        if (locked) {
+          return res.status(409).json({
+            error: `This invoice (${locked.invoice_number}) has already been submitted and cannot be modified. Contact your manager if a correction is needed.`,
+            invoice_locked: true,
+          });
+        }
+      }
+    }
+
     // Apply policy
     if (category === 'mileage') {
       const q = Number(quantity);
@@ -147,14 +174,26 @@ module.exports = (db) => {
     // We check by date-in-range (not week-boundary equality) so that uploads
     // with non-Mon-Sun periods (e.g. fortnightly contractor invoices) still
     // work. Most-recent draft wins if multiple match.
-    const draft = db.prepare(`
-      SELECT id FROM invoices
-      WHERE user_id = ? AND status = 'draft'
-        AND ? BETWEEN period_start AND period_end
-      ORDER BY id DESC LIMIT 1
-    `).get(effectiveUserId, expense_date);
-    if (draft) {
+    // v0.92 — never strand the expense: get-or-create a DRAFT covering
+    // expense_date (mints a supplemental draft when the week's invoice is
+    // already submitted/approved) so a logged expense always lands on an
+    // invoice. Falls back to the legacy conditional attach if the invoices
+    // module isn't mounted (e.g. a minimal test harness).
+    let draft = null;
+    if (typeof db.__ensureDraftForEntry === 'function') {
+      draft = db.__ensureDraftForEntry(effectiveUserId, expense_date);
       db.prepare(`UPDATE expenses SET invoice_id = ? WHERE id = ?`).run(draft.id, newId);
+      try { if (typeof db.__computeInvoice === 'function') db.__computeInvoice(draft.id); } catch (_) {}
+    } else {
+      draft = db.prepare(`
+        SELECT id FROM invoices
+        WHERE user_id = ? AND status = 'draft'
+          AND ? BETWEEN period_start AND period_end
+        ORDER BY id DESC LIMIT 1
+      `).get(effectiveUserId, expense_date);
+      if (draft) {
+        db.prepare(`UPDATE expenses SET invoice_id = ? WHERE id = ?`).run(draft.id, newId);
+      }
     }
 
     logAudit(db, { entity_type: 'expenses', entity_id: newId, user_id: userId, action: 'create',

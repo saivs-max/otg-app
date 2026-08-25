@@ -142,10 +142,12 @@ module.exports = (db) => {
     if (me.role !== 'ops_manager' && me.role !== 'sr_manager' && me.role !== 'pm') {
       return res.status(403).json({ error: 'manager role required' });
     }
+    // v0.88 — include has_password so the UI can surface credential status
     const rows = db.prepare(`
-      SELECT u.id, u.name, u.email, u.worker_type, u.hourly_rate
+      SELECT u.id, u.name, u.email, u.worker_type, u.hourly_rate,
+             CASE WHEN u.password_hash IS NULL OR u.password_hash = '' THEN 0 ELSE 1 END AS has_password
       FROM manager_team mt JOIN users u ON u.id = mt.tech_user_id
-      WHERE mt.manager_user_id = ? AND u.role = 'technician'
+      WHERE mt.manager_user_id = ? AND u.role = 'technician' AND (u.status IS NULL OR u.status != 'disabled')
       ORDER BY u.name
     `).all(userId);
     res.json(rows);
@@ -158,10 +160,13 @@ module.exports = (db) => {
     if (me.role !== 'ops_manager' && me.role !== 'sr_manager' && me.role !== 'pm') {
       return res.status(403).json({ error: 'manager role required' });
     }
+    // v0.88 — include has_password so the UI can surface credential status
     const rows = db.prepare(`
-      SELECT u.id, u.name, u.email, u.worker_type
+      SELECT u.id, u.name, u.email, u.worker_type,
+             CASE WHEN u.password_hash IS NULL OR u.password_hash = '' THEN 0 ELSE 1 END AS has_password
       FROM users u
       WHERE u.role = 'technician'
+        AND (u.status IS NULL OR u.status != 'disabled')
         AND u.id NOT IN (SELECT tech_user_id FROM manager_team WHERE manager_user_id = ?)
       ORDER BY u.name
     `).all(userId);
@@ -173,8 +178,9 @@ module.exports = (db) => {
     const me = getMe(db, userId);
     if (!me || (me.role !== 'ops_manager' && me.role !== 'pm')) return res.status(403).json({ error: 'ops manager only' });
     const techId = Number(req.params.techId);
-    const tech = db.prepare("SELECT id, role FROM users WHERE id = ?").get(techId);
+    const tech = db.prepare("SELECT id, role, status FROM users WHERE id = ?").get(techId);
     if (!tech || tech.role !== 'technician') return res.status(400).json({ error: 'not a technician' });
+    if (tech.status === 'disabled') return res.status(400).json({ error: 'cannot add a disabled technician' });
     db.prepare(`INSERT OR IGNORE INTO manager_team (manager_user_id, tech_user_id) VALUES (?, ?)`).run(userId, techId);
     logAudit(db, { entity_type: 'manager_team', entity_id: techId, user_id: userId, action: 'add_tech' });
     res.json({ ok: true });

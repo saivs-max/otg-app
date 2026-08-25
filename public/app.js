@@ -171,6 +171,11 @@ function showSheet(html, { onMount, dismissable = true } = {}) {
 function closeSheet() {
   _sheetDismissable = false;  // v0.90
   if (_sheetKeyHandler) { document.removeEventListener('keydown', _sheetKeyHandler); _sheetKeyHandler = null; }
+  // v0.93 — release any blob: object URLs a sheet created (e.g. the AP
+  // attachment preview) so they don't leak when the sheet closes.
+  document.querySelectorAll('.sheet-backdrop iframe[src^="blob:"]').forEach(f => {
+    try { URL.revokeObjectURL(f.src); } catch (_) {}
+  });
   document.querySelectorAll('.sheet-backdrop').forEach(s => s.remove());
   if (_sheetPrevFocus && _sheetPrevFocus.focus) { try { _sheetPrevFocus.focus(); } catch (_) {} _sheetPrevFocus = null; }
 }
@@ -5167,7 +5172,6 @@ async function openSendToApSheet(invoice) {
     return toast(e.message, 'err');
   }
   const token = encodeURIComponent(localStorage.getItem(STORAGE_TOKEN_KEY) || '');
-  const pdfSrc = `${preview.pdf_url}?token=${token}#toolbar=0&navpanes=0`;
 
   function html() {
     return `
@@ -5186,13 +5190,22 @@ async function openSendToApSheet(invoice) {
         <div class="ep-body">${escapeHTML(preview.body).replace(/\n/g, '<br/>')}</div>
       </div>
 
+      <!-- v0.93 — The preview is populated in onMount via an authenticated
+           fetch (see loadApPreview). We do NOT point the <iframe> straight at
+           /api/invoices/:id/pdf: error responses (401/403/500) keep the global
+           X-Frame-Options: DENY header, which Chrome renders inside the frame as
+           "breadapp.fly.dev refused to connect." Fetching the PDF as a blob
+           gives a clean success/failure signal, so the preview + "Open in new
+           tab" appear only when a document is actually available; otherwise a
+           clear "No attachment available." message is shown. -->
       <div class="pdf-preview">
         <div class="pdf-preview-head">
           <strong>📄 Attachment preview</strong>
-          <a class="btn btn-ghost btn-sm" href="${preview.pdf_url}?token=${token}" target="_blank">Open in new tab ↗</a>
+          <span id="apPreviewOpen"></span>
         </div>
-        <iframe class="pdf-preview-frame" src="${pdfSrc}" title="Invoice PDF preview"></iframe>
-        <p class="help" style="text-align: center; margin: 6px 0 0;">If preview doesn't render in your browser, use <strong>Open in new tab</strong>.</p>
+        <div id="apPreviewBody">
+          <p class="help" style="text-align: center; margin: 14px 0;">Loading preview…</p>
+        </div>
       </div>
 
       ${!preview.can_send ? `
@@ -5212,6 +5225,10 @@ async function openSendToApSheet(invoice) {
   showSheet(html(), {
     onMount: (wrap) => {
       $$('[data-act="sheet-close"]', wrap).forEach(b => b.addEventListener('click', closeSheet));
+
+      // v0.93 — Load the attachment preview via an authenticated fetch and only
+      // show the frame + "Open in new tab" when a document is actually available.
+      loadApPreview(wrap, preview, token);
 
       // Live update the preview's "To" + Subject when the AP email is edited.
       // We don't re-render the iframe (PDF doesn't depend on recipient), just
@@ -5239,6 +5256,49 @@ async function openSendToApSheet(invoice) {
       });
     },
   });
+}
+
+// v0.93 — Populate the AP "Attachment preview" area for the send-to-AP sheet.
+// Fetches the invoice PDF with the caller's bearer token so we get a real
+// success/failure signal (a direct <iframe src> to /api/.../pdf would render
+// Chrome's misleading "…refused to connect" on any error response, because
+// error responses retain the global X-Frame-Options: DENY header). On success
+// we frame a same-origin blob: URL (never blocked by framing headers) and show
+// "Open in new tab"; on failure/empty we show a clear "No attachment available."
+async function loadApPreview(wrap, preview, token) {
+  const bodyEl = $('#apPreviewBody', wrap);
+  const openEl = $('#apPreviewOpen', wrap);
+  if (!bodyEl) return;
+  const showNone = (msg) => {
+    bodyEl.innerHTML =
+      `<p class="help" style="text-align: center; margin: 16px 0; color: var(--muted);">📎 ${escapeHTML(msg)}</p>`;
+    if (openEl) openEl.innerHTML = '';
+  };
+  if (!preview || !preview.pdf_url) { showNone('No attachment available.'); return; }
+  try {
+    const bearer = localStorage.getItem(STORAGE_TOKEN_KEY);
+    const res = await fetch(preview.pdf_url, {
+      headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
+    });
+    if (!res.ok) { showNone('No attachment available.'); return; }
+    const blob = await res.blob();
+    if (!blob || blob.size === 0) { showNone('No attachment available.'); return; }
+    // Sheet was closed while we were fetching — don't create a blob: URL that
+    // closeSheet() already had no chance to revoke.
+    if (!bodyEl.isConnected) return;
+    const blobUrl = URL.createObjectURL(blob);
+    bodyEl.innerHTML =
+      `<iframe class="pdf-preview-frame" src="${blobUrl}#toolbar=0&navpanes=0" title="Invoice PDF preview"></iframe>` +
+      `<p class="help" style="text-align: center; margin: 6px 0 0;">If preview doesn't render in your browser, use <strong>Open in new tab</strong>.</p>`;
+    if (openEl) {
+      // Open-in-new-tab uses the tokened URL (top-level navigation isn't subject
+      // to X-Frame-Options, and this avoids any blob: lifetime concerns).
+      openEl.innerHTML =
+        `<a class="btn btn-ghost btn-sm" href="${preview.pdf_url}?token=${token}" target="_blank" rel="noopener">Open in new tab ↗</a>`;
+    }
+  } catch (_e) {
+    showNone('No attachment available.');
+  }
 }
 
 // ---- EDIT INVOICE DETAILS SHEET (manager only) ----
@@ -10253,7 +10313,9 @@ function openPastInvoiceSheet() {
         if (!d) return toast('Pick a date', 'err');
         try {
           const r = await api('/invoices/for-week', { method: 'POST', body: { week_of: d } });
-          toast(`Draft created: ${r.invoice.invoice_number}`, 'ok');
+          // v0.93 — server sets r.created=true only when a new draft was minted;
+          // false means an existing open draft for that week was returned.
+          toast(r.created ? `Draft created: ${r.invoice.invoice_number}` : `Opening existing draft: ${r.invoice.invoice_number}`, 'ok');
           closeSheet();
           goto('invDetail', r.invoice.id);
         } catch (e) { toast(e.message, 'err'); }
