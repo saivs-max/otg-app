@@ -453,17 +453,39 @@ module.exports = (db) => {
       }
       const now = new Date().toISOString();
       const gps = req.body.gps;
-      db.prepare(`
-        UPDATE time_entries
-        SET clock_out = ?, break_minutes = ?, break_flagged = ?, notes = ?,
-            gps_lat_out = ?, gps_lng_out = ?, gps_accuracy_out = ?
-        WHERE id = ?
-      `).run(now, effBreak || 0, effFlagged, notes,
-             gps?.lat ?? null, gps?.lng ?? null, gps?.accuracy ?? null,
-             id);
+      // v0.93 — if this running entry is already attached to a locked invoice
+      // (approved, queued, sent), detach it on clock-out so the completed entry
+      // re-attaches to the current draft instead of silently modifying an
+      // already-approved invoice. The tech is always allowed to clock out.
+      const LOCKED_STATUSES = ['approved_ops','approved_sr','queued_ap','sent_ap'];
+      let shouldDetach = false;
+      if (e.invoice_id) {
+        const inv = db.prepare("SELECT status FROM invoices WHERE id = ?").get(e.invoice_id);
+        if (inv && LOCKED_STATUSES.includes(inv.status)) shouldDetach = true;
+      }
+      if (shouldDetach) {
+        db.prepare(`
+          UPDATE time_entries
+          SET clock_out = ?, break_minutes = ?, break_flagged = ?, notes = ?,
+              gps_lat_out = ?, gps_lng_out = ?, gps_accuracy_out = ?,
+              invoice_id = NULL
+          WHERE id = ?
+        `).run(now, effBreak || 0, effFlagged, notes,
+               gps?.lat ?? null, gps?.lng ?? null, gps?.accuracy ?? null,
+               id);
+      } else {
+        db.prepare(`
+          UPDATE time_entries
+          SET clock_out = ?, break_minutes = ?, break_flagged = ?, notes = ?,
+              gps_lat_out = ?, gps_lng_out = ?, gps_accuracy_out = ?
+          WHERE id = ?
+        `).run(now, effBreak || 0, effFlagged, notes,
+               gps?.lat ?? null, gps?.lng ?? null, gps?.accuracy ?? null,
+               id);
+      }
       logAudit(db, {
         entity_type: 'time_entries', entity_id: id, user_id: userId, action: 'clock_out',
-        details: { break_minutes: effBreak, break_flagged: effFlagged, gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null },
+        details: { break_minutes: effBreak, break_flagged: effFlagged, gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null, detached_from_locked_invoice: shouldDetach },
       });
     } else {
       // Branch B: already clocked out → editing a logged entry.

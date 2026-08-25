@@ -1845,20 +1845,25 @@ async function renderAdd(root) {
   // v0.89 — if the resolved invoice is not a draft, the tech cannot add to it.
   // Show a clear locked message instead of a form whose submission would succeed
   // on the client but silently discard the data on the server.
+  // v0.93 — message now reflects the exact invoice status (Approved vs Submitted)
+  // so techs understand why modification is blocked.
   if (target?.invoice && target.invoice.status !== 'draft') {
+    const isApproved = ['approved_ops','approved_sr','queued_ap','sent_ap'].includes(target.invoice.status);
     root.innerHTML = `
       <div class="card" style="border-left: 4px solid var(--err-fg, #c00); background: var(--err-bg, #fff0f0); padding: 16px 18px; margin-bottom: 14px;">
         <div style="font-size: 14px; font-weight: 700; color: var(--err-fg, #c00); margin-bottom: 6px;">
-          🔒 Invoice already submitted
+          🔒 Invoice ${isApproved ? 'approved' : 'submitted'} — no changes allowed
         </div>
         <div style="font-size: 13px; color: var(--ink-2); margin-bottom: 12px;">
           <strong>${escapeHTML(target.invoice.invoice_number)}</strong> is
           <strong>${escapeHTML(labelForStatus(target.invoice.status))}</strong>
-          and can no longer be modified.
-          New expenses or time entries cannot be added once an invoice has been submitted.
+          and cannot be modified. New expenses or time entries cannot be added
+          to ${isApproved ? 'an approved' : 'a submitted'} invoice.
         </div>
         <div style="font-size: 12px; color: var(--ink-2);">
-          If a correction is needed, contact your Ops Manager.
+          ${isApproved
+            ? 'This invoice has been approved by your Ops Manager. Contact them if a correction is needed.'
+            : 'This invoice is under review. Contact your Ops Manager if a correction is needed.'}
         </div>
       </div>
       <button class="btn btn-ghost btn-block" id="backToInvBtn">← Back to invoice</button>
@@ -10442,6 +10447,22 @@ async function renderInvoiceDetail(root, invoiceId) {
       </div>
     ` : ''}
 
+    <!-- v0.93 — Locked invoice notice for technicians viewing an approved/queued/
+         sent invoice. Makes it unambiguous that the record is final, and links
+         to the current week's draft so the tech knows where to add new entries. -->
+    ${['approved_ops','approved_sr','queued_ap','sent_ap'].includes(invoice.status) && invoice.invoice_type !== 'vendor' && (me.role === 'technician' || isManagerProxy) ? `
+      <div class="card" style="border-left: 4px solid var(--err-fg, #c00); background: var(--err-bg, #fff0f0); padding: 14px 16px; margin-bottom: 14px;">
+        <div style="font-size: 13px; font-weight: 700; color: var(--err-fg, #c00); margin-bottom: 6px;">
+          🔒 This invoice is ${escapeHTML(labelForStatus(invoice.status))} — no changes allowed
+        </div>
+        <div style="font-size: 12px; color: var(--ink-2); margin-bottom: 10px;">
+          Entries for <strong>${escapeHTML(fmtDate(invoice.period_start))} → ${escapeHTML(fmtDate(invoice.period_end))}</strong> are locked.
+          Any new labor or expense entries will go to your <strong>current week's invoice</strong>, not this one.
+        </div>
+        <button class="btn btn-ghost btn-sm" id="goCurrentInvBtn">Open current invoice →</button>
+      </div>
+    ` : ''}
+
     <!-- v0.86 — Draft editing section: prominent at top for techs/proxy.
          Line items + action buttons come FIRST so the tech sees what they
          can edit immediately, without scrolling past the invoice preview. -->
@@ -11111,6 +11132,8 @@ async function renderInvoiceDetail(root, invoiceId) {
 
   $('#prevInv')?.addEventListener('click', () => { if (newer) goto('invDetail', newer.id); });
   $('#nextInv')?.addEventListener('click', () => { if (older) goto('invDetail', older.id); });
+  // v0.93 — locked invoice notice: takes tech to their current week's draft.
+  $('#goCurrentInvBtn')?.addEventListener('click', () => goto('invoice'));
   $('#exitProxy')?.addEventListener('click', () => {
     STATE.onBehalfOf = null; STATE.onBehalfOfName = null;
     toast('Exited proxy mode');
