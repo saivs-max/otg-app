@@ -120,6 +120,9 @@ module.exports = (db) => {
     }
     const { name, email, worker_type, hourly_rate, home_address, home_phone, ops_manager_id } = req.body;
     if (!name || !email) return res.status(400).json({ error: 'name and email required' });
+    // v0.88 — validate length and format
+    const valErrLegacy = validateUserFields({ name, email });
+    if (valErrLegacy) return res.status(400).json({ error: valErrLegacy });
     if (!['contractor','fte'].includes(worker_type)) {
       return res.status(400).json({ error: 'worker_type must be contractor or fte' });
     }
@@ -245,6 +248,25 @@ module.exports = (db) => {
   });
 
   // ---------- ADMIN (PM / Sr Mgr) ----------
+
+  // v0.88 — shared validation for user name and email fields.
+  // Pass only the fields you want validated (undefined = skip).
+  // Returns an error string or null.
+  function validateUserFields({ name, email } = {}) {
+    if (name !== undefined) {
+      const n = String(name).trim();
+      if (!n) return 'Name is required';
+      if (n.length > 100) return 'Name cannot exceed 100 characters';
+    }
+    if (email !== undefined) {
+      const e = String(email).trim();
+      if (!e) return 'Email is required';
+      if (e.length > 254) return 'Email cannot exceed 254 characters';
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(e)) return 'Please enter a valid email address';
+    }
+    return null;
+  }
+
   function requireAdmin(req, res) {
     const userId = Number(req.header('x-user-id'));
     if (!userId) { res.status(401).json({ error: 'no user selected' }); return null; }
@@ -274,6 +296,9 @@ module.exports = (db) => {
     if (!name || !email || !username || !role || !temp_password) {
       return res.status(400).json({ error: 'name, email, username, role, and temp_password are required' });
     }
+    // v0.88 — validate length and format
+    const valErr = validateUserFields({ name, email });
+    if (valErr) return res.status(400).json({ error: valErr });
     if (!['technician','ops_manager','sr_manager','pm'].includes(role)) {
       return res.status(400).json({ error: 'invalid role' });
     }
@@ -338,6 +363,13 @@ module.exports = (db) => {
         return res.status(409).json({ error: 'cannot disable / demote the last active admin' });
       }
     }
+
+    // v0.88 — validate name/email when present in the patch body
+    const valErrPatch = validateUserFields({
+      ...(req.body.name  !== undefined ? { name:  req.body.name  } : {}),
+      ...(req.body.email !== undefined ? { email: req.body.email } : {}),
+    });
+    if (valErrPatch) return res.status(400).json({ error: valErrPatch });
 
     const allowed = ['name','email','username','role','worker_type','hourly_rate','status'];
     const sets = [], vals = [];
