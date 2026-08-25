@@ -1661,6 +1661,9 @@ module.exports = (db) => {
       const filename = `${inv.invoice_number || `invoice-${id}`}.pdf`;
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+      // v0.87 — same as attachments download: remove global DENY so Chrome's
+      // OOPIF PDF viewer sub-frame can render the generated PDF inline.
+      res.removeHeader('X-Frame-Options');
       res.send(buf);
     } catch (e) {
       res.status(500).json({ error: `PDF generation failed: ${e.message}` });
@@ -1855,7 +1858,19 @@ module.exports = (db) => {
                               auto_extracted: !!extractedVendor } });
 
     const invRow = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoiceId);
-    res.json({ ...invRow, auto_extracted: !!extractedVendor, extracted: extractedVendor
+    // v0.87.1 — auto_extracted = true only when at least one field (vendor name,
+    // invoice #, date, total, or line items) was actually extracted from the PDF.
+    // When the parser ran but returned all-null (scanned/unrecognised PDF),
+    // auto_extracted = false so the frontend can show an explicit warning instead
+    // of the misleading "Parsed PDF ✓" success toast.
+    const anyExtracted = !!(extractedVendor && (
+      extractedVendor.vendor_name           ||
+      extractedVendor.vendor_invoice_number ||
+      extractedVendor.vendor_invoice_date   ||
+      extractedVendor.total                 ||
+      (extractedVendor.line_items && extractedVendor.line_items.length > 0)
+    ));
+    res.json({ ...invRow, auto_extracted: anyExtracted, extracted: extractedVendor
       ? { ...extractedVendor, extracted_text: undefined } : null });
   });
 

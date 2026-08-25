@@ -140,6 +140,12 @@ module.exports = (db) => {
     res.set('Content-Type', att.mime_type || 'application/octet-stream');
     res.set('X-Content-Type-Options', 'nosniff');
     res.set('Cache-Control', 'private, no-store');
+    // v0.87 — X-Frame-Options: DENY is set globally for HTML clickjacking
+    // protection, but Chrome's built-in PDF viewer uses an internal OOPIF
+    // sub-frame to render PDFs. Sending DENY on a binary download causes
+    // Chrome to block its own PDF renderer → blank/black screen. Remove it
+    // here; binary content cannot be "framed" in a phishing sense anyway.
+    res.removeHeader('X-Frame-Options');
     // v0.65.1 (F-M4) — strip CR/LF/quote/control chars to prevent header
     // injection, and add an RFC 5987 filename* for the real (UTF-8) name.
     const safeName = String(att.original_name || 'file').replace(/[\r\n"\\\x00-\x1f]/g, '').slice(0, 200) || 'file';

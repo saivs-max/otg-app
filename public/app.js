@@ -469,7 +469,7 @@ async function render() {
   })[v] || '';
   if (['woPick','woAdd','woDetail','invDetail','settings'].includes(v)) $('#backBtn').classList.remove('hidden');
 
-  const root = $('#view'); root.innerHTML = `<div class="empty">Loading…</div>`;
+  const root = $('#view'); root.dataset.view = v; root.innerHTML = `<div class="empty">Loading…</div>`;
   try {
     if (v === 'home')      return renderHome(root);
     if (v === 'timer')     return renderTimer(root);
@@ -478,7 +478,10 @@ async function render() {
     if (v === 'mine')      return renderMine(root);
     if (v === 'woPick')    return renderWoPick(root);
     if (v === 'woAdd')     return renderWoAdd(root);
-    if (v === 'invDetail') return renderInvoiceDetail(root, STATE.view_arg);
+    // v0.87.1 — await so async errors from renderInvoiceDetail are caught by
+    // this try/catch (without await, a rejection is an unhandled promise and the
+    // page stays stuck at "Loading…" with no error message shown to the user).
+    if (v === 'invDetail') return await renderInvoiceDetail(root, STATE.view_arg);
     if (v === 'settings')  return renderSettings(root);
     if (v === 'woDetail')  return renderWoDetail(root, STATE.view_arg);
     if (v === 'queue')     return renderApprovalQueue(root);
@@ -486,6 +489,7 @@ async function render() {
     if (v === 'allInv')    return renderAllInvoices(root);
     if (v === 'policy')    return renderPolicyView(root);
     if (v === 'dashboard') return renderDashboard(root);
+    if (v === 'storeDetail') return renderStoreDetail(root);
     if (v === 'forecast')  return renderForecast(root);
     if (v === 'tracker')   return renderCostTracker(root);
     if (v === 'launch')    return renderLaunchActuals(root);
@@ -614,12 +618,15 @@ async function renderHome(root) {
           <button class="close" data-act="dismiss">×</button>
         </div>
       ` : ''}
-      <div class="card flex between center">
+      <!-- v0.89 — was "flex between center"; the .center utility's justify-content:center
+           overrode .between (space-between), so the button bunched against the text instead
+           of sitting at the right edge. Keep space-between, center vertically, add a gap. -->
+      <div class="card flex between" style="align-items: center; gap: 16px;">
         <div>
           <div class="label">No active timer</div>
           <div style="font-size: 13px; color: var(--ink-2);">Pick a work order to clock in.</div>
         </div>
-        <button class="btn btn-primary btn-sm" id="startTimer">Clock in</button>
+        <button class="btn btn-primary btn-sm" id="startTimer" style="flex-shrink: 0;">Clock in</button>
       </div>`
     : `
       <div class="card" style="background:var(--ic-green-deep); color:#fff; border:0;">
@@ -1274,7 +1281,7 @@ async function renderWoAdd(root) {
       <input class="field" id="title" placeholder="e.g. Queens 4 - Cart #5 Not Powering On" value="${esc(form.title)}" />
       <div class="help">Auto-filled from the ticket title; edit if needed.</div>
 
-      <span class="label">Store</span>
+      <span class="label">Store <span style="color:var(--danger,#dc2626);font-size:13px;">*</span></span>
       ${selectedLocation ? `
         <div class="card" style="padding:14px 16px;display:flex;justify-content:space-between;align-items:center;border:2px solid var(--primary,#2563eb);background:var(--primary-light,#eff6ff);margin-bottom:8px;">
           <div>
@@ -1289,7 +1296,7 @@ async function renderWoAdd(root) {
           ${buildLocCards(locSearchQ ? mxLocs.filter(l => l.name.toLowerCase().includes(locSearchQ.toLowerCase())) : mxLocs)}
         </div>
       ` : `
-        <input class="field" id="store" placeholder="e.g. Whole Foods Edgewater" value="${esc(form.store_name)}" autocomplete="off" />
+        <input class="field" id="store" placeholder="e.g. Whole Foods Edgewater" value="${esc(form.store_name)}" autocomplete="off" required />
         <div class="flex gap-12" style="margin-bottom:8px;">
           <div style="flex:1">
             <span class="label" style="margin-top:6px;">Store # / ID</span>
@@ -1802,6 +1809,46 @@ async function renderAdd(root) {
   function html() {
     const cat = selected.category;
     const w = open.find(x => x.id == selected.work_order_id);
+
+    // v0.88 — build the "already logged" warning panel shown above the Hours
+    // input when the tech selects the labor or drive category, so they can see
+    // what's already clocked before deciding whether to add more hours.
+    let alreadyLoggedPanel = '';
+    if ((cat === 'labor' || cat === 'drive') && selected.work_order_id) {
+      const cached = woTimeCache[selected.work_order_id];
+      if (cached === null) {
+        alreadyLoggedPanel = `<div class="help" style="margin:4px 0 12px;color:var(--muted);">Checking existing time for this WO…</div>`;
+      } else if (cached) {
+        const relevantTime = cached.time_entries.filter(t =>
+          cat === 'labor' ? (t.mode === 'work' || !t.mode) : t.mode === 'drive');
+        const relevantExp  = cached.labor_drive_expenses.filter(e => e.category === cat);
+        if (relevantTime.length > 0 || relevantExp.length > 0) {
+          const timerHrs  = relevantTime.reduce((s, t) => s + (new Date(t.clock_out) - new Date(t.clock_in)) / 3600000, 0);
+          const manualHrs = relevantExp.reduce((s, e) => s + (Number(e.quantity) || 0), 0);
+          const totalHrs  = (timerHrs + manualHrs).toFixed(2);
+          const rows = [
+            ...relevantTime.map(t => {
+              const hrs = ((new Date(t.clock_out) - new Date(t.clock_in)) / 3600000).toFixed(2);
+              return `<div>🕐 Timer · ${new Date(t.clock_in).toLocaleDateString()} · <strong>${hrs} hr${hrs === '1.00' ? '' : 's'}</strong>${t.tech_name ? ` · ${escapeHTML(t.tech_name)}` : ''}</div>`;
+            }),
+            ...relevantExp.map(e => {
+              const hrs = Number(e.quantity).toFixed(2);
+              return `<div>📝 Manual · ${fmtDate(e.expense_date)} · <strong>${hrs} hr${hrs === '1.00' ? '' : 's'}</strong>${e.tech_name ? ` · ${escapeHTML(e.tech_name)}` : ''}</div>`;
+            }),
+          ].join('');
+          alreadyLoggedPanel = `
+            <div class="alert warn" style="margin:4px 0 12px;align-items:flex-start;">
+              <span class="ico">⏱</span>
+              <div class="body">
+                <strong>${totalHrs} hr${totalHrs === '1.00' ? '' : 's'} of ${cat} time already logged for this WO</strong>
+                <div style="margin-top:6px;font-size:12px;color:var(--ink-2);">${rows}</div>
+                <div style="margin-top:4px;font-size:12px;">Only add hours if the above doesn't cover your full time.</div>
+              </div>
+            </div>`;
+        }
+      }
+    }
+
     return `
       ${target ? `
         <div class="card" style="background: var(--ic-cream); border:0; padding: 10px 12px; margin-bottom: 12px;">
@@ -1853,6 +1900,7 @@ async function renderAdd(root) {
         <input class="field" id="stopLocInp" placeholder="e.g., 6901 Ridge Ave, Roxborough, PA" value="${escapeHTML(selected.stop_location || '')}" />
         <div class="help">Shown on the mileage reimbursement report. Leave blank to use the work order's store location.</div>
       ` : (cat === 'labor' || cat === 'drive') ? `
+        ${alreadyLoggedPanel}
         <span class="label">Hours</span>
         <input class="field" type="number" step="0.25" min="0" id="qtyInp" placeholder="2.5" value="${escapeHTML(selected.miles || '')}" />
         <div class="help">Auto-computed: hours × your hourly rate ($${(STATE.user?.hourly_rate || 40).toFixed(2)}/hr). ${cat === 'drive'
@@ -1878,6 +1926,27 @@ async function renderAdd(root) {
   // read-only summary card so the tech can verify the expense + attached
   // image before committing it to the invoice.
   let previewMode = false;
+
+  // v0.88 — per-WO time-entry cache used to warn techs who switch to the
+  // labor/drive category that they've already clocked time for this WO,
+  // preventing accidental duplicate entries.
+  // null = fetch in flight; object = loaded; undefined = not yet fetched.
+  let woTimeCache = {};
+  async function fetchWoTime(woId) {
+    if (!woId || woTimeCache[woId] !== undefined) return;
+    woTimeCache[woId] = null; // mark in-flight
+    try {
+      const detail = await api(`/workorders/${woId}`);
+      woTimeCache[woId] = {
+        time_entries:         (detail.time_entries || []).filter(t => t.clock_out),
+        labor_drive_expenses: (detail.expenses     || []).filter(e => e.category === 'labor' || e.category === 'drive'),
+      };
+    } catch (_) {
+      woTimeCache[woId] = { time_entries: [], labor_drive_expenses: [] };
+    }
+    // Only re-render if this WO is still the selected one (avoids flicker).
+    if (String(selected.work_order_id) === String(woId)) rerender();
+  }
 
   // Build the preview card shown after tapping "Preview ▸".
   function previewHTML() {
@@ -2060,6 +2129,11 @@ async function renderAdd(root) {
       selected.category = c.dataset.cat;
       if (selected.category !== 'other') selected.subcategory = '';
       rerender();
+      // v0.88 — fetch time entries when switching to labor/drive so the warning
+      // panel has data immediately (cache means subsequent switches are instant).
+      if ((selected.category === 'labor' || selected.category === 'drive') && selected.work_order_id) {
+        fetchWoTime(selected.work_order_id);
+      }
     }));
     $$('#subChips .chip').forEach(c => c.addEventListener('click', () => {
       selected.subcategory = c.dataset.sub; rerender();
@@ -2070,7 +2144,13 @@ async function renderAdd(root) {
       const filtered = q ? open.filter(w => (w.external_id + ' ' + w.store_name + ' ' + w.work_type + ' ' + (w.description || '')).toLowerCase().includes(q)) : open;
       $('#woSel').innerHTML = filtered.map(woOption).join('');
     });
-    $('#woSel').addEventListener('change', e => { selected.work_order_id = e.target.value; rerender(); });
+    $('#woSel').addEventListener('change', e => {
+      selected.work_order_id = e.target.value;
+      rerender();
+      // v0.88 — pre-fetch time entries so the labor/drive warning panel is
+      // ready immediately when the tech switches to that category.
+      if (selected.work_order_id) fetchWoTime(selected.work_order_id);
+    });
     $('#dateInp').addEventListener('change', e => { selected.expense_date = e.target.value; });
     // Wire the receipt picker (lives in #recBlock)
     const recBlock = $('#recBlock');
@@ -2122,6 +2202,9 @@ async function renderAdd(root) {
   }
   root.innerHTML = previewMode ? previewHTML() : html();
   bind();
+  // v0.88 — eagerly fetch time data for the pre-selected WO so the labor/drive
+  // warning panel renders with data on first category switch (no extra tap needed).
+  if (selected.work_order_id) fetchWoTime(selected.work_order_id);
 }
 
 // ---- INVOICE ----
@@ -4499,17 +4582,24 @@ async function openVendorInvoiceSheet() {
           const btn = $('#vnSave', wrap); btn.disabled = true; btn.textContent = '⏳ Parsing PDF…';
           try {
             const r = await api('/invoices/vendor-upload', { method: 'POST', body });
+            // v0.87.1 — auto_extracted is now true only when ≥1 field was actually
+            // extracted (not just "a PDF was attached"). r.extracted is non-null
+            // whenever a PDF was processed; falsy auto_extracted + non-null extracted
+            // means the PDF was read but parsing found nothing.
             const msg = r.auto_extracted
               ? `Parsed PDF ✓ — review extracted values, then submit`
-              : `Draft created — review the preview, then submit ✓`;
-            toast(msg, 'ok');
+              : r.extracted !== null
+                ? `⚠ PDF couldn't be auto-parsed — fill in the fields below, then submit`
+                : `Draft created — review the preview, then submit ✓`;
+            toast(msg, r.auto_extracted ? 'ok' : 'warn');
             closeSheet();
             goto('invDetail', r.id);
           } catch (e) {
             btn.disabled = false; btn.textContent = isPdf ? '📄 Parse PDF & open preview' : 'Create draft →';
-            // If server returned a list of missing fields, give a useful error.
-            const detail = e.response?.missing
-              ? `Couldn't auto-detect: ${e.response.missing.join(', ')}. Fill them in the Manual entry section.`
+            // v0.87.1 — api() throws with { data: j }, not { response: j }.
+            // If the server returned a list of missing fields, surface them.
+            const detail = e.data?.missing
+              ? `Couldn't auto-detect: ${e.data.missing.join(', ')}. Fill them in the Manual entry section.`
               : (e.message || 'Upload failed');
             toast(detail, 'err');
           }
@@ -7916,13 +8006,11 @@ async function renderLocations(root) {
     }
   }
 
-  function draw(locs, q) {
-    const filtered = q ? locs.filter(l => l.name.toLowerCase().includes(q.toLowerCase()) ||
-                                          (l.city||'').toLowerCase().includes(q.toLowerCase())) : locs;
-    const total = locs.length;
-    const body  = filtered.length === 0
+  // v0.83 fix — build location row HTML without touching the search input
+  function buildLocRows(rows) {
+    return rows.length === 0
       ? `<div style="padding:32px;text-align:center;color:var(--text-secondary);">No locations found</div>`
-      : filtered.map(loc => {
+      : rows.map(loc => {
           const isOpen = loc.mx_id === selectedLocId;
           return `
             <div class="loc-row${isOpen?' loc-open':''}" data-loc="${escapeHTML(loc.mx_id)}"
@@ -7938,43 +8026,14 @@ async function renderLocations(root) {
               <div class="loc-assets" style="display:${isOpen?'block':'none'};background:var(--surface-alt,#fafafa);"></div>
             </div>`;
         }).join('');
+  }
 
-    root.innerHTML = `
-      <div style="padding:16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border,#e5e7eb);">
-        <h2 style="margin:0;font-size:18px;font-weight:700;flex:1;">Locations &amp; Assets</h2>
-        <button id="locSyncBtn" class="btn btn-sm btn-secondary" style="font-size:13px;">↻ Sync from MaintainX</button>
-      </div>
-      <div style="padding:10px 16px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border-light,#f0f0f0);">
-        <input id="locSearch" type="search" placeholder="Search locations…" value="${escapeHTML(q||'')}"
-               style="flex:1;padding:6px 10px;border:1px solid var(--border,#e5e7eb);border-radius:6px;font-size:13px;">
-        <span style="font-size:12px;color:var(--text-secondary);white-space:nowrap;">${total} location${total!==1?'s':''}</span>
-      </div>
-      ${syncedAt ? `<div style="padding:4px 16px;font-size:11px;color:var(--text-secondary);">Last synced: ${escapeHTML(syncedAt)}</div>` : ''}
-      <div id="locList">${body}</div>`;
+  function filterLocs(locs, q) {
+    return q ? locs.filter(l => l.name.toLowerCase().includes(q.toLowerCase()) ||
+                                (l.city||'').toLowerCase().includes(q.toLowerCase())) : locs;
+  }
 
-    // Search
-    $('#locSearch').addEventListener('input', (e) => draw(locs, e.target.value));
-
-    // Sync button
-    $('#locSyncBtn').addEventListener('click', async (btn) => {
-      const b = $('#locSyncBtn');
-      b.disabled = true; b.textContent = 'Syncing…';
-      try {
-        const r = await api('/mx/sync-catalog', { method: 'POST' });
-        syncedAt = new Date().toLocaleString();
-        // Reload locations after sync
-        const r2 = await api('/mx/locations');
-        data = r2.locations || [];
-        selectedLocId = null;
-        draw(data, '');
-        alert(`Synced ${r.stats?.locations||0} locations, ${r.stats?.assets||0} assets.`);
-      } catch (e) {
-        alert('Sync failed: ' + e.message);
-        b.disabled = false; b.textContent = '↻ Sync from MaintainX';
-      }
-    });
-
-    // Location expand/collapse
+  function bindLocHeaders() {
     $$('.loc-header').forEach(h => h.addEventListener('click', async () => {
       const row   = h.closest('.loc-row');
       const locId = row.dataset.loc;
@@ -7999,6 +8058,52 @@ async function renderLocations(root) {
         await renderAssets(locId, assetsDiv);
       }
     }));
+  }
+
+  function draw(locs, q) {
+    const total = locs.length;
+    const body  = buildLocRows(filterLocs(locs, q));
+
+    root.innerHTML = `
+      <div style="padding:16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border,#e5e7eb);">
+        <h2 style="margin:0;font-size:18px;font-weight:700;flex:1;">Locations &amp; Assets</h2>
+        <button id="locSyncBtn" class="btn btn-sm btn-secondary" style="font-size:13px;">↻ Sync from MaintainX</button>
+      </div>
+      <div style="padding:10px 16px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border-light,#f0f0f0);">
+        <input id="locSearch" type="search" placeholder="Search locations…" value="${escapeHTML(q||'')}"
+               style="flex:1;padding:6px 10px;border:1px solid var(--border,#e5e7eb);border-radius:6px;font-size:13px;">
+        <span style="font-size:12px;color:var(--text-secondary);white-space:nowrap;">${total} location${total!==1?'s':''}</span>
+      </div>
+      ${syncedAt ? `<div style="padding:4px 16px;font-size:11px;color:var(--text-secondary);">Last synced: ${escapeHTML(syncedAt)}</div>` : ''}
+      <div id="locList">${body}</div>`;
+
+    // Search — only update #locList so the input keeps focus on every keystroke
+    $('#locSearch').addEventListener('input', (e) => {
+      document.getElementById('locList').innerHTML = buildLocRows(filterLocs(locs, e.target.value));
+      bindLocHeaders();
+    });
+
+    // Sync button
+    $('#locSyncBtn').addEventListener('click', async (btn) => {
+      const b = $('#locSyncBtn');
+      b.disabled = true; b.textContent = 'Syncing…';
+      try {
+        const r = await api('/mx/sync-catalog', { method: 'POST' });
+        syncedAt = new Date().toLocaleString();
+        // Reload locations after sync
+        const r2 = await api('/mx/locations');
+        data = r2.locations || [];
+        selectedLocId = null;
+        draw(data, '');
+        alert(`Synced ${r.stats?.locations||0} locations, ${r.stats?.assets||0} assets.`);
+      } catch (e) {
+        alert('Sync failed: ' + e.message);
+        b.disabled = false; b.textContent = '↻ Sync from MaintainX';
+      }
+    });
+
+    // Location expand/collapse
+    bindLocHeaders();
   }
 
   draw(data, '');
@@ -8373,11 +8478,11 @@ async function renderDashboardOverview(root) {
     ${renderDonutCard('Work-type mix', r.by_work_type, 'work_type', 'total',
       (t) => `${t.wo_count} WOs · ${fmt$(t.dollars_per_cart)}/cart`)}
 
+    ${renderSpendPerCartCard(r.by_work_type)}
+
     ${renderStackedTechCard('Tech × Work-type comparison', r.by_tech_work_type)}
 
     ${renderMultiLineCard('Weekly spend by technician', r.trend_by_tech, r.trend, null)}
-
-    ${renderColumnCard('Spend by cart-count bucket', r.by_cart_bucket)}
 
     <!-- Store-focused metrics (v0.33 / v0.88 full-width) -->
     <div class="section-title" style="margin-top: 22px;">Store metrics</div>
@@ -8399,6 +8504,17 @@ async function renderDashboardOverview(root) {
       { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => fmtMoneyFull(n) })}
 
     ${(r.trend_by_store || []).length ? renderMultiLineStoresCard('Spend trend per store (top 5)', r.trend_by_store) : ''}
+
+    ${renderBarCard('Lifetime $ per cart by store',
+        [...r.by_store].filter(s => (s.max_cart_count || 0) > 0)
+          .map(s => ({...s, lifetime_per_cart: s.total / s.max_cart_count}))
+          .sort((a,b) => b.lifetime_per_cart - a.lifetime_per_cart),
+        'store_name', 'lifetime_per_cart',
+        Math.max(1, ...r.by_store.filter(s => s.max_cart_count > 0).map(s => s.total / s.max_cart_count)),
+        (s) => `${s.max_cart_count} carts · ${fmtMoneyFull(s.total)} total · ${s.wo_count} WO${s.wo_count===1?'':'s'}`,
+        { drillKey: 'store', drillValue: (s) => s.store_name, valueFmt: (n) => fmtMoneyFull(n) })}
+
+    ${renderColumnCard('Spend by cart-count bucket', r.by_cart_bucket)}
 
     ${r.aging.length ? `
       <div class="card" style="margin-top: 14px; border-left: 4px solid var(--ic-orange); display:flex; align-items:center; justify-content:space-between; gap:12px; padding: 14px 18px;">
@@ -8502,19 +8618,30 @@ async function renderDashboardOverview(root) {
     }
   });
 
-  // Drill-down: clicking a chart bar applies its dimension as a filter.
+  // Drill-down: store bars → dedicated store detail page; tech/wt → dashboard filter.
   function drill(el) {
     const k = el.dataset.drill;
     const v = el.dataset.value;
-    if (k === 'tech')  STATE._dashTech  = v;
-    if (k === 'store') STATE._dashStore = v;
-    if (k === 'wt')    STATE._dashWt    = v;
+    if (k === 'store') { STATE._storeDetail = v; goto('storeDetail'); return; }
+    if (k === 'tech')  STATE._dashTech = v;
+    if (k === 'wt')    STATE._dashWt   = v;
     goto('dashboard');
   }
   // Drill-down hooks — applies to bars, stacked rows, donut slices, donut legend, and store-trend pills
   $$('.bar-row[data-drill], .stack-row[data-drill], .donut-svg [data-drill], .donut-legend-row[data-drill], .legend-pill[data-drill], .vbar-row[data-drill], .hb-row[data-drill]').forEach(el => {
     el.addEventListener('click', () => drill(el));
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drill(el); } });
+  });
+
+  // v0.89 — stacked tech card: show top 5 by default, expand to see more.
+  $$('.stacked-expand-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const overflow = btn.previousElementSibling;
+      const expanded = overflow.style.display !== 'none';
+      overflow.style.display = expanded ? 'none' : '';
+      const n = overflow.querySelectorAll('.stack-row').length;
+      btn.textContent = expanded ? `▾ Show ${n} more` : '▴ Show less';
+    });
   });
 
   // Forecast formula explainer
@@ -8579,6 +8706,100 @@ async function renderDashboardQueue(root) {
 
   $$('[data-period]', root).forEach(b => b.addEventListener('click', () => { STATE._dashPeriod = b.dataset.period; goto('dashboard'); }));
   $$('.dash-list-row[data-inv]', root).forEach(el => el.addEventListener('click', () => goto('invDetail', Number(el.dataset.inv))));
+}
+
+// v0.89 — Focused store detail page. Reached by clicking any store bar in
+// the dashboard. Shows KPIs, cost split, work-type mix and tech breakdown
+// for that store across all time, with a back button to the dashboard.
+async function renderStoreDetail(root) {
+  const storeName = STATE._storeDetail || '';
+  if (!storeName) { goto('dashboard'); return; }
+
+  root.innerHTML = `
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:18px;">
+      <button class="btn btn-ghost btn-sm" id="sdBack">← Dashboard</button>
+      <h2 style="margin:0; font-size:20px; font-weight:800; color:var(--ic-green-deep);">${escapeHTML(storeName)}</h2>
+    </div>
+    <div class="spinner" style="margin:40px auto;"></div>
+  `;
+  $('#sdBack').addEventListener('click', () => goto('dashboard'));
+
+  let r;
+  try {
+    const qs = new URLSearchParams({ period: 'all', store: storeName });
+    r = await api(`/dashboard?${qs}`);
+  } catch(e) {
+    root.innerHTML = `<button class="btn btn-ghost btn-sm" onclick="goto('dashboard')">← Dashboard</button>
+      <p class="help" style="margin-top:12px;">Failed to load store data: ${escapeHTML(e.message)}</p>`;
+    return;
+  }
+
+  const s = r.kpis || {};
+  const byWt = r.by_work_type || [];
+  const byTech = r.by_tech || [];
+
+  // Derived metrics — use max_cart_count from by_store (correct deployed count)
+  const storeRow    = (r.by_store || [])[0] || {};
+  const deployedCarts = storeRow.max_cart_count || 0;
+  const lifetimePerCart = deployedCarts > 0 ? s.total_spend / deployedCarts : 0;
+  const travelPct   = s.total_spend > 0 ? (r.cost_split?.travel || 0) / s.total_spend * 100 : 0;
+
+  root.innerHTML = `
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:18px; flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" id="sdBack">← Dashboard</button>
+      <h2 style="margin:0; font-size:20px; font-weight:800; color:var(--ic-green-deep);">${escapeHTML(storeName)}</h2>
+      ${deployedCarts > 0 ? `<span class="chip" style="background:var(--ok-bg);color:var(--ic-green-deep);">${deployedCarts} carts</span>` : ''}
+    </div>
+
+    <!-- KPI tiles -->
+    <div class="kpi-grid" style="margin-bottom:18px;">
+      ${kpiTile('Total spend',       fmt$(s.total_spend),  `${s.invoice_count || 0} invoice${s.invoice_count===1?'':'s'}`)}
+      ${kpiTile('Work orders',        String(s.wo_count || 0), byWt.map(t => capitalize(t.work_type)).join(' · ') || '—')}
+      ${kpiTile('Avg per visit',      fmt$(s.avg_invoice || 0), '')}
+      ${deployedCarts > 0 ? kpiTile('Lifetime $ / cart', fmt$(lifetimePerCart), `${deployedCarts} carts deployed`) : ''}
+      ${travelPct > 0    ? kpiTile('Travel overhead',    `${travelPct.toFixed(0)}%`, 'of total spend') : ''}
+    </div>
+
+    <!-- Work-type split -->
+    ${byWt.length ? `
+      <div class="card dash-card" style="margin-bottom:18px;">
+        <div class="section-title" style="margin-top:0;">Cost by work type</div>
+        ${byWt.map(t => {
+          const pct = s.total_spend > 0 ? (t.total / s.total_spend * 100) : 0;
+          const color = WT_COLORS[t.work_type] || 'var(--ic-green)';
+          return `
+            <div style="margin-bottom:10px;">
+              <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                <span style="font-weight:600;">${capitalize(t.work_type)}</span>
+                <span style="font-weight:800; font-variant-numeric:tabular-nums;">${fmt$(t.total)}
+                  <span class="meta">(${pct.toFixed(0)}%)</span>
+                  ${t.dollars_per_cart > 0 ? `<span class="meta"> · ${fmt$(t.dollars_per_cart)}/cart</span>` : ''}
+                </span>
+              </div>
+              <div style="background:var(--line); border-radius:4px; height:8px;">
+                <div style="background:${color}; width:${pct}%; height:100%; border-radius:4px;"></div>
+              </div>
+              <div class="meta" style="margin-top:2px;">${t.wo_count} WO${t.wo_count===1?'':'s'}</div>
+            </div>`;
+        }).join('')}
+      </div>` : ''}
+
+    <!-- Tech breakdown -->
+    ${byTech.length ? `
+      <div class="card dash-card">
+        <div class="section-title" style="margin-top:0;">Technicians</div>
+        ${byTech.map((t, i) => `
+          <div class="dash-list-row" style="cursor:default;">
+            <div style="flex:1; min-width:0;">
+              <strong>${escapeHTML(t.name)}</strong>
+              <div class="meta">${t.invoice_count || t.wo_count || 0} invoice${(t.invoice_count||t.wo_count||0)===1?'':'s'}</div>
+            </div>
+            <strong>${fmt$(t.total)}</strong>
+          </div>`).join('')}
+      </div>` : ''}
+  `;
+
+  $('#sdBack').addEventListener('click', () => goto('dashboard'));
 }
 
 function renderKpiTiles(s) {
@@ -8744,10 +8965,10 @@ function tableauHBars(opts) {
   const xAt = v => padL + (v / nmax) * plotW;
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(p => p * nmax);
   const mid = y0 => y0 + barH / 2 + 4.5;
-  // v0.88 — wrap in a scrollable container when there are many rows
-  const scrollClass = data.length > 12 ? ' hbar-scroll' : '';
+  // v0.89 — always wrap in a scrollable container; overflow-y only shows
+  // a scrollbar when the SVG is taller than the max-height in CSS.
   return `
-    <div class="${scrollClass}">
+    <div class="hbar-scroll">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="hbar-svg" style="width:100%;height:auto;display:block;">
       ${ticks.map(t => { const x = xAt(t); return `
         <line x1="${x}" y1="${padT - 8}" x2="${x}" y2="${baseY}" stroke="#eef0f4" stroke-width="1"/>
@@ -8833,42 +9054,87 @@ function renderDonutCard(title, rows, labelKey, valueKey, subFn) {
   `;
 }
 
-// Horizontal stacked-bar chart for tech × work-type comparison.
-// One bar per tech; each bar's segments use the WT colors so direct
-// comparison is visual (longer green = more deployment, etc).
+// v0.89 — Horizontal stacked-bar chart for tech × work-type comparison.
+// Always shows top 5 techs; "Show N more" expands the rest.
 function renderStackedTechCard(title, rows) {
   const data = (rows || []).filter(t => t.total > 0);
   if (!data.length) {
     return `<div class="card dash-card"><div class="section-title" style="margin-top:0;">${escapeHTML(title)}</div><div class="empty" style="padding:14px;font-size:12px;">No data in this period yet.</div></div>`;
   }
+  const VISIBLE = 5;
   const max = Math.max(...data.map(t => t.total), 1);
+
+  const renderRow = (t) => {
+    const widthPct = (t.total / max) * 100;
+    const segments = WT_ORDER.map(wt => {
+      const v = t.totals[wt] || 0;
+      if (v <= 0) return '';
+      const inner = (v / t.total) * 100;
+      return `<div class="stack-seg" style="width:${inner}%; background:${WT_COLORS[wt]};" title="${capitalize(wt)}: ${fmt$(v)}"></div>`;
+    }).join('');
+    return `
+      <div class="stack-row" data-drill="tech" data-value="${escapeHTML(String(t.user_id))}" role="button" tabindex="0">
+        <div class="stack-row-head">
+          <span class="bar-label">${escapeHTML(t.name)}</span>
+          <strong>${fmt$(t.total)}</strong>
+        </div>
+        <div class="stack-track" style="width:${widthPct}%;">${segments}</div>
+        <div class="bar-sub">${WT_ORDER.filter(wt => t.totals[wt] > 0).map(wt => `${capitalize(wt)} ${fmt$(t.totals[wt])}`).join(' · ')}</div>
+      </div>
+    `;
+  };
+
+  const shown  = data.slice(0, VISIBLE);
+  const hidden = data.slice(VISIBLE);
+
   return `
     <div class="card dash-card">
-      <div class="section-title" style="margin-top: 0;">${escapeHTML(title)} <span class="bar-help">Hover a segment for details · click row to drill</span></div>
+      <div class="section-title" style="margin-top:0;">${escapeHTML(title)} <span class="bar-help">Hover a segment for details · click row to drill</span></div>
       <div class="stacked-legend">
         ${WT_ORDER.map(wt => `
           <span class="legend-pill"><span class="swatch" style="background: ${WT_COLORS[wt]};"></span>${capitalize(wt)}</span>
         `).join('')}
       </div>
-      ${data.map(t => {
-        const widthPct = (t.total / max) * 100;
-        const segments = WT_ORDER.map(wt => {
-          const v = t.totals[wt] || 0;
-          if (v <= 0) return '';
-          const inner = (v / t.total) * 100;
-          return `<div class="stack-seg" style="width:${inner}%; background:${WT_COLORS[wt]};" title="${capitalize(wt)}: ${fmt$(v)}"></div>`;
-        }).join('');
-        return `
-          <div class="stack-row" data-drill="tech" data-value="${escapeHTML(String(t.user_id))}" role="button" tabindex="0">
-            <div class="stack-row-head">
-              <span class="bar-label">${escapeHTML(t.name)}</span>
-              <strong>${fmt$(t.total)}</strong>
+      ${shown.map(renderRow).join('')}
+      ${hidden.length ? `
+        <div class="stacked-overflow" style="display:none;">${hidden.map(renderRow).join('')}</div>
+        <button class="btn btn-ghost btn-sm stacked-expand-btn" style="margin-top:6px; font-size:12px;">▾ Show ${hidden.length} more</button>
+      ` : ''}
+    </div>
+  `;
+}
+
+// v0.89 — Avg spend per cart by work type. Uses dollars_per_cart from byWorkType
+// (pre-computed server-side as total_spend / total_cart_count per work type).
+function renderSpendPerCartCard(byWorkType) {
+  const rows = (byWorkType || []).filter(r => r.dollars_per_cart > 0);
+  if (!rows.length) return '';
+  const maxRate = Math.max(...rows.map(r => r.dollars_per_cart), 1);
+  return `
+    <div class="card dash-card">
+      <div class="section-title" style="margin-top:0;">Avg spend per cart by work type
+        <span class="bar-help">Total approved spend ÷ cart count across WOs in period</span>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:10px; margin-top:8px;">
+        ${rows.map(r => {
+          const barPct = (r.dollars_per_cart / maxRate) * 100;
+          const color = WT_COLORS[r.work_type] || 'var(--ic-green)';
+          return `
+            <div>
+              <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px;">
+                <span style="font-size:13px; font-weight:600; color:var(--text);">${capitalize(r.work_type)}</span>
+                <span style="font-size:15px; font-weight:800; color:var(--ic-green-deep); font-variant-numeric:tabular-nums;">
+                  ${fmtMoneyFull(r.dollars_per_cart)}<span style="font-size:11px; font-weight:500; color:var(--muted);">/cart</span>
+                </span>
+              </div>
+              <div style="background:var(--line); border-radius:4px; height:8px; overflow:hidden;">
+                <div style="background:${color}; width:${barPct}%; height:100%; border-radius:4px; transition:width .3s;"></div>
+              </div>
+              <div class="meta" style="margin-top:3px;">${r.wo_count} WO${r.wo_count===1?'':'s'} · ${fmtMoneyFull(r.total)} total spend</div>
             </div>
-            <div class="stack-track" style="width:${widthPct}%;">${segments}</div>
-            <div class="bar-sub">${WT_ORDER.filter(wt => t.totals[wt] > 0).map(wt => `${capitalize(wt)} ${fmt$(t.totals[wt])}`).join(' · ')}</div>
-          </div>
-        `;
-      }).join('')}
+          `;
+        }).join('')}
+      </div>
     </div>
   `;
 }
@@ -9008,9 +9274,9 @@ function renderColumnCard(title, rows) {
   const max = Math.max(...data.map(r => r.total), 1);
   const nmax = niceMax(max);
   const avg = data.reduce((s, r) => s + r.total, 0) / data.length;
-  const W = 400, H = 300, padL = 54, padR = 16, padT = 42, padB = 54;
+  const W = 720, H = 260, padL = 54, padR = 16, padT = 42, padB = 54;
   const plotW = W - padL - padR, plotH = H - padT - padB;
-  const colW = plotW / data.length, bw = Math.min(62, colW * 0.66);
+  const colW = plotW / data.length, bw = Math.min(100, colW * 0.55);
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(p => p * nmax);
   const yAt = v => padT + plotH * (1 - v / nmax);
   return `
