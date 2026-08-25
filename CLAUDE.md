@@ -52,6 +52,24 @@ drifts. When unsure, run the full chain.
 - DB migrations run on boot through `ensureSchema()` in `db.js`, so schema changes
   apply to the prod SQLite volume automatically on deploy.
 
+## Branching & commits — one fix per branch (required)
+- **Every bug fix / feature gets its OWN branch cut from `main`, with one focused
+  commit (or a tight related series), merged back to `main` via PR.** Never pile
+  unrelated fixes into a single branch, commit, or working tree.
+- **Shared-file collisions are resolved at the BRANCH level, never by bundling.** If
+  two in-flight fixes touch the same file, each still lives on its own branch off
+  `main`; the overlap is reconciled by rebase/merge order at PR time — do NOT
+  co-mingle them "because they touch the same file." Branch from `main`, not from
+  another in-progress fix branch, so unrelated WIP is simply absent from the base.
+- Branch naming: `fix/<slug>` for bugs, `feature/<slug>` for features, `hotfix/<slug>`
+  for an urgent patch straight to `main`.
+- Phase 4 review and the deploy both operate on that isolated diff — keep the branch
+  scoped to the one change under review. The PRD revision-history line still travels
+  with the fix (docs-only, skips deploy).
+- The sandbox generally can't push (git auth is on the Mac) and git writes to `.git`
+  may hit EPERM/lock issues — prepare the isolated branch/patch here, but run the
+  final `commit`/`push`/PR from the Mac.
+
 ## Runtime
 - Node + `node:sqlite` → needs flags `--experimental-sqlite --no-warnings=ExperimentalWarning`
   (see package.json `start`). DB file `data/otg.db`; schema in `schema.sql`.
