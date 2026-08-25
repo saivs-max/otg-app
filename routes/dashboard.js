@@ -217,6 +217,8 @@ module.exports = (db) => {
     // ---- By work type (joined through line items) ----
     // Compute spend per WO line then aggregate. We approximate "work_type spend"
     // as labor + linked expenses on time/expense rows belonging to the WO.
+    // v0.93 — added LABOR_TYPE_SQL to both legs so vendor invoice spend is
+    // excluded here (it has its own tile), matching the KPI sumRow calculation.
     const byWorkType = db.prepare(`
       SELECT w.work_type,
              COUNT(DISTINCT w.id) AS wo_count,
@@ -230,12 +232,12 @@ module.exports = (db) => {
         FROM time_entries t
         JOIN invoices i ON i.id = t.invoice_id
         WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
-          AND i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
+          AND i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql} ${LABOR_TYPE_SQL}
         UNION ALL
         SELECT e.work_order_id AS wo_id, e.amount
         FROM expenses e
         JOIN invoices i ON i.id = e.invoice_id
-        WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
+        WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql} ${LABOR_TYPE_SQL}
       ) spend ON spend.wo_id = w.id
       WHERE 1=1 ${woFilterSql}
       GROUP BY w.work_type
@@ -263,12 +265,12 @@ module.exports = (db) => {
         FROM time_entries t
         JOIN invoices i ON i.id = t.invoice_id
         WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
-          AND i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
+          AND i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql} ${LABOR_TYPE_SQL}
         UNION ALL
         SELECT e.work_order_id AS wo_id, e.amount
         FROM expenses e
         JOIN invoices i ON i.id = e.invoice_id
-        WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
+        WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql} ${LABOR_TYPE_SQL}
       ) spend ON spend.wo_id = w.id
       WHERE w.store_name IS NOT NULL AND w.store_name != ''
         ${woFilterSql}
@@ -300,12 +302,12 @@ module.exports = (db) => {
           FROM time_entries t
           JOIN invoices i ON i.id = t.invoice_id
           WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
-            AND i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
+            AND i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql} ${LABOR_TYPE_SQL}
           UNION ALL
           SELECT e.work_order_id AS wo_id, e.amount
           FROM expenses e
           JOIN invoices i ON i.id = e.invoice_id
-          WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
+          WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql} ${LABOR_TYPE_SQL}
         ) spend ON spend.wo_id = w.id
         WHERE 1=1 ${woFilterSql}
       )
