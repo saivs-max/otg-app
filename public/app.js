@@ -9074,7 +9074,7 @@ function renderKpiTiles(s) {
   // v0.33 — actuals-only. Forecast tiles moved to the Forecast tab.
   return `
     <div class="kpi-grid">
-      ${kpiTile('Spend in period',       fmt$(s.total_spend),    `${s.invoice_count} invoice${s.invoice_count===1?'':'s'}`)}
+      ${kpiTile('Spend in period',       fmt$(s.total_spend),    `${s.invoice_count} invoice${s.invoice_count===1?'':'s'} · tech labor, submitted+`)}
       ${kpiTile('Avg invoice',           fmt$(s.avg_invoice),    '')}
       ${kpiTile('Pending in queue',      fmt$(s.pending_value),  `${s.pending_count} waiting${s.pending_avg_age_days ? ` · avg ${s.pending_avg_age_days}d` : ''}`, s.pending_count > 0 ? 'warn' : '')}
       ${kpiTile('Drafts (not yet sent)', fmt$(s.draft_value),    `${s.draft_count} draft${s.draft_count===1?'':'s'}`)}

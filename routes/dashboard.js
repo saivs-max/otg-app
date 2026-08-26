@@ -128,12 +128,15 @@ module.exports = (db) => {
       // the donut) so the KPI always reconciles with the chart. Reading i.total was
       // stale: invoices closed before v0.90 excluded drive-mode clocks, causing a
       // systematic under-count in the KPI vs the donut.
+      // v0.93 — LEFT JOIN so billable invoices with no clocked time or expenses
+      // are still counted in n (they contribute $0 to spend). Previously they
+      // were silently dropped by the INNER JOIN, understating invoice_count.
       sumRow = db.prepare(`
         SELECT COUNT(DISTINCT i.id) AS n,
                COALESCE(SUM(spend.amount),0) AS sum_total,
                COALESCE(SUM(spend.amount),0) / NULLIF(COUNT(DISTINCT i.id), 0) AS avg_total
         FROM invoices i
-        JOIN (
+        LEFT JOIN (
           SELECT t.invoice_id AS iid,
                  (julianday(t.clock_out)-julianday(t.clock_in))*24 *
                    COALESCE((SELECT u.hourly_rate FROM users u WHERE u.id = t.user_id), 40) AS amount
@@ -149,19 +152,22 @@ module.exports = (db) => {
     }
 
     // pending/draft tiles always reflect the team-or-tech scope but stay
-    // store-agnostic. Tech-labor only — vendor pending tracked separately.
+    // store-agnostic. v0.93 — include all invoice types (tech + vendor) so
+    // these counts reconcile with the All Invoices page. Vendor spend is
+    // already excluded from the spend/count tile above (which has its own
+    // vendor tile), so including vendor here does not double-count spend.
     const noStoreParams = effectiveTechIds ? [...effectiveTechIds] : [];
     const pendingRow = db.prepare(`
       SELECT COUNT(*) AS n, COALESCE(SUM(i.total),0) AS sum_total,
              COALESCE(AVG(julianday('now') - julianday(i.submitted_at)), 0) AS avg_age
       FROM invoices i
-      WHERE i.status IN ('submitted','in_review','approved_ops') ${scopeSql} ${LABOR_TYPE_SQL}
+      WHERE i.status IN ('submitted','in_review','approved_ops') ${scopeSql}
     `).get(...noStoreParams);
 
     const draftRow = db.prepare(`
       SELECT COUNT(*) AS n, COALESCE(SUM(i.total),0) AS sum_total
       FROM invoices i
-      WHERE i.status = 'draft' ${scopeSql} ${LABOR_TYPE_SQL}
+      WHERE i.status = 'draft' ${scopeSql}
     `).get(...noStoreParams);
 
     // ---- By technician ----
