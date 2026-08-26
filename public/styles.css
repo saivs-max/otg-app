@@ -248,7 +248,7 @@ button, input, select, textarea { font-size: inherit; }
   background: #fff; width: 100%; max-width: 480px;
   border-radius: 16px 16px 0 0;
   padding: 18px 16px 24px;
-  max-height: 88vh; overflow-y: auto;
+  max-height: 88vh; overflow-y: auto; overflow-x: hidden;
   box-shadow: 0 -8px 24px rgba(0,0,0,0.15);
 }
 .sheet-handle {

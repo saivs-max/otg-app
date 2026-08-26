@@ -5824,8 +5824,11 @@ async function renderAdmin(root) {
             <div class="flex between" style="align-items: flex-start;">
               <div style="flex: 1; min-width: 0;">
                 <div style="font-weight: 700;">${escapeHTML(u.name)}</div>
-                <div class="meta" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-                  <code title="${escapeHTML(u.username || '')}">${escapeHTML(u.username || '(no username)')}</code> · ${escapeHTML(u.email)}
+                <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; color:var(--ink-2);">
+                  <code style="font-size:inherit;" title="${escapeHTML(u.username || '')}">${escapeHTML(u.username || '(no username)')}</code>
+                </div>
+                <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--muted); margin-top:1px;">
+                  ${escapeHTML(u.email)}
                 </div>
                 <div style="margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap;">
                   <span class="role-tag ${u.role}">${escapeHTML(roleLabel(u.role))}</span>
@@ -6336,7 +6339,7 @@ function openAddUserSheet() {
     <span class="label">Full name</span>
     <input class="field" id="auName" autofocus maxlength="100" />
 
-    <div class="flex gap-12">
+    <div class="flex gap-12" style="flex-wrap:wrap;">
       <div style="flex:1; min-width:0;">
         <span class="label">Email</span>
         <input class="field" id="auEmail" type="email" maxlength="254" />
@@ -6446,7 +6449,7 @@ function openEditUserSheet(u) {
     <h3>Edit ${escapeHTML(u.name)}</h3>
     <span class="label">Full name</span>
     <input class="field" id="euName" maxlength="100" value="${escapeHTML(u.name)}" />
-    <div class="flex gap-12">
+    <div class="flex gap-12" style="flex-wrap:wrap;">
       <div style="flex:1; min-width:0;">
         <span class="label">Email</span>
         <input class="field" id="euEmail" type="email" maxlength="254" value="${escapeHTML(u.email)}" />
