@@ -1153,9 +1153,11 @@ async function renderWoAdd(root) {
   api('/mx/locations').then(r => {
     mxLocs    = r.locations || [];
     mxLocsMap = Object.fromEntries(mxLocs.map(l => [l.name, l]));
-    // Refresh the location card list in-place if rendered
+    // Refresh the location card list in-place if rendered; otherwise rerender
+    // so the picker appears (initial load: mxLocs was empty when html() ran). v0.83.1
     const listEl = document.getElementById('locCardList');
     if (listEl) { listEl.innerHTML = buildLocCards(mxLocs); bindLocCards(); }
+    else if (mxLocs.length && !selectedLocation) { grabBeforeRerender(); rerender(); }
   }).catch(() => {});
 
   // Grabs current live input values into form (prevents stale rerender).
