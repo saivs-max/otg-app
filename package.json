@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env server.js",
     "test:invoices": "node test/invoice-accuracy/run-accuracy.js",
+    "test:localdate": "TZ=America/Los_Angeles node test/local-date-consistency/run.js",
     "test:maintainx": "node --experimental-sqlite --no-warnings=ExperimentalWarning test/maintainx-sync/run.js && node --experimental-sqlite --no-warnings=ExperimentalWarning test/maintainx-sync/http-smoke.js",
     "test:break": "node --experimental-sqlite --no-warnings=ExperimentalWarning test/break-workflow/http-smoke.js",
     "test:nav": "node test/nav/run.js",

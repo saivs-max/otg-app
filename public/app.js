@@ -4045,8 +4045,11 @@ function fmtMonthDay(s)  { const d = parseDisplayDate(s); return d ? `${d.getMon
 function fmtLongDate(s)  { const d = parseDisplayDate(s); return d ? d.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) : ''; }
 function escapeHTML(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 function enumerateWeekDays(start, end) {
-  const out = []; const d = new Date(start), e = new Date(end);
-  while (d <= e) { out.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 1); }
+  // v0.96 — parse the date-only bounds as LOCAL (parseDisplayDate) and format with
+  // localDateISO, so the day list never UTC-shifts west of UTC. (Previously a UTC
+  // round-trip: new Date('YYYY-MM-DD') is UTC-midnight and toISOString() read it back.)
+  const out = []; const d = parseDisplayDate(start), e = parseDisplayDate(end);
+  while (d <= e) { out.push(localDateISO(d)); d.setDate(d.getDate() + 1); }
   return out;
 }
 
@@ -5428,7 +5431,7 @@ async function openTechUploadSheet() {
       <p class="help">Got a PDF you sent before this app existed? Upload it. We'll parse the line items, mileage, and tolls into a draft you can edit and submit.</p>
 
       <span class="label">Week the invoice covers (any date in the Mon–Sun)</span>
-      <input class="field" id="tuWeek" type="date" value="${lastWeekDate.toISOString().slice(0,10)}" max="${new Date().toISOString().slice(0,10)}" />
+      <input class="field" id="tuWeek" type="date" value="${localDateISO(lastWeekDate)}" max="${todayISO()}" />
 
       <span class="label">Original PDF (or photo)</span>
       <div id="tuFilePicker"></div>
@@ -5504,7 +5507,7 @@ async function openUploadInvoiceSheet() {
       </select>
 
       <span class="label">Week (any date in the target Mon–Sun)</span>
-      <input class="field" id="upWeek" type="date" value="${lastWeekDate.toISOString().slice(0,10)}" max="${new Date().toISOString().slice(0,10)}" />
+      <input class="field" id="upWeek" type="date" value="${localDateISO(lastWeekDate)}" max="${todayISO()}" />
 
       <span class="label">Original file (PDF, JPG, PNG)</span>
       <div id="upFilePicker"></div>
@@ -7674,7 +7677,7 @@ async function renderLaunchActuals(root) {
   const dow   = today.getDay();
   const offsetToLastSunday = dow === 0 ? 7 : dow;
   const lastSun = new Date(today); lastSun.setDate(today.getDate() - offsetToLastSunday);
-  const defaultWeekEnd = lastSun.toISOString().slice(0, 10);
+  const defaultWeekEnd = localDateISO(lastSun); // v0.96 — local, not UTC (evening-West safe)
 
   const weekEnd = STATE._launchWeek || defaultWeekEnd;
 
@@ -7692,9 +7695,9 @@ async function renderLaunchActuals(root) {
   // Build the previous 6 weeks for a quick switcher (Sundays only).
   const weekOptions = [];
   for (let i = 0; i < 6; i++) {
-    const d = new Date(defaultWeekEnd);
+    const d = parseDisplayDate(defaultWeekEnd); // v0.96 — parse date-only as LOCAL
     d.setDate(d.getDate() - 7 * i);
-    weekOptions.push(d.toISOString().slice(0, 10));
+    weekOptions.push(localDateISO(d));
   }
 
   root.innerHTML = `
@@ -10237,9 +10240,9 @@ async function openCustomPeriodSheet() {
   const firstOfThis = new Date(today.getFullYear(), today.getMonth(), 1);
   const lastOfPrev  = new Date(firstOfThis.getTime() - 86400000);
   const firstOfPrev = new Date(lastOfPrev.getFullYear(), lastOfPrev.getMonth(), 1);
-  const defStart = firstOfPrev.toISOString().slice(0,10);
-  const defEnd   = lastOfPrev.toISOString().slice(0,10);
-  const todayIso = today.toISOString().slice(0,10);
+  const defStart = localDateISO(firstOfPrev); // v0.96 — local, not UTC (evening-West safe)
+  const defEnd   = localDateISO(lastOfPrev);
+  const todayIso = localDateISO(today);
   // Track which WOs are selected. Default = all available (most common case
   // is "everything in this period", so opt-out is easier than opt-in).
   const picked = new Set(available.map(w => w.id));
@@ -10348,8 +10351,8 @@ function openPastInvoiceSheet() {
   // Default to last week
   const lastWeekMon = new Date();
   lastWeekMon.setDate(lastWeekMon.getDate() - (lastWeekMon.getDay() === 0 ? 13 : lastWeekMon.getDay() + 6));
-  const defaultDate = lastWeekMon.toISOString().slice(0, 10);
-  const today = new Date().toISOString().slice(0, 10);
+  const defaultDate = localDateISO(lastWeekMon); // v0.96 — local, not UTC (evening-West safe)
+  const today = todayISO();
 
   showSheet(`
     <h3>Create invoice for past week</h3>
