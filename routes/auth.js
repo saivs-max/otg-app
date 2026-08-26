@@ -202,7 +202,18 @@ module.exports = (db) => {
     if (!userId) return res.status(401).json({ error: 'no user selected' });
     const u = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
     if (!u) return res.status(404).json({ error: 'user not found' });
-    const { hourly_rate, home_address, home_phone } = req.body;
+    const { hourly_rate, home_address, home_phone, email } = req.body;
+    // v0.89 — allow self-service email update with format + uniqueness validation.
+    if (email !== undefined) {
+      const valErr = validateUserFields({ email });
+      if (valErr) return res.status(400).json({ error: valErr });
+      const trimmed = String(email).trim().toLowerCase();
+      const dup = db.prepare("SELECT id FROM users WHERE email = ? AND id != ?").get(trimmed, userId);
+      if (dup) return res.status(409).json({ error: 'Email already in use by another account' });
+      db.prepare("UPDATE users SET email = ? WHERE id = ?").run(trimmed, userId);
+      logAudit(db, { entity_type: 'users', entity_id: userId, user_id: userId, action: 'email_change',
+                     details: { from: u.email, to: trimmed } });
+    }
     if (hourly_rate != null) {
       const r = Number(hourly_rate);
       if (!isFinite(r) || r < 0 || r > 500) {

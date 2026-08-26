@@ -62,14 +62,29 @@ module.exports = (db) => {
 
   // Find or create the draft invoice covering a specific week. If `forDate` is null,
   // uses the current week. Always attaches any orphaned time/expenses falling in that week.
+  // v0.94 — BUG FIX: only reuse an existing DRAFT for the week. If the week's
+  // invoice is already submitted/approved/sent_ap, mint a new supplemental draft
+  // so GET /invoices/current never returns a locked invoice as "current."
+  // (Same fix applied to POST /invoices/for-week at v0.93.)
   function ensureDraftForWeek(userId, forDate) {
     const { start, end } = weekBounds(forDate ? new Date(forDate) : new Date());
     let inv = db.prepare(`
-      SELECT * FROM invoices WHERE user_id = ? AND period_start = ?
+      SELECT * FROM invoices WHERE user_id = ? AND period_start = ? AND status = 'draft'
     `).get(userId, start);
 
     if (!inv) {
-      const num = invoiceNumber(userId, end);
+      // v0.94 — resolve invoice_number collision when a locked invoice (any status)
+      // already holds the base number for this week (e.g. the sent_ap invoice).
+      // Mirrors the suffix logic in createNewUploadDraft.
+      const baseNum = invoiceNumber(userId, end);
+      const usedNums = new Set(db.prepare(
+        `SELECT invoice_number FROM invoices WHERE user_id = ? AND invoice_number LIKE ?`
+      ).all(userId, `${baseNum}%`).map(r => r.invoice_number));
+      let num = baseNum;
+      for (let code = 'A'.charCodeAt(0); usedNums.has(num); code++) {
+        if (code > 'Z'.charCodeAt(0)) { num = `${baseNum}-${Date.now()}`; break; }
+        num = `${baseNum}-${String.fromCharCode(code)}`;
+      }
       const r = db.prepare(`
         INSERT INTO invoices (invoice_number, user_id, period_start, period_end, status, total)
         VALUES (?, ?, ?, ?, 'draft', 0)

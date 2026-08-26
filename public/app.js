@@ -9719,7 +9719,7 @@ async function renderSettings(root) {
       <span class="label">Full name</span>
       <input class="field" id="profName" value="${escapeHTML(STATE.user.name || '')}" disabled />
       <span class="label">Email</span>
-      <input class="field" id="profEmail" value="${escapeHTML(STATE.user.email || '')}" disabled />
+      <input class="field" id="profEmail" type="email" maxlength="254" value="${escapeHTML(STATE.user.email || '')}" />
       <span class="label">Home address</span>
       <input class="field" id="profAddr" placeholder="24 Mayflower Drive, Sicklerville, NJ 08081" value="${escapeHTML(STATE.user.home_address || '')}" />
       <span class="label">Phone</span>
@@ -9799,8 +9799,16 @@ async function renderSettings(root) {
   $('#profChangePwd')?.addEventListener('click', () => openChangePasswordSheet({ forced: false }));
 
   $('#profSave')?.addEventListener('click', async () => {
+    // v0.89 — validate email format before submitting
+    const emailVal = $('#profEmail').value.trim();
+    if (!emailVal) { toast('Email is required', 'err'); return; }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(emailVal)) {
+      toast('Please enter a valid email address (e.g. name@company.com)', 'err');
+      return;
+    }
     try {
       const updated = await api('/me', { method: 'PATCH', body: {
+        email:        emailVal,
         home_address: $('#profAddr').value.trim(),
         home_phone:   $('#profPhone').value.trim(),
       }});
