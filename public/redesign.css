@@ -228,6 +228,13 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
 .dash-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .dash-filters .dash-select { min-width: 150px; padding: 9px 12px; font-size: 13px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); }
 .dash-filters .dash-select:focus { outline: none; border-color: var(--ic-green); box-shadow: 0 0 0 3px rgba(14,122,86,.12); }
+/* v0.89 — combo-clear overlap fix: redesign.css loads after styles.css so equal-specificity
+   rules here override .combo-wrap .dash-select { padding-right: 28px } in styles.css,
+   collapsing right padding to 12px and causing the × button to overlap the native datalist
+   indicator. A 3-class selector restores the padding; the pseudo-element hides the native
+   browser picker arrow so only the custom × appears on the right. Datalist still works. */
+.dash-filters .combo-wrap .dash-select { padding-right: 30px; }
+.combo-wrap .dash-select::-webkit-calendar-picker-indicator { display: none; }
 @media (max-width: 720px) { .dash-toolbar { flex-direction: column; align-items: stretch; } .dash-filters { flex-direction: column; align-items: stretch; } .dash-filters .combo-wrap, .dash-filters .dash-select { width: 100%; } }
 .kpi-grid { display: grid; grid-template-columns: 1fr; gap: 14px; margin-bottom: 22px; }
 @media (min-width: 560px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
