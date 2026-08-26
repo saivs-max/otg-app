@@ -9981,11 +9981,14 @@ async function renderMine(root) {
     rq.status === 'pending' ||
     (rq.decided_at && new Date(rq.decided_at).getTime() >= _addReqCutoff)
   );
-  const thisWeekStart = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() - (d.getDay() === 0 ? 6 : d.getDay() - 1));
-    return d.toISOString().slice(0,10);
-  })();
+  // v0.95 — use the canonical local-Monday helper (weekStartISO, v0.87) instead of an
+  // inline toISOString() copy. The inline version derived the Monday from LOCAL calendar
+  // fields but then serialized with toISOString() (UTC), so every evening west of UTC it
+  // rolled the date a day forward and no longer matched the stored period_start — the
+  // "No invoice for this week yet" false-negative shown right next to the real invoice in
+  // ALL INVOICES. weekStartISO() keeps this surface on the same local week basis as the
+  // rest of the client (Expected-pay, the map filter, clock-in's prev-week check).
+  const thisWeekStart = weekStartISO();
   // v0.94 — match ANY invoice for the current week (draft or submitted/sent/etc.),
   // not just drafts; a sent_ap invoice was invisible here and produced the
   // "No invoice for this week yet" false-negative alongside the real invoice in All.
