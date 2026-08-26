@@ -228,6 +228,13 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
 .dash-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .dash-filters .dash-select { min-width: 150px; padding: 9px 12px; font-size: 13px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); }
 .dash-filters .dash-select:focus { outline: none; border-color: var(--ic-green); box-shadow: 0 0 0 3px rgba(14,122,86,.12); }
+/* v0.89 — when a combo-clear (×) button is present the native datalist indicator
+   sits at the same right edge. Fix: extra specificity restores the padding-right that
+   styles.css sets (overridden by the equal-specificity rule above because redesign.css
+   loads last), and the pseudo-element rule removes the native browser picker indicator
+   so only the custom × button is visible on the right. Datalist suggestions still work. */
+.dash-filters .combo-wrap .dash-select { padding-right: 30px; }
+.combo-wrap .dash-select::-webkit-calendar-picker-indicator { display: none; }
 @media (max-width: 720px) { .dash-toolbar { flex-direction: column; align-items: stretch; } .dash-filters { flex-direction: column; align-items: stretch; } .dash-filters .combo-wrap, .dash-filters .dash-select { width: 100%; } }
 .kpi-grid { display: grid; grid-template-columns: 1fr; gap: 14px; margin-bottom: 22px; }
 @media (min-width: 560px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
