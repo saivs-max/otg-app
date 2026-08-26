@@ -140,6 +140,14 @@ function ensureSchema(db) {
     `);
   } catch (_) { /* vendors table absent on a partial schema — ignore */ }
 
+  // v0.89 — Backfill: users whose name was stored as the literal template
+  // string "[no username]: email@..." (written by an older code path) get
+  // their name set to NULL so the UI can display a clean fallback instead.
+  // Idempotent: the LIKE pattern never matches a real name.
+  try {
+    db.exec(`UPDATE users SET name = NULL WHERE name LIKE '[no username]:%'`);
+  } catch (_) { /* safe to ignore on partial schemas */ }
+
   // v0.82 — Break timer rework (live-tracked pause/resume). break_started_at is
   // the pause timestamp on a running entry; break_flagged marks a break that ran
   // over 60 min. Both default to not-on-break / unflagged, so existing rows are
