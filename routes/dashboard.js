@@ -960,12 +960,14 @@ function buildDashboardWorkbook(p, costRows = []) {
       r.service_date || '',
       r.num_techs || '',
       r.tech_names || '',
-      r.actual_labor != null ? +r.actual_labor.toFixed(2) : '',
-      r.actual_travel != null ? +r.actual_travel.toFixed(2) : '',
-      r.actual_expenses != null ? +r.actual_expenses.toFixed(2) : '',
+      // v0.87 — gate cost columns on in_totals so pending rows export as blank
+      // (same approved-only rule as the UI footer and aggregateCostTrackerByMonth).
+      r.in_totals && r.actual_labor    != null ? +r.actual_labor.toFixed(2)    : '',
+      r.in_totals && r.actual_travel   != null ? +r.actual_travel.toFixed(2)   : '',
+      r.in_totals && r.actual_expenses != null ? +r.actual_expenses.toFixed(2) : '',
       r.service_delay || 'None',
       r.has_third_party ? 'Yes' : 'No',
-      r.third_party_cost != null ? +r.third_party_cost.toFixed(2) : 0,
+      r.in_totals && r.third_party_cost != null ? +r.third_party_cost.toFixed(2) : '',
       null, // formula below
       r.invoice_link || '',
       r.notes || '',
@@ -978,9 +980,9 @@ function buildDashboardWorkbook(p, costRows = []) {
     const xr = i + 2;
     setFormula(ctmSheet, `Q${xr}`, `IF($B${xr}="","",SUM(IF($K${xr}="",0,$K${xr}),IF($L${xr}="",0,$L${xr}),IF($M${xr}="",0,$M${xr}),IF($P${xr}="",0,$P${xr})))`);
   }
-  // v0.67 — grand-total row so the export showcases the same bottom-line totals
-  // as the in-app footer (Labor / Travel / Expenses / 3P / Total). Pending rows
-  // carry $0, so the column sums equal the approved actuals.
+  // v0.87 — grand-total row matches the in-app footer (Labor / Travel / Expenses /
+  // 3P / Total). Cost columns are blank for pending rows (gated on in_totals above),
+  // so the SUM formulas naturally equal approved actuals only.
   if (costRows.length) {
     const first = 2, last = costRows.length + 1, totalRow = costRows.length + 2;
     XLSX.utils.sheet_add_aoa(ctmSheet, [['', 'TOTAL (approved actuals)']], { origin: `A${totalRow}` });
