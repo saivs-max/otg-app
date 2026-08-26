@@ -416,6 +416,21 @@ module.exports = (db) => {
       const inTeam = db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?")
         .get(userId, inv.user_id);
       if (!inTeam) return res.status(403).json({ error: 'this technician is not on your team' });
+      // v0.90 — BUG-concurrent-approve-reject fix: an ops_manager's rejection
+      // authority is scoped to 'submitted' invoices. If the invoice is already in
+      // 'approved_ops' AND was approved by a DIFFERENT ops_manager, block the
+      // reject — a peer cannot unilaterally override another manager's approval.
+      // The manager who approved it may still undo their own approval
+      // (approved_ops_by === userId). sr_manager / pm are unrestricted (handled
+      // below by not entering this block). This closes the phase-2 race window
+      // that v0.89 left open: Manager A approves (submitted→approved_ops), then
+      // Manager B reads the fresh approved_ops state and previously could reject
+      // it despite never having authority over that state.
+      if (inv.status === 'approved_ops' && inv.approved_ops_by !== userId) {
+        return res.status(409).json({
+          error: 'invoice has already been approved by another manager — only a senior manager can reject it at this stage'
+        });
+      }
     }
 
     const now = new Date().toISOString();
