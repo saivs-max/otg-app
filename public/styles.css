@@ -242,7 +242,10 @@ button, input, select, textarea { font-size: inherit; }
 /* ==== Modal sheet (used for edit forms) ==== */
 .sheet-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,0.40);
-  z-index: 50; display: flex; align-items: flex-end; justify-content: center;
+  /* v0.89 — raised from 50 to 200 so the sheet always appears above in-page
+     dropdowns such as the cart picker panel (z-index:100) on the WO Add form.
+     Previously the open cart dropdown would render on top of the clock-in sheet. */
+  z-index: 200; display: flex; align-items: flex-end; justify-content: center;
 }
 .sheet {
   background: #fff; width: 100%; max-width: 480px;
