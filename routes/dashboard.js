@@ -151,24 +151,33 @@ module.exports = (db) => {
       sumRow.avg_total = sumRow.avg_total || 0;
     }
 
-    // pending/draft tiles always reflect the team-or-tech scope but stay
-    // store-agnostic. v0.93 — include all invoice types (tech + vendor) so
-    // these counts reconcile with the All Invoices page. Vendor spend is
-    // already excluded from the spend/count tile above (which has its own
-    // vendor tile), so including vendor here does not double-count spend.
+    // pending/draft tiles reflect team-or-tech scope. v0.93 — include all
+    // invoice types (tech + vendor). v0.94 — when a store or work_type filter
+    // is active, scope to invoices linked to matching WOs via EXISTS so the
+    // count responds to the same filters as the other tiles. Invoices with no
+    // WO link (edge case) are naturally excluded when a store/wt filter is on.
     const noStoreParams = effectiveTechIds ? [...effectiveTechIds] : [];
+    // EXISTS fragment reused by both pending and draft queries.
+    const woExistsSql = hasWoFilter ? `
+      AND EXISTS (
+        SELECT 1 FROM time_entries te
+        JOIN work_orders w ON w.id = te.work_order_id
+        WHERE te.invoice_id = i.id ${storeFilterSql} ${wtFilterSql}
+      )` : '';
+    const pendingDraftParams = [...noStoreParams, ...(hasWoFilter ? storeParam : [])];
+
     const pendingRow = db.prepare(`
       SELECT COUNT(*) AS n, COALESCE(SUM(i.total),0) AS sum_total,
              COALESCE(AVG(julianday('now') - julianday(i.submitted_at)), 0) AS avg_age
       FROM invoices i
-      WHERE i.status IN ('submitted','in_review','approved_ops') ${scopeSql}
-    `).get(...noStoreParams);
+      WHERE i.status IN ('submitted','in_review','approved_ops') ${scopeSql} ${woExistsSql}
+    `).get(...pendingDraftParams);
 
     const draftRow = db.prepare(`
       SELECT COUNT(*) AS n, COALESCE(SUM(i.total),0) AS sum_total
       FROM invoices i
-      WHERE i.status = 'draft' ${scopeSql}
-    `).get(...noStoreParams);
+      WHERE i.status = 'draft' ${scopeSql} ${woExistsSql}
+    `).get(...pendingDraftParams);
 
     // ---- By technician ----
     // When a WO-side filter (store/work_type) is set, route through WO spend
@@ -405,8 +414,11 @@ module.exports = (db) => {
 
     // ---- Vendor spend (3rd-party invoices, v0.36) ----
     // Aggregates the `invoice_type='vendor'` flow alongside the tech-labor
-    // numbers. Honors period + tech filter (uploader); store/work_type
-    // filters are tech-side only so they don't apply.
+    // numbers. Honors the period filter. Store/work_type/tech filters are
+    // intentionally NOT applied: vendor invoices have no WO or store FK so
+    // store/wt filtering is structurally impossible, and vendor invoices are
+    // manager-uploaded (not tech-attributed) so tech filtering is misleading.
+    // The tile UI notes "org-wide" to set user expectations.
     const vendorRows = db.prepare(`
       SELECT i.vendor_name, COUNT(*) AS n, COALESCE(SUM(i.total),0) AS total
       FROM invoices i

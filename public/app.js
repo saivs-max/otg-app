@@ -5820,10 +5820,10 @@ async function renderAdmin(root) {
       return `
         <div class="section-title" data-group="${g.key}">${escapeHTML(g.label)} (${list.length})</div>
         ${list.map(u => `
-          <div class="card" data-user-card data-search-key="${escapeHTML((u.name+' '+u.username+' '+u.email).toLowerCase())}" style="padding: 14px 16px;${u.status==='disabled'?' opacity:0.6;':''}">
+          <div class="card" data-user-card data-search-key="${escapeHTML(((u.name||'')+' '+(u.username||'')+' '+u.email).toLowerCase())}" style="padding: 14px 16px;${u.status==='disabled'?' opacity:0.6;':''}">
             <div class="flex between" style="align-items: flex-start;">
               <div style="flex: 1; min-width: 0;">
-                <div style="font-weight: 700;">${escapeHTML(u.name)}</div>
+                <div style="font-weight: 700;">${u.name ? escapeHTML(u.name) : `<span style="color:var(--muted);font-style:italic;font-weight:400;font-size:13px;">No name set</span>`}</div>
                 <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; color:var(--ink-2);">
                   <code style="font-size:inherit;" title="${escapeHTML(u.username || '')}">${escapeHTML(u.username || '(no username)')}</code>
                 </div>
@@ -6403,6 +6403,11 @@ function openAddUserSheet() {
           body.worker_type = $('#auWorkerType', wrap).value;
           body.hourly_rate = Number($('#auRate', wrap).value) || 40;
         }
+        // v0.89 — clear any prior inline field errors before re-validating
+        ['auEmail','auUsername','auPwd'].forEach(id => {
+          const el = $(`#${id}`, wrap);
+          if (el) { el.style.borderColor = ''; const err = wrap.querySelector(`#${id}Err`); if (err) err.remove(); }
+        });
         // v0.88 — client-side validation before hitting the server
         if (!body.name) { toast('Name is required', 'err'); $('#auName', wrap).focus(); return; }
         if (body.name.length > 100) { toast('Name cannot exceed 100 characters', 'err'); $('#auName', wrap).focus(); return; }
@@ -6410,11 +6415,18 @@ function openAddUserSheet() {
           toast('Please enter a valid email address', 'err'); $('#auEmail', wrap).focus(); return;
         }
         if (body.email.length > 254) { toast('Email cannot exceed 254 characters', 'err'); $('#auEmail', wrap).focus(); return; }
-        // v0.87.2 — clear any prior field errors before submitting
-        ['auEmail','auUsername'].forEach(id => {
-          const el = $(`#${id}`, wrap);
-          if (el) { el.style.borderColor = ''; const err = wrap.querySelector(`#${id}Err`); if (err) err.remove(); }
-        });
+        // v0.89 — field-specific inline errors for username and password (not just a toast)
+        const _auFieldErr = (id, msg) => {
+          const el = $(`#${id}`, wrap); if (!el) return;
+          el.style.borderColor = 'var(--color-err, #e53)'; el.focus();
+          const span = document.createElement('span');
+          span.id = `${id}Err`;
+          span.style.cssText = 'color:var(--color-err,#e53);font-size:12px;margin-top:-6px;display:block;';
+          span.textContent = msg;
+          el.insertAdjacentElement('afterend', span);
+        };
+        if (!body.username) { _auFieldErr('auUsername', 'Username is required'); return; }
+        if (!body.temp_password) { _auFieldErr('auPwd', 'Temporary password is required'); return; }
         try {
           await api('/admin/users', { method: 'POST', body });
           toast('User created ✓', 'ok');
@@ -6475,6 +6487,11 @@ function openEditUserSheet(u) {
     onMount: (wrap) => {
       $$('[data-act="sheet-close"]', wrap).forEach(b => b.addEventListener('click', closeSheet));
       $('#euSave', wrap).addEventListener('click', async () => {
+        // v0.89 — clear any prior inline field errors before re-validating
+        ['euEmail','euUsername'].forEach(id => {
+          const el = $(`#${id}`, wrap);
+          if (el) { el.style.borderColor = ''; const err = wrap.querySelector(`#${id}Err`); if (err) err.remove(); }
+        });
         // v0.88 — client-side validation before hitting the server
         const euNameVal  = $('#euName',  wrap).value.trim();
         const euEmailVal = $('#euEmail', wrap).value.trim();
@@ -6484,11 +6501,17 @@ function openEditUserSheet(u) {
           toast('Please enter a valid email address', 'err'); $('#euEmail', wrap).focus(); return;
         }
         if (euEmailVal.length > 254) { toast('Email cannot exceed 254 characters', 'err'); $('#euEmail', wrap).focus(); return; }
-        // v0.87.2 — clear any prior field errors before submitting
-        ['euEmail','euUsername'].forEach(id => {
-          const el = $(`#${id}`, wrap);
-          if (el) { el.style.borderColor = ''; const err = wrap.querySelector(`#${id}Err`); if (err) err.remove(); }
-        });
+        // v0.89 — field-specific inline error for username
+        const _euFieldErr = (id, msg) => {
+          const el = $(`#${id}`, wrap); if (!el) return;
+          el.style.borderColor = 'var(--color-err, #e53)'; el.focus();
+          const span = document.createElement('span');
+          span.id = `${id}Err`;
+          span.style.cssText = 'color:var(--color-err,#e53);font-size:12px;margin-top:-6px;display:block;';
+          span.textContent = msg;
+          el.insertAdjacentElement('afterend', span);
+        };
+        if (!$('#euUsername', wrap).value.trim()) { _euFieldErr('euUsername', 'Username is required'); return; }
         try {
           await api(`/admin/users/${u.id}`, { method: 'PATCH', body: {
             name:     euNameVal,
@@ -8565,7 +8588,15 @@ async function renderDashboardOverview(root) {
   const [r, ccSummary] = await Promise.all([
     api(`/dashboard?${qs.toString()}`),
     ['ops_manager','sr_manager','pm'].includes(STATE.user?.role)
-      ? api('/corp-card/summary').catch(() => null)
+      ? (() => {
+          // v0.94 — forward store + tech filter so CC tile responds to dashboard filters.
+          // work_type is intentionally omitted (WO link is nullable on CC expenses).
+          const ccQs = new URLSearchParams();
+          if (storeFilter) ccQs.set('store', storeFilter);
+          if (techFilter)  ccQs.set('tech',  techFilter);
+          const ccQsStr = ccQs.toString();
+          return api(`/corp-card/summary${ccQsStr ? '?' + ccQsStr : ''}`).catch(() => null);
+        })()
       : Promise.resolve(null),
   ]);
   const PERIODS = [
@@ -8696,7 +8727,7 @@ async function renderDashboardOverview(root) {
         <div class="flex between" style="align-items: flex-start; gap: 12px;">
           <div style="flex: 1; min-width: 0;">
             <div style="font-size: 11px; color: var(--ic-green-deep); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700;">
-              🧾 3rd-party vendor spend · ${escapeHTML(r.meta.period_label)}
+              🧾 3rd-party vendor spend · ${escapeHTML(r.meta.period_label)} · <span title="Vendor invoices have no store/tech link — always shows org-wide totals" style="opacity:0.7; font-weight:400;">org-wide</span>
             </div>
             <div style="font-size: 28px; font-weight: 800; color: var(--ic-green-deep); margin-top: 2px;">
               ${fmt$(s.vendor_spend || 0)}

@@ -308,18 +308,36 @@ module.exports = (db) => {
     const mtdStart = `${yyyy}-${mm}-01`;
     const ytdStart = `${yyyy}-01-01`;
 
-    const from = req.query.from || mtdStart;
-    const to   = req.query.to   || today;
+    const from  = req.query.from  || mtdStart;
+    const to    = req.query.to    || today;
+    // v0.94 — optional store and tech filters forwarded from the dashboard.
+    // work_type is NOT supported (corp_card_expenses.work_order_id is nullable
+    // so filtering by work_type would silently drop unlinked charges).
+    const store = req.query.store || null;
+    const tech  = req.query.tech  ? +req.query.tech : null;
+
+    const storeSql = store ? 'AND store_name = ?'              : '';
+    const techSql  = tech  ? 'AND on_behalf_of_user_id = ?'   : '';
+    const fp       = [...(store ? [store] : []), ...(tech ? [tech] : [])]; // filter params
 
     const inPeriod = db.prepare(`
       SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS n
       FROM corp_card_expenses
-      WHERE expense_date BETWEEN ? AND ?
-    `).get(from, to);
+      WHERE expense_date BETWEEN ? AND ? ${storeSql} ${techSql}
+    `).get(from, to, ...fp);
 
-    const allTime = db.prepare("SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS n FROM corp_card_expenses").get();
-    const mtd     = db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM corp_card_expenses WHERE expense_date BETWEEN ? AND ?").get(mtdStart, today);
-    const ytd     = db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM corp_card_expenses WHERE expense_date BETWEEN ? AND ?").get(ytdStart, today);
+    const allTime = db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS n
+      FROM corp_card_expenses WHERE 1=1 ${storeSql} ${techSql}
+    `).get(...fp);
+    const mtd = db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS total FROM corp_card_expenses
+      WHERE expense_date BETWEEN ? AND ? ${storeSql} ${techSql}
+    `).get(mtdStart, today, ...fp);
+    const ytd = db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS total FROM corp_card_expenses
+      WHERE expense_date BETWEEN ? AND ? ${storeSql} ${techSql}
+    `).get(ytdStart, today, ...fp);
 
     const byCat = db.prepare(`
       SELECT c.id AS category_id, c.name AS category_name,
@@ -327,29 +345,32 @@ module.exports = (db) => {
       FROM corp_card_categories c
       LEFT JOIN corp_card_expenses x
         ON x.category_id = c.id AND x.expense_date BETWEEN ? AND ?
+        ${store ? 'AND x.store_name = ?'            : ''}
+        ${tech  ? 'AND x.on_behalf_of_user_id = ?'  : ''}
       GROUP BY c.id
       HAVING total > 0
       ORDER BY total DESC
-    `).all(from, to);
+    `).all(from, to, ...fp);
 
     const byTech = db.prepare(`
       SELECT u.id AS tech_id, u.name AS tech_name, u.role AS tech_role,
              SUM(x.amount) AS total, COUNT(x.id) AS count
       FROM corp_card_expenses x
       LEFT JOIN users u ON u.id = x.on_behalf_of_user_id
-      WHERE x.expense_date BETWEEN ? AND ?
+      WHERE x.expense_date BETWEEN ? AND ? ${storeSql} ${techSql}
       GROUP BY x.on_behalf_of_user_id
       ORDER BY total DESC
-    `).all(from, to);
+    `).all(from, to, ...fp);
 
     const byMonth = db.prepare(`
       SELECT substr(expense_date, 1, 7) AS month,
              SUM(amount) AS total, COUNT(*) AS count
       FROM corp_card_expenses
+      WHERE 1=1 ${storeSql} ${techSql}
       GROUP BY month
       ORDER BY month DESC
       LIMIT 12
-    `).all();
+    `).all(...fp);
 
     res.json({
       period: { from, to, label: `${from} → ${to}` },
