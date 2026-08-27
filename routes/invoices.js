@@ -20,7 +20,9 @@ module.exports = (db) => {
     const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
     if (me && (me.role === 'ops_manager' || me.role === 'sr_manager' || me.role === 'pm')) return computed;
     if (computed && Array.isArray(computed.lines)) for (const l of computed.lines) l.flags = [];
-    if (computed && computed.summary) computed.summary.flag_count = 0;
+    // v0.88 — preserve flag_count so the frontend can show the justification
+    // field and block submit; line-level details stay stripped (tech doesn't
+    // see which rules fired, only that a note is required).
     return computed;
   }
 
@@ -1235,6 +1237,9 @@ module.exports = (db) => {
     // shown to managers at approval, where they're reviewed and enforced.
     const submitter = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
     const submitterIsManager = !!submitter && ['ops_manager','sr_manager','pm'].includes(submitter.role);
+    // v0.88 — block-severity hard stop is manager-only (techs can't see rule
+    // details), but the justification-note gate now applies to everyone so
+    // flagged invoices can never bypass audit regardless of submitter role.
     if (submitterIsManager) {
       const blockingLines = computed.lines.filter(l => (l.flags || []).some(f => f.severity === 'block'));
       if (blockingLines.length) {
@@ -1243,12 +1248,12 @@ module.exports = (db) => {
           blocked_lines: blockingLines.map(l => ({ external_id: l.external_id, flags: l.flags.filter(f => f.severity === 'block') })),
         });
       }
-      if (computed.summary.flag_count > 0 && !req.body.notes) {
-        return res.status(400).json({
-          error: 'This invoice has flagged lines. Please provide a justification note.',
-          flagged_lines: computed.lines.filter(l => l.flags.length).map(l => ({ external_id: l.external_id, flags: l.flags })),
-        });
-      }
+    }
+    if (computed.summary.flag_count > 0 && !(req.body.notes || '').trim()) {
+      return res.status(400).json({
+        error: 'Justification note is required before submitting this invoice.',
+        flagged_lines: computed.lines.filter(l => l.flags.length).map(l => ({ external_id: l.external_id, flags: l.flags })),
+      });
     }
     // v0.44 — BUG-006 fix: race-safe transition. WHERE status = 'draft'
     // gates the update; changes() === 0 means another caller flipped it.
