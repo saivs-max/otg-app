@@ -445,7 +445,7 @@ module.exports = (db) => {
     const vendorPending = db.prepare(`
       SELECT COUNT(*) AS n, COALESCE(SUM(total),0) AS total
       FROM invoices WHERE invoice_type = 'vendor' AND status IN ('submitted','in_review')
-      ${periodSql}
+      ${periodStart ? 'AND period_start >= ?' : ''}
     `).get(...(periodStart ? [periodStart] : []));
 
     // ---- Per-store weekly trend (top 5 stores by total spend) ----
