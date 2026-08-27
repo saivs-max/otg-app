@@ -248,51 +248,51 @@ module.exports = (db) => {
     // v0.94 — wrap dupe-check + INSERT in a transaction so concurrent requests
     // (e.g. two rapid taps reaching the server at the same instant) can never
     // both pass the check and create duplicate running timers.
+    // node:sqlite uses DatabaseSync which has no .transaction() helper; use
+    // manual BEGIN/COMMIT/ROLLBACK (same pattern as switch-mode above).
     const now = new Date().toISOString();
     let newId;
+    db.exec('BEGIN');
     try {
-      db.transaction(() => {
-        const dupe = db.prepare(`
-          SELECT id FROM time_entries
-          WHERE user_id = ? AND work_order_id = ? AND clock_out IS NULL
-        `).get(userId, Number(work_order_id));
-        if (dupe) {
-          const err = new Error('You already have a running timer on this work order.');
-          err.status = 409;
-          throw err;
-        }
-
-        // Drive-mode exclusivity: only one drive timer at a time globally. You
-        // can't be driving to two places at once. Work timers can still be concurrent.
-        if (mode === 'drive') {
-          const otherDrive = db.prepare(`
-            SELECT t.id, t.work_order_id, w.external_id
-            FROM time_entries t JOIN work_orders w ON w.id = t.work_order_id
-            WHERE t.user_id = ? AND t.clock_out IS NULL AND t.mode = 'drive'
-            LIMIT 1
-          `).get(userId);
-          if (otherDrive) {
-            const err = new Error(`You already have a Drive timer running on ${otherDrive.external_id}. Clock out (or switch that one to Work) before starting another Drive timer.`);
-            err.status = 409;
-            err.conflicting = otherDrive;
-            throw err;
-          }
-        }
-
-        const r = db.prepare(`
-          INSERT INTO time_entries
-            (user_id, work_order_id, clock_in, mode, gps_lat_in, gps_lng_in, gps_accuracy_in)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(userId, Number(work_order_id), now, mode,
-               gps?.lat ?? null, gps?.lng ?? null, gps?.accuracy ?? null);
-        newId = r.lastInsertRowid;
-
-        db.prepare("UPDATE work_orders SET status = 'in_progress' WHERE id = ? AND status = 'open'").run(Number(work_order_id));
-      })();
-    } catch (err) {
-      if (err.status === 409) {
-        return res.status(409).json({ error: err.message, ...(err.conflicting ? { conflicting: err.conflicting } : {}) });
+      const dupe = db.prepare(`
+        SELECT id FROM time_entries
+        WHERE user_id = ? AND work_order_id = ? AND clock_out IS NULL
+      `).get(userId, Number(work_order_id));
+      if (dupe) {
+        db.exec('ROLLBACK');
+        return res.status(409).json({ error: 'You already have a running timer on this work order.' });
       }
+
+      // Drive-mode exclusivity: only one drive timer at a time globally. You
+      // can't be driving to two places at once. Work timers can still be concurrent.
+      if (mode === 'drive') {
+        const otherDrive = db.prepare(`
+          SELECT t.id, t.work_order_id, w.external_id
+          FROM time_entries t JOIN work_orders w ON w.id = t.work_order_id
+          WHERE t.user_id = ? AND t.clock_out IS NULL AND t.mode = 'drive'
+          LIMIT 1
+        `).get(userId);
+        if (otherDrive) {
+          db.exec('ROLLBACK');
+          return res.status(409).json({
+            error: `You already have a Drive timer running on ${otherDrive.external_id}. Clock out (or switch that one to Work) before starting another Drive timer.`,
+            conflicting: otherDrive,
+          });
+        }
+      }
+
+      const r = db.prepare(`
+        INSERT INTO time_entries
+          (user_id, work_order_id, clock_in, mode, gps_lat_in, gps_lng_in, gps_accuracy_in)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(userId, Number(work_order_id), now, mode,
+             gps?.lat ?? null, gps?.lng ?? null, gps?.accuracy ?? null);
+      newId = r.lastInsertRowid;
+
+      db.prepare("UPDATE work_orders SET status = 'in_progress' WHERE id = ? AND status = 'open'").run(Number(work_order_id));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
       throw err;
     }
 
