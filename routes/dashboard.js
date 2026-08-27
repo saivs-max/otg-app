@@ -124,28 +124,19 @@ module.exports = (db) => {
       `).get(...params, ...storeParam);
       sumRow.avg_total = sumRow.avg_total || 0;
     } else {
-      // v0.92 — recompute from time_entries + expenses (same method as byWorkType /
-      // the donut) so the KPI always reconciles with the chart. Reading i.total was
-      // stale: invoices closed before v0.90 excluded drive-mode clocks, causing a
-      // systematic under-count in the KPI vs the donut.
-      // v0.93 — LEFT JOIN so billable invoices with no clocked time or expenses
-      // are still counted in n (they contribute $0 to spend). Previously they
-      // were silently dropped by the INNER JOIN, understating invoice_count.
+      // v0.95 — use stored i.total so the "Spend in period" KPI tile reconciles
+      // with the All Invoices page (both use the authoritative stored total).
+      // v0.92 previously recomputed from time_entries × hourly_rate to match the
+      // byWorkType donut; that created a systematic discrepancy vs i.total whenever
+      // the stored total differed (rate changes, pre-v0.90 drive-clock history).
+      // The WO-filter branch above still recomputes because it must pro-rate spend
+      // per WO when a store/work_type filter is active — a single i.total can't be
+      // split across multiple WOs at different stores without the entry-level join.
       sumRow = db.prepare(`
-        SELECT COUNT(DISTINCT i.id) AS n,
-               COALESCE(SUM(spend.amount),0) AS sum_total,
-               COALESCE(SUM(spend.amount),0) / NULLIF(COUNT(DISTINCT i.id), 0) AS avg_total
+        SELECT COUNT(*) AS n,
+               COALESCE(SUM(i.total),0) AS sum_total,
+               COALESCE(SUM(i.total),0) / NULLIF(COUNT(*), 0) AS avg_total
         FROM invoices i
-        LEFT JOIN (
-          SELECT t.invoice_id AS iid,
-                 (julianday(t.clock_out)-julianday(t.clock_in))*24 *
-                   COALESCE((SELECT u.hourly_rate FROM users u WHERE u.id = t.user_id), 40) AS amount
-          FROM time_entries t
-          WHERE t.clock_out IS NOT NULL AND (t.mode IS NULL OR t.mode IN ('work','drive'))
-          UNION ALL
-          SELECT e.invoice_id AS iid, e.amount
-          FROM expenses e
-        ) spend ON spend.iid = i.id
         WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql} ${LABOR_TYPE_SQL}
       `).get(...params);
       sumRow.avg_total = sumRow.avg_total || 0;
