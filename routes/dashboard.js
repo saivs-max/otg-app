@@ -132,12 +132,17 @@ module.exports = (db) => {
       // The WO-filter branch above still recomputes because it must pro-rate spend
       // per WO when a store/work_type filter is active — a single i.total can't be
       // split across multiple WOs at different stores without the entry-level join.
+      // v0.96 — LABOR_TYPE_SQL removed: the top-level KPI count/spend now includes
+      // ALL invoice types (tech_labor + vendor) so it reconciles with the All Invoices
+      // page. The vendor breakdown widget below remains for per-vendor detail. The
+      // by_tech / by_work_type / by_store aggregations retain their own LABOR_TYPE_SQL
+      // since vendor invoices have no tech/WO/store attribution.
       sumRow = db.prepare(`
         SELECT COUNT(*) AS n,
                COALESCE(SUM(i.total),0) AS sum_total,
                COALESCE(SUM(i.total),0) / NULLIF(COUNT(*), 0) AS avg_total
         FROM invoices i
-        WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql} ${LABOR_TYPE_SQL}
+        WHERE i.status IN ${BILLABLE_STATUSES} ${scopeSql} ${periodSql}
       `).get(...params);
       sumRow.avg_total = sumRow.avg_total || 0;
     }
@@ -1039,8 +1044,8 @@ function buildDashboardWorkbook(p, costRows = []) {
     ['Store filter',     p.meta.store_filter || '— all —'],
     ['Generated at',     p.meta.generated_at],
     [],
-    ['Total spend (tech labor)',           p.summary.total_spend],
-    ['Vendor spend (3rd party)',           p.summary.vendor_spend],
+    ['Total spend (all types, submitted+)', p.summary.total_spend],    // v0.96 — includes vendor
+    ['  of which vendor (3rd party)',      p.summary.vendor_spend],
     ['Pending count',                      p.summary.pending_count],
     ['Pending value',                      p.summary.pending_value],
     ['Forecast: open WOs (bottoms-up)',    p.summary.forecast_open_wos],
