@@ -2486,10 +2486,16 @@ async function renderInvoice(root) {
       },
     });
   }
+  // v0.88 — validate justification before hitting the server so the tech
+  // sees a clear inline message rather than a generic API error toast.
   $('#submitBtn')?.addEventListener('click', async () => {
     try {
-      const notes = $('#justify')?.value || undefined;
-      await api(`/invoices/${invoice.id}/submit`, { method: 'POST', body: { notes } });
+      const notes = ($('#justify')?.value || '').trim();
+      if (flaggedCount > 0 && !notes) {
+        toast('Justification note is required before submitting this invoice.', 'err');
+        return;
+      }
+      await api(`/invoices/${invoice.id}/submit`, { method: 'POST', body: { notes: notes || undefined } });
       toast('Invoice submitted ✓', 'ok');
       goto('mine');
     } catch (e) { toast(e.message, 'err'); }
@@ -7608,11 +7614,7 @@ function openCorpCardAddSheet(categories, workorders, techs, onSaved, editing = 
     <input class="field" id="ccWoSearch" placeholder="🔎 Search by ID, store, type…" style="margin-bottom:6px;" />
     <select class="field" id="ccWo" size="${Math.min(5, Math.max(2, openWos.length || 2))}">
       <option value="">— No work order / store linkage —</option>
-      ${woFiltered().map(w => `
-        <option value="${w.id}" ${String(sel.work_order_id) === String(w.id) ? 'selected' : ''}>
-          ${escapeHTML(woLabel(w))} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})
-        </option>
-      `).join('')}
+      ${woFiltered().map(w => `<option value="${w.id}" ${String(sel.work_order_id) === String(w.id) ? 'selected' : ''}>${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})</option>`).join('')}
     </select>
 
     <span class="label">Description</span>
@@ -10277,13 +10279,17 @@ async function renderMine(root) {
 // policy violation grouped by WO, can fix items first (Cancel) or knowingly
 // justify and submit (Submit anyway). The justification text becomes the
 // invoice notes so Ops Mgr review sees the same context the tech wrote.
-function openFlagSubmitSheet({ invoice, flags, proxy }) {
+// v0.88 — flagCount lets callers pass the server-side count when line-level
+// details are stripped (tech view); falls back to flags.length when details
+// are available (manager / proxy view).
+function openFlagSubmitSheet({ invoice, flags, flagCount, proxy }) {
+  const count = flagCount != null ? flagCount : flags.length;
   const byWO = {};
   for (const f of flags) {
     (byWO[f.wo] ||= { wo: f.wo, store: f.store, flags: [] }).flags.push(f);
   }
   showSheet(`
-    <h3 style="color: var(--err-fg);">⚠ ${flags.length} policy violation${flags.length === 1 ? '' : 's'} on this invoice</h3>
+    <h3 style="color: var(--err-fg);">⚠ ${count} policy violation${count === 1 ? '' : 's'} on this invoice</h3>
     <p class="help" style="margin-top: -4px;">
       ${proxy ? 'Before submitting on behalf of this tech, ' : 'Before submitting, '}
       review each flag below. You can <strong>Cancel</strong> to fix the underlying time entries / expenses,
@@ -11394,8 +11400,12 @@ async function renderInvoiceDetail(root, invoiceId) {
   $('#submitDraftBtn')?.addEventListener('click', async () => {
     const proxy = STATE.onBehalfOf && STATE.onBehalfOf === invoice.user_id;
     const flags = (lines || []).flatMap(l => (l.flags || []).map(f => ({ ...f, wo: l.external_id, store: l.store_name })));
-    if (flags.length > 0) {
-      openFlagSubmitSheet({ invoice, flags, proxy });
+    // v0.88 — for techs, line-level flags are stripped server-side but
+    // summary.flag_count is preserved; use it as fallback so the
+    // justification sheet still fires even when flags[] is empty.
+    const rawFlagCount = summary?.flag_count || 0;
+    if (flags.length > 0 || rawFlagCount > 0) {
+      openFlagSubmitSheet({ invoice, flags, flagCount: rawFlagCount || flags.length, proxy });
       return;
     }
     const promptText = proxy
