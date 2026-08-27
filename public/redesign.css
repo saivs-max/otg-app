@@ -232,9 +232,18 @@ body { font-size: 16px; line-height: 1.5; letter-spacing: -0.1px; }
    rules here override .combo-wrap .dash-select { padding-right: 28px } in styles.css,
    collapsing right padding to 12px and causing the × button to overlap the native datalist
    indicator. A 3-class selector restores the padding; the pseudo-element hides the native
-   browser picker arrow so only the custom × appears on the right. Datalist still works. */
+   browser picker arrow so only the custom × appears on the right. Datalist still works.
+   v0.90 — Chrome 119+ switched the datalist indicator pseudo-element from
+   ::-webkit-calendar-picker-indicator to ::-webkit-list-button. The old rule only targeted
+   the former, so on second interaction (focused input with a value set) the new indicator
+   rendered on top of the × button. Now both pseudo-elements are suppressed with
+   pointer-events:none so neither can intercept clicks even if display:none is overridden. */
 .dash-filters .combo-wrap .dash-select { padding-right: 30px; }
-.combo-wrap .dash-select::-webkit-calendar-picker-indicator { display: none; }
+.combo-wrap .dash-select::-webkit-calendar-picker-indicator,
+.combo-wrap .dash-select::-webkit-list-button {
+  display: none;
+  pointer-events: none;
+}
 @media (max-width: 720px) { .dash-toolbar { flex-direction: column; align-items: stretch; } .dash-filters { flex-direction: column; align-items: stretch; } .dash-filters .combo-wrap, .dash-filters .dash-select { width: 100%; } }
 .kpi-grid { display: grid; grid-template-columns: 1fr; gap: 14px; margin-bottom: 22px; }
 @media (min-width: 560px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
