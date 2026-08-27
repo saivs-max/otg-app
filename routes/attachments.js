@@ -29,6 +29,13 @@ const ALLOWED_MIME = new Set([
 ]);
 const MAX_BYTES = 15 * 1024 * 1024; // 15 MB
 
+// v0.88 (TC-NEG-063) — strip CR/LF and all ASCII control chars from
+// user-supplied filenames before storing. Mirrors the serve-time sanitizer
+// already applied on download, so the DB never holds malicious filenames.
+function sanitizeFilename(name) {
+  return String(name || 'file').replace(/[\r\n"\\\x00-\x1f\x7f]/g, '').slice(0, 200) || 'file';
+}
+
 function extFor(filename, mime) {
   const fromName = path.extname(filename || '').toLowerCase();
   if (fromName) return fromName;
@@ -90,7 +97,7 @@ module.exports = (db) => {
          storage_name, original_name, mime_type, size_bytes, caption)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(userId, invoice_id || null, expense_id || null, time_entry_id || null, work_order_id || null,
-           storageName, filename, mime_type || null, buf.length, caption || null);
+           storageName, sanitizeFilename(filename), mime_type || null, buf.length, caption || null);
 
     // Backfill receipt_path on the linked expense for backward compat
     if (expense_id) {

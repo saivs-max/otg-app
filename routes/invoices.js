@@ -9,6 +9,12 @@ const { extractVendorPdf }       = require('../lib/vendorPdfExtractor');
 const { validateInvoice }        = require('../lib/invoiceValidation');
 const { generateInvoicePdf } = require('../lib/invoicePdf');
 
+// v0.88 (TC-NEG-063) — strip CR/LF and all ASCII control chars from
+// user-supplied filenames before storing (prevents header injection on download).
+function sanitizeFilename(name) {
+  return String(name || 'file').replace(/[\r\n"\\\x00-\x1f\x7f]/g, '').slice(0, 200) || 'file';
+}
+
 module.exports = (db) => {
 
   // Helper: can `userId` edit/extract/import on `invoiceId`?
@@ -698,7 +704,7 @@ module.exports = (db) => {
       const r = db.prepare(`
         INSERT INTO attachments (user_id, invoice_id, storage_name, original_name, mime_type, size_bytes, caption)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(techId, inv.id, name, attachment.filename, attachment.mime_type || null, buf.length,
+      `).run(techId, inv.id, name, sanitizeFilename(attachment.filename), attachment.mime_type || null, buf.length,
              `Original invoice uploaded by ${me.role === 'ops_manager' ? 'Ops Mgr' : 'admin'}`);
       attachmentId = r.lastInsertRowid;
 
@@ -1970,7 +1976,7 @@ module.exports = (db) => {
       const ar = db.prepare(`
         INSERT INTO attachments (user_id, invoice_id, storage_name, original_name, mime_type, size_bytes, caption)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(me.id, invoiceId, name, attachment.filename, attachment.mime_type || null, buf.length,
+      `).run(me.id, invoiceId, name, sanitizeFilename(attachment.filename), attachment.mime_type || null, buf.length,
              `Vendor invoice from ${vendor_name}`);
       attachmentId = ar.lastInsertRowid;
     }
