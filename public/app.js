@@ -8813,7 +8813,7 @@ async function renderDashboardOverview(root) {
               ${fmt$(s.vendor_spend || 0)}
             </div>
             <div class="meta" style="margin-top: 2px;">
-              ${s.vendor_invoice_count || 0} invoice${(s.vendor_invoice_count || 0) === 1 ? '' : 's'} · ${s.vendor_unique || 0} vendor${(s.vendor_unique || 0) === 1 ? '' : 's'}${(s.vendor_pending_count || 0) > 0 ? ` · <span style="color: var(--ic-orange); font-weight: 600;">${s.vendor_pending_count} pending (${fmt$(s.vendor_pending_value || 0)})</span>` : ''} · separate from tech invoices.
+              ${s.vendor_invoice_count || 0} invoice${(s.vendor_invoice_count || 0) === 1 ? '' : 's'} · ${s.vendor_unique || 0} vendor${(s.vendor_unique || 0) === 1 ? '' : 's'}${(s.vendor_pending_count || 0) > 0 ? ` · <span style="color: var(--ic-orange); font-weight: 600;">${s.vendor_pending_count} pending (${fmt$(s.vendor_pending_value || 0)})</span>` : ''} · included in Spend in period above.
             </div>
             ${topV.length ? `
               <div style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px;">
@@ -9185,7 +9185,7 @@ function renderKpiTiles(s) {
   // v0.33 — actuals-only. Forecast tiles moved to the Forecast tab.
   return `
     <div class="kpi-grid">
-      ${kpiTile('Spend in period',       fmt$(s.total_spend),    `${s.invoice_count} invoice${s.invoice_count===1?'':'s'} · tech labor, submitted+`)}
+      ${kpiTile('Spend in period',       fmt$(s.total_spend),    `${s.invoice_count} invoice${s.invoice_count===1?'':'s'} · all types, submitted+`)}
       ${kpiTile('Avg invoice',           fmt$(s.avg_invoice),    '')}
       ${kpiTile('Pending in queue',      fmt$(s.pending_value),  `${s.pending_count} waiting${s.pending_avg_age_days ? ` · avg ${s.pending_avg_age_days}d` : ''}`, s.pending_count > 0 ? 'warn' : '')}
       ${kpiTile('Drafts (not yet sent)', fmt$(s.draft_value),    `${s.draft_count} draft${s.draft_count===1?'':'s'}`)}
