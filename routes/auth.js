@@ -70,7 +70,7 @@ module.exports = (db) => {
     // Build the same shape /me returns so the client can store it directly
     const fullUser = db.prepare(`
       SELECT u.id, u.name, u.email, u.username, u.role, u.worker_type, u.hourly_rate,
-             u.home_address, u.home_phone, u.must_change_password, u.status,
+             u.home_address, u.home_phone, u.invoice_email, u.must_change_password, u.status,
              m.id AS ops_manager_id, m.name AS ops_manager_name
       FROM users u LEFT JOIN users m ON m.id = u.ops_manager_id WHERE u.id = ?
     `).get(u.id);
@@ -189,7 +189,7 @@ module.exports = (db) => {
     if (!userId) return res.status(401).json({ error: 'no user selected' });
     const u = db.prepare(`
       SELECT u.id, u.name, u.email, u.username, u.role, u.worker_type, u.hourly_rate,
-             u.home_address, u.home_phone, u.must_change_password, u.status,
+             u.home_address, u.home_phone, u.invoice_email, u.must_change_password, u.status,
              m.id AS ops_manager_id, m.name AS ops_manager_name
       FROM users u LEFT JOIN users m ON m.id = u.ops_manager_id WHERE u.id = ?
     `).get(userId);
@@ -202,7 +202,7 @@ module.exports = (db) => {
     if (!userId) return res.status(401).json({ error: 'no user selected' });
     const u = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
     if (!u) return res.status(404).json({ error: 'user not found' });
-    const { hourly_rate, home_address, home_phone, email } = req.body;
+    const { hourly_rate, home_address, home_phone, email, invoice_email } = req.body;
     // v0.89 — allow self-service email update with format + uniqueness validation.
     if (email !== undefined) {
       const valErr = validateUserFields({ email });
@@ -229,8 +229,16 @@ module.exports = (db) => {
     if (home_phone !== undefined) {
       db.prepare("UPDATE users SET home_phone = ? WHERE id = ?").run(home_phone || null, userId);
     }
+    // v0.96 — invoice_email: separate email shown on invoice (not a login credential, no uniqueness check)
+    if (invoice_email !== undefined) {
+      if (invoice_email) {
+        const valErr = validateUserFields({ email: invoice_email });
+        if (valErr) return res.status(400).json({ error: `Invoice email: ${valErr}` });
+      }
+      db.prepare("UPDATE users SET invoice_email = ? WHERE id = ?").run(invoice_email || null, userId);
+    }
     const updated = db.prepare(`
-      SELECT id, name, email, role, worker_type, hourly_rate, home_address, home_phone
+      SELECT id, name, email, role, worker_type, hourly_rate, home_address, home_phone, invoice_email
       FROM users WHERE id = ?
     `).get(userId);
     res.json(updated);

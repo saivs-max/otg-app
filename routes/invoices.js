@@ -1173,7 +1173,7 @@ module.exports = (db) => {
     // renders the bill-from name/address/phone correctly when a manager is
     // viewing/editing on behalf of someone else (fixes v0.21 bug where the
     // header showed the manager's name instead of the tech's).
-    const tech = db.prepare("SELECT id, name, email, home_address, home_phone, worker_type, hourly_rate FROM users WHERE id = ?").get(inv.user_id);
+    const tech = db.prepare("SELECT id, name, email, home_address, home_phone, invoice_email, worker_type, hourly_rate FROM users WHERE id = ?").get(inv.user_id);
     computed.tech_user = tech || null;
     // If the invoice was uploaded as a PDF, surface the extracted summary so
     // the UI can render the side-by-side "extracted vs computed" panel.
@@ -1672,7 +1672,7 @@ module.exports = (db) => {
 
     // Build the PDF payload by reusing computeInvoice + tech profile + audit.
     const computed = computeInvoice(id);
-    const tech     = db.prepare("SELECT id, name, email, home_address, home_phone FROM users WHERE id = ?").get(inv.user_id);
+    const tech     = db.prepare("SELECT id, name, email, home_address, home_phone, invoice_email FROM users WHERE id = ?").get(inv.user_id);
     const approvals = buildApprovalAuditTrail(db, inv);
     let pdfBuf;
     try {
@@ -1740,7 +1740,7 @@ module.exports = (db) => {
     const policy = getPolicy(db);
     const apEmail = (req.query.ap_email || policy.AP_EMAIL || process.env.AP_EMAIL || 'ap@instacart.com').trim();
     const me = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(userId);
-    const tech = db.prepare("SELECT id, name, email, home_address, home_phone FROM users WHERE id = ?").get(inv.user_id);
+    const tech = db.prepare("SELECT id, name, email, home_address, home_phone, invoice_email FROM users WHERE id = ?").get(inv.user_id);
     const computed = computeInvoice(id);
     const approvals = buildApprovalAuditTrail(db, inv);
     const subject = `[AP] Invoice ${inv.invoice_number} — ${tech?.name || 'tech'} — $${inv.total.toFixed(2)}`;
@@ -1778,7 +1778,7 @@ module.exports = (db) => {
     if (!perm.ok) return res.status(perm.status || 403).json({ error: perm.error });
     const inv = perm.inv;
     const computed = computeInvoice(id);
-    const tech = db.prepare("SELECT id, name, email, home_address, home_phone FROM users WHERE id = ?").get(inv.user_id);
+    const tech = db.prepare("SELECT id, name, email, home_address, home_phone, invoice_email FROM users WHERE id = ?").get(inv.user_id);
     const approvals = buildApprovalAuditTrail(db, inv);
     try {
       const buf = await generateInvoicePdf({

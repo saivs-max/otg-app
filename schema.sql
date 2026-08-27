@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
   -- Profile fields used to render the formal contractor invoice header
   home_address    TEXT,
   home_phone      TEXT,
+  invoice_email   TEXT,                -- v0.96 — separate email shown on invoice (falls back to login email)
   -- v0.35 — real authentication. Username + scrypt password hash. The
   -- `must_change_password` flag is set on admin-issued temp passwords; the
   -- UI blocks the user from navigating until they update it.

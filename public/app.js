@@ -387,11 +387,12 @@ async function boot() {
   $('#app').classList.add(`role-${STATE.user.role}`);
   const isMgr = ['ops_manager','sr_manager','pm'].includes(STATE.user.role);
   $('#app').classList.toggle('role-manager', isMgr);
-  // v0.35 — Settings tab is admin-only. Non-admins access password change
-  // through the small icon next to logout (rendered inline as needed).
-  const isAdmin = ['pm','sr_manager'].includes(STATE.user.role);
-  $('#hdrSettingsBtn')?.classList.toggle('hidden', !isAdmin);
-  $('#hdrPwdBtn')?.classList.toggle('hidden', isAdmin);   // admins access password via Settings → profile
+  // v0.35 — Settings tab originally admin-only. v0.91 — accessible to all roles
+  // so technicians can set Home Address / Phone used on their invoice header.
+  // Non-managers see only the profile card; the Integrations section is gated
+  // inside renderSettings. The standalone password icon is no longer needed.
+  $('#hdrSettingsBtn')?.classList.remove('hidden');
+  $('#hdrPwdBtn')?.classList.add('hidden');   // all roles access password via Settings → profile
   renderTabbar();
   // v0.35 — force change-password flow if the user is on a temp password.
   if (STATE.user.must_change_password) {
@@ -1655,7 +1656,16 @@ async function clockIn(work_order_id) {
   `, {
     onMount: (wrap) => {
       $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
+      // v0.94 — guard against rapid double-tap: flag + immediate button disable
+      // prevent a queued second click from firing a duplicate POST.
+      let _starting = false;
       const start = async (mode) => {
+        if (_starting) return;
+        _starting = true;
+        const workBtn  = $('#modeWork',  wrap);
+        const driveBtn = $('#modeDrive', wrap);
+        if (workBtn)  workBtn.disabled  = true;
+        if (driveBtn) driveBtn.disabled = true;
         closeSheet();
         toast('Getting your location…');
         const gps = await getGPS();
@@ -5099,6 +5109,53 @@ total = Σ projected_spend(1..4)</pre>
 }
 
 // ---- CHANGE PASSWORD SHEET (v0.35) ----
+// v0.96 — Shown to technicians after they set their password on first login.
+// Prompts for home address, phone, and invoice email so invoices aren't blank.
+// `onDone` is called when the tech saves or explicitly skips.
+function openProfileSetupSheet(onDone) {
+  showSheet(`
+    <h3>Complete your invoice profile</h3>
+    <p class="help">These details appear on your formal invoice. You can update them anytime in Settings.</p>
+    <span class="label">Home address</span>
+    <input class="field" id="psAddr" placeholder="24 Mayflower Drive, Sicklerville, NJ 08081" value="${escapeHTML(STATE.user.home_address || '')}" />
+    <span class="label">Phone</span>
+    <input class="field" id="psPhone" placeholder="856-725-2298" value="${escapeHTML(STATE.user.home_phone || '')}" />
+    <span class="label">Invoice email <span class="meta">(optional — if different from your login email)</span></span>
+    <input class="field" id="psInvEmail" type="email" maxlength="254" placeholder="payments@example.com" value="${escapeHTML(STATE.user.invoice_email || '')}" />
+    <div class="actions">
+      <button class="btn btn-ghost" id="psSkip">Skip for now</button>
+      <button class="btn btn-primary" id="psSave">Save &amp; continue</button>
+    </div>
+  `, {
+    dismissable: false,
+    onMount: (wrap) => {
+      const finish = () => { closeSheet(); if (onDone) onDone(); };
+      $('#psSkip', wrap).addEventListener('click', finish);
+      $('#psSave', wrap).addEventListener('click', async () => {
+        const invEmail = $('#psInvEmail', wrap).value.trim();
+        if (invEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(invEmail)) {
+          toast('Invoice email must be a valid email address', 'err');
+          return;
+        }
+        const btn = $('#psSave', wrap); btn.disabled = true; btn.textContent = 'Saving…';
+        try {
+          const updated = await api('/me', { method: 'PATCH', body: {
+            home_address:  $('#psAddr', wrap).value.trim(),
+            home_phone:    $('#psPhone', wrap).value.trim(),
+            invoice_email: invEmail,
+          }});
+          STATE.user = { ...STATE.user, ...updated };
+          toast('Profile saved ✓', 'ok');
+          finish();
+        } catch (e) {
+          toast(e.message, 'err');
+          btn.disabled = false; btn.textContent = 'Save & continue';
+        }
+      });
+    },
+  });
+}
+
 // Opened from Settings → "Change password" or forced after login when the
 // user is on a temp password (`must_change_password=true`). When forced,
 // Cancel is hidden and the sheet can't be dismissed without success.
@@ -5155,7 +5212,12 @@ function openChangePasswordSheet(opts = {}) {
             STATE._mustChangePassword = false;
             STATE.user = await api('/me');
             const isMgr = ['ops_manager','sr_manager','pm'].includes(STATE.user.role);
-            goto(isMgr ? 'dashboard' : 'home');
+            if (!isMgr) {
+              // v0.96 — prompt tech to complete their invoice profile on first login
+              openProfileSetupSheet(() => goto('home'));
+            } else {
+              goto('dashboard');
+            }
           }
         } catch (e) {
           msg.textContent = e.message;
@@ -9743,7 +9805,8 @@ async function renderSettings(root) {
   const me = STATE.user;
   const isManager = ['ops_manager','sr_manager','pm'].includes(me.role);
   // Policy + custom rules moved to their own bottom-bar tab in v0.20.
-  const s = await api('/settings/integrations');
+  // v0.91 — only managers need integration credentials; skip the fetch for technicians.
+  const s = isManager ? await api('/settings/integrations') : null;
 
   function statusPill(cfg) {
     if (cfg.configured) return `<span class="badge approved">Configured ✓</span>`;
@@ -9757,8 +9820,10 @@ async function renderSettings(root) {
       <p class="help" style="margin: 0 0 12px;">Used as the bill-from header on your formal invoice.</p>
       <span class="label">Full name</span>
       <input class="field" id="profName" value="${escapeHTML(STATE.user.name || '')}" disabled />
-      <span class="label">Email</span>
+      <span class="label">Login email</span>
       <input class="field" id="profEmail" type="email" maxlength="254" value="${escapeHTML(STATE.user.email || '')}" />
+      <span class="label">Invoice email <span class="meta">(optional — shown on invoice instead of login email)</span></span>
+      <input class="field" id="profInvoiceEmail" type="email" maxlength="254" placeholder="payments@example.com" value="${escapeHTML(STATE.user.invoice_email || '')}" />
       <span class="label">Home address</span>
       <input class="field" id="profAddr" placeholder="24 Mayflower Drive, Sicklerville, NJ 08081" value="${escapeHTML(STATE.user.home_address || '')}" />
       <span class="label">Phone</span>
@@ -9767,6 +9832,7 @@ async function renderSettings(root) {
       <button class="btn btn-ghost btn-block" id="profChangePwd" style="margin-top: 8px;">🔒 Change password</button>
     </div>
 
+    ${isManager ? `
     <div class="section-title">Integrations</div>
     <div class="card">
       <p class="meta" style="margin:0;">Org-level API credentials. Configured here, used by every technician's "Paste ticket URL" feature on Add Work Order.</p>
@@ -9828,7 +9894,6 @@ async function renderSettings(root) {
       <button class="close" data-act="dismiss">×</button>
     </div>
 
-    ${isManager ? `
       <div class="card" style="margin-top: 14px; background: #f0f7f3; border-left: 4px solid var(--ic-green);">
         <strong>Policy &amp; custom rules</strong> moved to their own tab — open the <strong>Policy</strong> tab from the bottom navigation.
       </div>
@@ -9845,11 +9910,17 @@ async function renderSettings(root) {
       toast('Please enter a valid email address (e.g. name@company.com)', 'err');
       return;
     }
+    const invEmailVal = $('#profInvoiceEmail').value.trim();
+    if (invEmailVal && !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(invEmailVal)) {
+      toast('Invoice email must be a valid email address', 'err');
+      return;
+    }
     try {
       const updated = await api('/me', { method: 'PATCH', body: {
-        email:        emailVal,
-        home_address: $('#profAddr').value.trim(),
-        home_phone:   $('#profPhone').value.trim(),
+        email:         emailVal,
+        invoice_email: invEmailVal,
+        home_address:  $('#profAddr').value.trim(),
+        home_phone:    $('#profPhone').value.trim(),
       }});
       STATE.user = { ...STATE.user, ...updated };
       toast('Profile saved ✓', 'ok');
@@ -10755,7 +10826,7 @@ async function renderInvoiceDetail(root, invoiceId) {
           <div class="inv-row"><div class="inv-label">Phone Number</div><div>${escapeHTML(billFrom.home_phone || '— set in Settings —')}</div></div>
         </div>
         <div class="inv-num">
-          <div class="inv-num-tag">INVOICE #${escapeHTML(invoice.invoice_number.replace(/\D/g,'').slice(-4) || invoice.id)}</div>
+          <div class="inv-num-tag">INVOICE #${escapeHTML(String(invoice.id).padStart(5,'0'))}</div>
           <div class="inv-num-date">${fmtDate(invoice.period_end)}</div>
         </div>
       </div>
@@ -10882,7 +10953,7 @@ async function renderInvoiceDetail(root, invoiceId) {
       <div class="inv-footer">
         <div>Payable in USD to <strong>${escapeHTML(billFrom.name)}</strong></div>
         <div style="font-size: 11px; color: var(--muted); margin-top: 4px;">If you have any questions concerning this invoice, use the following contact information:</div>
-        <div style="margin-top: 4px;"><strong>Email:</strong> ${escapeHTML(billFrom.email)}${billFrom.home_phone ? ` · <strong>Mobile:</strong> ${escapeHTML(billFrom.home_phone)}` : ''}</div>
+        <div style="margin-top: 4px;"><strong>Email:</strong> ${escapeHTML(billFrom.invoice_email || billFrom.email)}${billFrom.home_phone ? ` · <strong>Mobile:</strong> ${escapeHTML(billFrom.home_phone)}` : ''}</div>
       </div>
     </div>
 

@@ -58,6 +58,7 @@ function ensureSchema(db) {
   migrateAddColumn(db, 'users', 'must_change_password', 'INTEGER DEFAULT 0');
   migrateAddColumn(db, 'users', 'status',               "TEXT DEFAULT 'active'");
   migrateAddColumn(db, 'users', 'last_login_at',        'TEXT');
+  migrateAddColumn(db, 'users', 'invoice_email',        'TEXT'); // v0.96 — separate invoice payment email
   // v0.36 — 3rd-party vendor invoices.
   migrateAddColumn(db, 'invoices', 'invoice_type',          "TEXT DEFAULT 'tech_labor'");
   migrateAddColumn(db, 'invoices', 'vendor_name',           'TEXT');
