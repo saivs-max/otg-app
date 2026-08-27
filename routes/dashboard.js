@@ -152,15 +152,25 @@ module.exports = (db) => {
     // is active, scope to invoices linked to matching WOs via EXISTS so the
     // count responds to the same filters as the other tiles. Invoices with no
     // WO link (edge case) are naturally excluded when a store/wt filter is on.
+    // v0.97 — OR EXISTS on expenses so expense-only invoices (no clocked time)
+    // are not silently dropped when a store/wt filter is active. storeParam is
+    // supplied twice — once per EXISTS arm — to bind both sets of placeholders.
     const noStoreParams = effectiveTechIds ? [...effectiveTechIds] : [];
     // EXISTS fragment reused by both pending and draft queries.
     const woExistsSql = hasWoFilter ? `
-      AND EXISTS (
-        SELECT 1 FROM time_entries te
-        JOIN work_orders w ON w.id = te.work_order_id
-        WHERE te.invoice_id = i.id ${storeFilterSql} ${wtFilterSql}
+      AND (
+        EXISTS (
+          SELECT 1 FROM time_entries te
+          JOIN work_orders w ON w.id = te.work_order_id
+          WHERE te.invoice_id = i.id ${storeFilterSql} ${wtFilterSql}
+        )
+        OR EXISTS (
+          SELECT 1 FROM expenses e
+          JOIN work_orders w ON w.id = e.work_order_id
+          WHERE e.invoice_id = i.id ${storeFilterSql} ${wtFilterSql}
+        )
       )` : '';
-    const pendingDraftParams = [...noStoreParams, ...(hasWoFilter ? storeParam : [])];
+    const pendingDraftParams = [...noStoreParams, ...(hasWoFilter ? [...storeParam, ...storeParam] : [])];
 
     const pendingRow = db.prepare(`
       SELECT COUNT(*) AS n, COALESCE(SUM(i.total),0) AS sum_total,
@@ -429,11 +439,14 @@ module.exports = (db) => {
       vendor_count: vendorRows.length,
     };
 
-    // Vendor invoices currently awaiting Sr Mgr approval (informational tile)
+    // Vendor invoices currently awaiting Sr Mgr approval (informational tile).
+    // v0.97 — honor period filter for consistency with vendorSummary above.
+    // Store/wt/tech cannot apply: vendor invoices have no WO or store FK.
     const vendorPending = db.prepare(`
       SELECT COUNT(*) AS n, COALESCE(SUM(total),0) AS total
       FROM invoices WHERE invoice_type = 'vendor' AND status IN ('submitted','in_review')
-    `).get();
+      ${periodSql}
+    `).get(...(periodStart ? [periodStart] : []));
 
     // ---- Per-store weekly trend (top 5 stores by total spend) ----
     // Powers the multi-line "Spend trend per store" chart so managers can
