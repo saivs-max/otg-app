@@ -1845,6 +1845,11 @@ async function renderAdd(root) {
   // (e.g. via the upload flow) we honor that pin; otherwise default to the
   // current week's draft.
   const pinnedId   = STATE._addToInvoiceId;
+  // v0.95 — TC-NEG-072: restore draft persisted to sessionStorage so a browser
+  // refresh on the preview page doesn't lose the user's entered data.
+  const DRAFT_KEY = 'otg_expense_draft';
+  let _savedDraft = null;
+  try { _savedDraft = JSON.parse(sessionStorage.getItem(DRAFT_KEY) || 'null'); } catch (_) {}
   const pinnedPer  = STATE._addToInvoicePeriod;
   const [wos, current, pinned] = await Promise.all([
     api('/workorders'),
@@ -1900,6 +1905,8 @@ async function renderAdd(root) {
                    expense_date: defaultDate, amount: '', miles: '', description: '', wo_search: '',
                    // v0.69 — optional drive endpoints shown on the mileage report.
                    start_location: '', stop_location: '' };
+  // v0.95 — restore from sessionStorage if the user refreshed on the preview page.
+  if (_savedDraft?.selected) Object.assign(selected, _savedDraft.selected);
   // Prefill WO from a previous "Add expense to this WO" flow
   if (STATE._prefillWO && open.find(w => w.id === STATE._prefillWO)) {
     selected.work_order_id = STATE._prefillWO;
@@ -2024,11 +2031,11 @@ async function renderAdd(root) {
       <button class="btn btn-primary btn-block" id="previewBtn">Preview ▸</button>
     `;
   }
-  let pendingReceipt = null;
+  let pendingReceipt = _savedDraft?.pendingReceipt || null; // v0.95 — restored from sessionStorage on refresh
   // v0.59 — preview-before-submit. When true, the form is replaced with a
   // read-only summary card so the tech can verify the expense + attached
   // image before committing it to the invoice.
-  let previewMode = false;
+  let previewMode = _savedDraft?.previewMode || false; // v0.95 — restored from sessionStorage on refresh
 
   // v0.88 — per-WO time-entry cache used to warn techs who switch to the
   // labor/drive category that they've already clocked time for this WO,
@@ -2200,6 +2207,7 @@ async function renderAdd(root) {
         await uploadReceipt(pendingReceipt, { expense_id: exp.id });
       }
       toast(pendingReceipt ? 'Expense + receipt saved ✓' : 'Expense added ✓', 'ok');
+      try { sessionStorage.removeItem(DRAFT_KEY); } catch (_) {} // v0.95 — clear persisted draft on successful save
       if (pinnedId) {
         const dest = pinnedId;
         STATE._addToInvoiceId = null; STATE._addToInvoicePeriod = null;
@@ -2214,7 +2222,11 @@ async function renderAdd(root) {
     // v0.59 — wire up preview-mode buttons separately. In preview mode the
     // form inputs aren't on the page, so we skip all the form-input bindings.
     if (previewMode) {
-      $('#backToEditBtn')?.addEventListener('click', () => { previewMode = false; rerender(); });
+      $('#backToEditBtn')?.addEventListener('click', () => {
+        previewMode = false;
+        try { sessionStorage.removeItem(DRAFT_KEY); } catch (_) {} // v0.95 — clear so refresh on edit form doesn't re-enter preview
+        rerender();
+      });
       // v0.87 — guard against double-tap during the save delay (was creating
       // duplicate line items when techs tapped "Save to invoice" repeatedly).
       const confirmBtn = $('#confirmSaveBtn');
@@ -2288,6 +2300,8 @@ async function renderAdd(root) {
     $('#previewBtn').addEventListener('click', () => {
       if (!validateForPreview()) return;
       previewMode = true;
+      // v0.95 — persist draft so a refresh on the preview page restores it.
+      try { sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ selected, previewMode: true, pendingReceipt })); } catch (_) {}
       rerender();
     });
 
