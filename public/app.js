@@ -3489,6 +3489,21 @@ function renderInvoicePreviewPanel(p) {
 }
 
 function renderEditableLineItems(by_date, invoice, opts = {}) {
+  // v0.97 — Re-bucket entries by LOCAL date before rendering. The server groups
+  // by UTC date (slicing the ISO string), so techs west of UTC whose entries
+  // fall after local-midnight-UTC (e.g. 6 PM Pacific = 1 AM UTC next day) would
+  // see their entries under tomorrow's header. Re-bucketing here using
+  // localDateISO(clock_in) fixes the display without touching server aggregates.
+  if (by_date && by_date.length) {
+    const lb = {};
+    const ensureBucket = date => (lb[date] ||= { date, time_entries: [], drive_entries: [], expense_entries: [] });
+    for (const d of by_date) {
+      for (const t of (d.time_entries   || [])) ensureBucket(t.clock_in ? localDateISO(t.clock_in) : d.date).time_entries.push(t);
+      for (const t of (d.drive_entries  || [])) ensureBucket(t.clock_in ? localDateISO(t.clock_in) : d.date).drive_entries.push(t);
+      for (const e of (d.expense_entries|| [])) ensureBucket(e.expense_date ? e.expense_date.slice(0,10) : d.date).expense_entries.push(e);
+    }
+    by_date = Object.values(lb).sort((a, b) => (a.date < b.date ? -1 : 1));
+  }
   if (!by_date || !by_date.length) {
     return `
       <div class="card" style="margin-top: 14px;">
