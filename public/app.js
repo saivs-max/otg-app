@@ -49,7 +49,8 @@ async function mxImportMyOrders(btn) {
     const bits = [`${summary.pulled} work order${summary.pulled === 1 ? '' : 's'}`];
     if (summary.created)       bits.push(`${summary.created} new`);
     if (summary.laborImported) bits.push(`${summary.laborImported} labor time${summary.laborImported === 1 ? '' : 's'} imported`);
-    toast(`Imported ${bits.join(' · ')} from MaintainX ✓`, 'ok');
+    if (summary.errors && summary.errors.length) bits.push(`${summary.errors.length} error${summary.errors.length === 1 ? '' : 's'}: ${summary.errors.map(e => e.error).join('; ')}`);
+    toast(`Imported ${bits.join(' · ')} from MaintainX ✓`, summary.errors && summary.errors.length ? 'err' : 'ok');
     goto(STATE.view, STATE.view_arg);
   } catch (e) {
     toast(e.message || 'Import failed', 'err');
