@@ -346,6 +346,8 @@ module.exports = (db) => {
         return res.status(409).json({ error: 'expense already on submitted invoice' });
       }
     }
+    // v0.87 — delete child attachments first to avoid FK constraint failure
+    db.prepare("DELETE FROM attachments WHERE expense_id = ?").run(id);
     db.prepare("DELETE FROM expenses WHERE id = ?").run(id);
     logAudit(db, { entity_type: 'expenses', entity_id: id, user_id: userId, action: 'delete' });
     res.json({ deleted: true });
