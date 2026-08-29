@@ -1687,15 +1687,15 @@ module.exports = (db) => {
       return res.status(403).json({ error: 'only managers can send invoices to AP' });
     }
 
-    // v0.89 (security — TC-SEC-001) — FULL approval chain required before AP hand-off.
-    // Status must be approved_sr (Ops + Sr Mgr both countersigned).
-    // An explicit approved_ops_by guard closes the window where a Sr Mgr
-    // countersigns a non-ops-approved invoice, leaving approved_ops_by null.
-    if (inv.status !== 'approved_sr') {
-      return res.status(409).json({ error: `invoice must reach approved_sr status before it can be sent to AP (current: ${inv.status})` });
+    // v0.90 — approved_ops is sufficient to send to AP; approved_sr is also
+    // accepted (escalated path). Sr Mgr countersign is optional, not required.
+    // TC-SEC-001 segregation-of-duties is still enforced: tech can't self-submit
+    // (blocked above) and ops_by must be set (no ghost approvals).
+    if (!['approved_ops', 'approved_sr', 'queued_ap'].includes(inv.status)) {
+      return res.status(409).json({ error: `invoice must be approved before sending to AP (current: ${inv.status})` });
     }
     if (!inv.approved_ops_by) {
-      return res.status(409).json({ error: 'Ops Manager approval is missing — the full approval chain (Ops → Sr Mgr) must be completed before sending to AP' });
+      return res.status(409).json({ error: 'Ops Manager approval is missing — invoice must be approved by an Ops Manager before sending to AP' });
     }
 
     const me = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(userId);
