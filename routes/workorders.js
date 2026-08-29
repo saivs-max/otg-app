@@ -117,12 +117,21 @@ module.exports = (db) => {
   // PATCH /api/workorders/:id  { status?, store_name?, store_id?, store_address?,
   //                              cart_count?, scheduled_date?, description? }
   // Field tech can update the WO they're assigned to.
+  // v0.90 — ownership check: technicians may only patch their own assigned WO.
+  //         Managers (ops_manager / sr_manager / pm) may patch any WO.
   router.patch('/workorders/:id', (req, res) => {
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
     const id = Number(req.params.id);
     const wo = db.prepare("SELECT * FROM work_orders WHERE id = ?").get(id);
     if (!wo) return res.status(404).json({ error: 'not found' });
+
+    // v0.90 — enforce assignment ownership for non-manager callers.
+    const caller = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+    const isManager = caller && MGR_ROLES.has(caller.role);
+    if (!isManager && wo.assigned_user_id !== userId) {
+      return res.status(403).json({ error: 'not assigned to this work order' });
+    }
 
     const fields = ['status','store_name','store_id','store_address','cart_count','scheduled_date','description','wo_number','sub_wo_count','priority'];
     const updates = [];
