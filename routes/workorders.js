@@ -3,8 +3,9 @@
 // MaintainX ticket — used when the source system hasn't synced yet (PRD §4.2).
 // In v0.3, pasting a ticket URL auto-fills the form (stubbed; real APIs drop in
 // once MAINTAINX_API_KEY / FRESHDESK_API_KEY are set).
-const express = require('express');
-const router  = express.Router();
+const express     = require('express');
+const router      = express.Router();
+const escapeHtml  = require('escape-html'); // v0.88 — sanitize user-supplied text before storage
 const { logAudit, activeWorkTypes } = require('../db');
 const settings = require('./settings');
 const { parseCaperDescription, parseCartRangeFromTitle, countSubWOsFromProgress, classifyMxWorkType } = require('../lib/maintainxExtract');
@@ -114,7 +115,11 @@ module.exports = (db) => {
         if (f === 'status' && !['open','in_progress','completed','cancelled','on_hold'].includes(req.body[f])) {
           return res.status(400).json({ error: 'invalid status' });
         }
-        updates.push(`${f} = ?`); params.push(req.body[f]);
+        // v0.88 — escape HTML in free-text fields to prevent stored XSS
+        const val = (f === 'description' || f === 'store_name' || f === 'store_address')
+          ? escapeHtml(String(req.body[f]))
+          : req.body[f];
+        updates.push(`${f} = ?`); params.push(val);
       }
     }
     if (!updates.length) return res.status(400).json({ error: 'no fields to update' });
@@ -207,7 +212,12 @@ module.exports = (db) => {
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
 
-    const { source_system, work_type, store_name, store_id, store_address, cart_count, scheduled_date, description, title } = req.body;
+    const { source_system, work_type, store_id, cart_count, scheduled_date } = req.body;
+    // v0.88 — escape free-text fields before storage to prevent stored XSS
+    const store_name    = req.body.store_name    ? escapeHtml(String(req.body.store_name))    : req.body.store_name;
+    const store_address = req.body.store_address ? escapeHtml(String(req.body.store_address)) : req.body.store_address;
+    const description   = req.body.description   ? escapeHtml(String(req.body.description))   : req.body.description;
+    const title         = req.body.title         ? escapeHtml(String(req.body.title))         : req.body.title;
     let ticket_id = (req.body.ticket_id || '').trim();
 
     if (!source_system || !work_type || !ticket_id || !store_name) {
