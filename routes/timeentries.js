@@ -525,18 +525,9 @@ module.exports = (db) => {
           }
         }
       }
-      // v0.95 — clock_in and clock_out are manager-only fields on a closed entry.
-      // Techs may correct break_minutes and notes; only managers may adjust the
-      // actual timestamps (same authorization level required as invoice-level edits).
-      // This prevents a tech from silently inflating or deflating their own hours
-      // on a draft invoice without manager oversight.
+      // Allow editing clock_in / clock_out on a draft entry (tech or manager).
       let clockIn  = e.clock_in;
       let clockOut = e.clock_out;
-      if (req.body.clock_in !== undefined || req.body.clock_out !== undefined) {
-        if (!isManagerActor) {
-          return res.status(403).json({ error: 'Only managers may adjust clock_in or clock_out. Contact your manager to correct logged times.' });
-        }
-      }
       if (req.body.clock_in)  {
         const ci = toInstant(req.body.clock_in);
         if (!ci) return res.status(400).json({ error: 'invalid clock_in' });
