@@ -16,16 +16,48 @@ const MAX_EXPENSE_AMOUNT = 100000;
 
 module.exports = (db) => {
 
-  // GET /api/expenses  → my expenses (this week, joined with WO context)
+  // GET /api/expenses  → my expenses (joined with WO context)
+  // v0.93 SECURITY: ?user_id= query param must never override the authenticated
+  // session identity for non-manager callers. Technicians get 403 if they
+  // supply a user_id that doesn't match their own session; managers may filter
+  // by a tech on their team. Filter is always pinned to the session for techs.
   router.get('/expenses', (req, res) => {
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
+
+    let filterUserId = userId; // default: own expenses only
+
+    if (req.query.user_id !== undefined) {
+      const requested = req.query.user_id;
+      const requestedId = Number(requested);
+      // Only act when the caller is asking for someone else's expenses.
+      if (requestedId !== userId) {
+        const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+        const isSrManager = me && (me.role === 'sr_manager' || me.role === 'pm');
+        const isOpsManager = me && me.role === 'ops_manager';
+        if (isSrManager && requestedId) {
+          // sr_manager / pm may view any single tech's expenses via ?user_id=<id>
+          filterUserId = requestedId;
+        } else if (isOpsManager && requestedId) {
+          // ops_manager: scoped to their direct team only
+          const onTeam = db.prepare(
+            "SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?"
+          ).get(userId, requestedId);
+          if (!onTeam) return res.status(403).json({ error: 'not on your team' });
+          filterUserId = requestedId;
+        } else {
+          // Technician (or invalid/non-numeric user_id like 'all'): reject.
+          return res.status(403).json({ error: 'forbidden: user_id filter must match your session' });
+        }
+      }
+    }
+
     const rows = db.prepare(`
       SELECT e.*, w.external_id, w.source_system, w.work_type, w.store_name
       FROM expenses e JOIN work_orders w ON w.id = e.work_order_id
       WHERE e.user_id = ?
       ORDER BY e.expense_date DESC, e.id DESC
-    `).all(userId);
+    `).all(filterUserId);
     res.json(rows);
   });
 
@@ -198,47 +230,79 @@ module.exports = (db) => {
   });
 
   // PATCH /api/expenses/:id  → edit fields on a draft-invoice expense
+  // v0.94 — financial-field role guards + full before/after audit trail.
+  //   • ops_manager cannot modify financial fields (amount/quantity/rate/
+  //     expense_date/work_order_id) on another tech's expense.
+  //   • work_order_id is locked for ALL roles once an invoice is attached.
+  //   • logAudit now captures a full field-level diff (from/to) so disputes
+  //     can be resolved.
   router.patch('/expenses/:id', (req, res) => {
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
     const id = Number(req.params.id);
     const e = db.prepare("SELECT * FROM expenses WHERE id = ?").get(id);
     if (!e) return res.status(404).json({ error: 'not found' });
-    if (e.user_id !== userId) {
-      const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-      const allowed = me && (
-        me.role === 'sr_manager' || me.role === 'pm' ||
-        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
-      );
-      if (!allowed) return res.status(403).json({ error: 'not yours' });
+
+    // --- resolve actor role once ---
+    const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+    const isOwner       = e.user_id === userId;
+    const isHighManager = me && (me.role === 'sr_manager' || me.role === 'pm');
+    const isOpsOnTeam   = me && me.role === 'ops_manager' &&
+      db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?")
+        .get(userId, e.user_id);
+    const isManagerActor = isHighManager || isOpsOnTeam;
+
+    // --- ownership / cross-role access ---
+    if (!isOwner && !isManagerActor) return res.status(403).json({ error: 'not yours' });
+
+    // --- v0.94 — ops_manager may not modify financial fields on others' expenses.
+    // Only the expense owner or a high manager (sr_manager / pm) may adjust
+    // amount, quantity, rate, expense_date, or work_order_id.
+    const canEditFinancial = isOwner || isHighManager;
+    const FINANCIAL_FIELDS = ['amount', 'quantity', 'rate', 'expense_date', 'work_order_id'];
+    if (!canEditFinancial) {
+      const attempted = FINANCIAL_FIELDS.filter(f =>
+        req.body[f] !== undefined && String(req.body[f]) !== String(e[f] ?? ''));
+      if (attempted.length) {
+        return res.status(403).json({
+          error: `ops_manager may not modify financial fields: ${attempted.join(', ')}`
+        });
+      }
     }
+
+    // --- invoice status lock ---
     if (e.invoice_id) {
       const inv = db.prepare("SELECT status FROM invoices WHERE id = ?").get(e.invoice_id);
       if (inv) {
         // v0.64 — Ops managers (sr/pm, or ops_mgr on the tech's team) can correct
         // line items right up until the invoice is approved: draft / submitted /
         // in_review. The owning tech can still only edit while it's a draft.
-        // Once approved, queued, sent to AP, or rejected, line items are locked.
-        const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-        const isManagerActor = me && (
-          me.role === 'sr_manager' || me.role === 'pm' ||
-          (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
-        );
         const editable = isManagerActor ? ['draft','submitted','in_review'] : ['draft'];
         if (!editable.includes(inv.status)) {
           return res.status(409).json({ error: `Cannot edit — invoice is ${inv.status}.` });
         }
       }
+      // v0.94 — work_order_id locked for ALL roles once an invoice is attached.
+      // Reassigning a WO post-attachment is a falsification vector; use a
+      // cost_tracker override instead.
+      if (req.body.work_order_id !== undefined &&
+          Number(req.body.work_order_id) !== e.work_order_id) {
+        return res.status(409).json({ error: 'Cannot reassign work order after invoice is attached.' });
+      }
     }
 
+    // --- resolve field values ---
     let { category, subcategory, expense_date, amount, quantity, rate, description } = req.body;
     category     = category     ?? e.category;
     subcategory  = subcategory  ?? e.subcategory;
     expense_date = expense_date ?? e.expense_date;
     description  = description  ?? e.description;
-    // v0.86 — allow reassigning an expense to a different work order on a draft invoice.
+    // v0.86 — allow reassigning an expense to a different work order only when
+    // no invoice is attached yet (the invoice-attached guard above handles the
+    // locked case).
     let work_order_id = e.work_order_id;
-    if (req.body.work_order_id !== undefined && Number(req.body.work_order_id) !== e.work_order_id) {
+    if (!e.invoice_id && req.body.work_order_id !== undefined &&
+        Number(req.body.work_order_id) !== e.work_order_id) {
       const wo = db.prepare("SELECT id FROM work_orders WHERE id = ?").get(Number(req.body.work_order_id));
       if (!wo) return res.status(400).json({ error: 'work order not found' });
       work_order_id = wo.id;
@@ -292,8 +356,19 @@ module.exports = (db) => {
       WHERE id = ?
     `).run(category, subcategory, expense_date, amount, quantity, rate, description, start_location, stop_location, work_order_id, id);
 
+    // v0.94 — full before/after field diff so every change is disputable.
+    const AUDITED_FIELDS = ['category','subcategory','expense_date','amount','quantity',
+                            'rate','description','start_location','stop_location','work_order_id'];
+    const afterVals = { category, subcategory, expense_date, amount, quantity, rate,
+                        description, start_location, stop_location, work_order_id };
+    const diff = {};
+    for (const f of AUDITED_FIELDS) {
+      if (String(e[f] ?? '') !== String(afterVals[f] ?? '')) {
+        diff[f] = { from: e[f] ?? null, to: afterVals[f] ?? null };
+      }
+    }
     logAudit(db, { entity_type: 'expenses', entity_id: id, user_id: userId, action: 'update',
-                   details: { category, amount } });
+                   details: { ...(isOwner ? {} : { cross_role: true }), diff } });
 
     // v0.64 — keep the invoice total fresh immediately after a line-item edit.
     // computeInvoice is shared from routes/invoices.js (see db.__computeInvoice).
@@ -303,7 +378,7 @@ module.exports = (db) => {
 
     // v0.64.3 — when a MANAGER edits a tech's expense, leave an informational
     // notice for the tech. No action required unless the invoice is rejected.
-    if (e.user_id !== userId) {
+    if (!isOwner) {
       try {
         const tech = db.prepare("SELECT email FROM users WHERE id = ?").get(e.user_id);
         const mgr  = db.prepare("SELECT name FROM users WHERE id = ?").get(userId);

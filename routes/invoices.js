@@ -1071,6 +1071,14 @@ module.exports = (db) => {
   router.get('/invoices', (req, res) => {
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
+    // v0.91 — this endpoint is self-service only (returns the caller's own
+    // invoices). It does not support the proxy header; reject any value so
+    // the server never silently falls back to the requester's context with a
+    // malformed or phantom user ID.
+    const raw = req.header('x-on-behalf-of');
+    if (raw !== undefined && String(raw).trim() !== '') {
+      return res.status(400).json({ error: 'x-on-behalf-of is not supported on this endpoint' });
+    }
     const rows = db.prepare(`
       SELECT id, invoice_number, period_start, period_end, status, total, submitted_at,
              approved_ops_at, approved_sr_at, rejected_at, rejection_reason,
