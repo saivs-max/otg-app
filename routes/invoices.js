@@ -1668,12 +1668,25 @@ module.exports = (db) => {
     const perm = canActOnInvoice(id, userId);
     if (!perm.ok) return res.status(perm.status || 403).json({ error: perm.error });
     const inv = perm.inv;
-    // v0.65.2 — Sr Mgr approval is OPTIONAL at all levels. An invoice can be
-    // sent to AP after Ops approval alone (approved_ops) or after a Sr Mgr
-    // countersign (approved_sr). Escalation no longer forces a Sr Mgr gate — it
-    // simply surfaces the invoice in the Sr Mgr queue as an optional review.
-    if (inv.status !== 'approved_ops' && inv.status !== 'approved_sr') {
-      return res.status(409).json({ error: `invoice must be approved before it can be sent to AP (current: ${inv.status})` });
+
+    // v0.89 (security — TC-SEC-001) — send-to-AP is MANAGER-ONLY.
+    // canActOnInvoice allows the invoice owner (technician) through, but a tech
+    // must never be able to self-submit to AP regardless of approval state.
+    // Segregation of duties: the person being paid cannot also authorize payment.
+    const me2 = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+    if (!me2 || me2.role === 'technician') {
+      return res.status(403).json({ error: 'only managers can send invoices to AP' });
+    }
+
+    // v0.89 (security — TC-SEC-001) — FULL approval chain required before AP hand-off.
+    // Status must be approved_sr (Ops + Sr Mgr both countersigned).
+    // An explicit approved_ops_by guard closes the window where a Sr Mgr
+    // countersigns a non-ops-approved invoice, leaving approved_ops_by null.
+    if (inv.status !== 'approved_sr') {
+      return res.status(409).json({ error: `invoice must reach approved_sr status before it can be sent to AP (current: ${inv.status})` });
+    }
+    if (!inv.approved_ops_by) {
+      return res.status(409).json({ error: 'Ops Manager approval is missing — the full approval chain (Ops → Sr Mgr) must be completed before sending to AP' });
     }
 
     const me = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(userId);
