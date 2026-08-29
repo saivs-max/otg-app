@@ -457,7 +457,20 @@ module.exports = (db) => {
     const notes  = req.body.notes ?? e.notes;
 
     // Branch A: still running → this PATCH is a clock-out.
+    // v0.94 — block silent field hijacking on running timers.
     if (!e.clock_out) {
+      if (req.body.work_order_id !== undefined) {
+        return res.status(400).json({ error: 'Cannot reassign work order on a running timer — clock out first.' });
+      }
+      if (req.body.mode !== undefined) {
+        return res.status(400).json({ error: 'Use POST /timeentries/:id/switch-mode to change billing mode.' });
+      }
+      // v0.95 — explicitly reject clock_out on a running timer. The clock-out
+      // timestamp is always server-side (Date.now()), not client-supplied, to
+      // prevent hour inflation/deflation. Callers must omit clock_out entirely.
+      if (req.body.clock_out !== undefined) {
+        return res.status(400).json({ error: 'clock_out cannot be set directly — call PATCH without clock_out to clock out at the current server time.' });
+      }
       // v0.82 — the old { break_only:true } fixed-30 path is gone; breaks are now
       // live-tracked via POST /break/start + /break/resume. If the tech clocks out
       // straight from a break, finalize that break first so its measured minutes
@@ -511,25 +524,33 @@ module.exports = (db) => {
       // logged hours until the invoice is approved (draft/submitted/in_review).
       // The owning tech can still only edit while it's a draft. Approved / queued
       // / sent / rejected invoices lock their line items.
+      // v0.95 — hoist isManagerActor so we can use it to gate clock_in/clock_out.
+      const meB = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+      const isManagerActor = !!(meB && (
+        meB.role === 'sr_manager' || meB.role === 'pm' ||
+        (meB.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
+      ));
       if (e.invoice_id) {
         const inv = db.prepare("SELECT status FROM invoices WHERE id = ?").get(e.invoice_id);
         if (inv) {
-          const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-          const isManagerActor = me && (
-            me.role === 'sr_manager' || me.role === 'pm' ||
-            (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
-          );
           const editable = isManagerActor ? ['draft','submitted','in_review'] : ['draft'];
           if (!editable.includes(inv.status)) {
             return res.status(409).json({ error: `Cannot edit — invoice is ${inv.status}.` });
           }
         }
       }
-      // Allow editing clock_in / clock_out / mode on a draft entry. Used by
-      // the inline "edit time entry" sheet on the editable line items list.
+      // v0.95 — clock_in and clock_out are manager-only fields on a closed entry.
+      // Techs may correct break_minutes and notes; only managers may adjust the
+      // actual timestamps (same authorization level required as invoice-level edits).
+      // This prevents a tech from silently inflating or deflating their own hours
+      // on a draft invoice without manager oversight.
       let clockIn  = e.clock_in;
       let clockOut = e.clock_out;
-      let mode     = e.mode;
+      if (req.body.clock_in !== undefined || req.body.clock_out !== undefined) {
+        if (!isManagerActor) {
+          return res.status(403).json({ error: 'Only managers may adjust clock_in or clock_out. Contact your manager to correct logged times.' });
+        }
+      }
       if (req.body.clock_in)  {
         const ci = toInstant(req.body.clock_in);
         if (!ci) return res.status(400).json({ error: 'invalid clock_in' });
@@ -543,17 +564,16 @@ module.exports = (db) => {
         if (!co) return res.status(400).json({ error: 'invalid clock_out' });
         clockOut = co.toISOString();
       }
+      // v0.94 — mode and work_order_id are no longer PATCH-writable.
+      // Mode changes must go through POST /timeentries/:id/switch-mode.
+      // WO reassignment is not permitted via PATCH (no audit trail, no approval flow).
       if (req.body.mode !== undefined) {
-        if (!['work','drive'].includes(req.body.mode)) return res.status(400).json({ error: 'mode must be work or drive' });
-        mode = req.body.mode;
+        return res.status(400).json({ error: 'Billing mode cannot be changed via PATCH — use POST /timeentries/:id/switch-mode.' });
       }
-      // v0.86 — allow reassigning a time entry to a different work order while the invoice is draft.
-      let workOrderId = e.work_order_id;
-      if (req.body.work_order_id !== undefined && Number(req.body.work_order_id) !== e.work_order_id) {
-        const wo = db.prepare("SELECT id FROM work_orders WHERE id = ?").get(Number(req.body.work_order_id));
-        if (!wo) return res.status(400).json({ error: 'work order not found' });
-        workOrderId = wo.id;
+      if (req.body.work_order_id !== undefined) {
+        return res.status(400).json({ error: 'Work order reassignment is not permitted via PATCH.' });
       }
+      const workOrderId = e.work_order_id;
       if (new Date(clockOut) <= new Date(clockIn)) {
         return res.status(400).json({ error: 'clock_out must be after clock_in' });
       }
@@ -579,11 +599,11 @@ module.exports = (db) => {
       }
       db.prepare(`
         UPDATE time_entries
-        SET break_minutes = ?, notes = ?, clock_in = ?, clock_out = ?, mode = ?, work_order_id = ?
+        SET break_minutes = ?, notes = ?, clock_in = ?, clock_out = ?
         WHERE id = ?
-      `).run(breaks || 0, notes, clockIn, clockOut, mode, workOrderId, id);
+      `).run(breaks || 0, notes, clockIn, clockOut, id);
       logAudit(db, { entity_type: 'time_entries', entity_id: id, user_id: userId, action: 'edit',
-                     details: { break_minutes: breaks, clock_in: clockIn, clock_out: clockOut, mode, work_order_id: workOrderId } });
+                     details: { break_minutes: breaks, clock_in: clockIn, clock_out: clockOut } });
     }
 
     // v0.64 — refresh the invoice total after editing logged hours.
