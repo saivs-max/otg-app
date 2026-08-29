@@ -14,12 +14,29 @@ const VALID_SOURCES = new Set(['maintainx','freshdesk']);
 // v0.62 — VALID_TYPES is now dynamic; resolved from the work_types table at
 // validation time so admin-added types pass.
 
+// v0.89 — roles allowed to create / look up WOs. Technicians cannot create WOs
+// (PRD §4.2: WOs originate from MaintainX sync or manager creation only).
+const MGR_ROLES = new Set(['ops_manager','sr_manager','pm']);
+
 // Default MaintainX Organization ID for the Instacart/Caper tenant.
 // Used when nothing is configured in Settings or env. Override per-deploy by
 // setting maintainx_organization_id in Settings or MAINTAINX_ORG_ID in .env.
 const DEFAULT_MX_ORG_ID = '477835';
 
 module.exports = (db) => {
+
+  // v0.89 — returns the user record if they hold a manager role, otherwise
+  // writes a 403 response and returns null (caller must `return` on null).
+  function requireManager(req, res) {
+    const userId = Number(req.header('x-user-id'));
+    if (!userId) { res.status(401).json({ error: 'no user selected' }); return null; }
+    const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+    if (!me || !MGR_ROLES.has(me.role)) {
+      res.status(403).json({ error: 'manager role required' });
+      return null;
+    }
+    return me;
+  }
 
   // GET /api/workorders
   // By default returns work orders assigned to the current user, excluding
@@ -151,6 +168,9 @@ module.exports = (db) => {
   // v0.3 stubs the actual API call — replace stubFetchTicket() with a real
   // fetch() to the source system once API keys are configured.
   router.post('/workorders/parse-url', async (req, res) => {
+    // v0.89 — only managers may look up tickets (they are the only ones who can
+    // subsequently create a WO from the result).
+    if (!requireManager(req, res)) return;
     const url = (req.body.url || '').trim();
     if (!url) return res.status(400).json({ error: 'url required' });
 
@@ -207,10 +227,11 @@ module.exports = (db) => {
   // selected manually, the chip-driven Add WO form already handles that path.
   // This endpoint is the URL-pasting convenience.
 
-  // POST /api/workorders   — create a WO inline
+  // POST /api/workorders   — create a WO inline (manager-only; v0.89)
   router.post('/workorders', (req, res) => {
+    // v0.89 — technicians cannot create work orders (PRD §4.2).
+    if (!requireManager(req, res)) return;
     const userId = Number(req.header('x-user-id'));
-    if (!userId) return res.status(401).json({ error: 'no user selected' });
 
     const { source_system, work_type, store_id, cart_count, scheduled_date } = req.body;
     // v0.88 — escape free-text fields before storage to prevent stored XSS
