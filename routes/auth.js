@@ -17,16 +17,26 @@ const express = require('express');
 const { hashPassword, verifyPassword, createSession, deleteSession } = require('../lib/auth');
 const { logAudit } = require('../db');
 
-// v0.65.1 (F-L3) — simple in-memory login throttle (single-process app). Locks a
-// username or IP+username after repeated failures so credentials can't be brute-forced.
-// v0.65.2 (TC-NEG-002) — IP key is now scoped to IP+username ("ipu:") instead of
-// IP alone ("ip:"). The old flat IP key caused shared-NAT/proxy environments to lock
-// out all users the moment any one account exceeded the failure threshold. With the
-// combined key, each (IP, username) pair is tracked independently, so User A's
-// failures never affect User B's login attempts.
+// v0.90 — login throttle: IP+username key ONLY ("ipu:IP:user").
+// v0.65.1 / v0.65.2 maintained a second global per-username key ("u:user") which
+// created two exploitable issues:
+//   (A) Account-lockout DoS — any IP could lock an account by exhausting the global
+//       key; the legitimate user's correct password was then refused for 15 min.
+//   (B) Username enumeration — after locking "u:user", a fresh IP got HTTP 429
+//       (account exists) vs HTTP 401 (account doesn't exist), leaking a valid
+//       username list with only 9 attempts each.
+// Removing the global key fixes both:
+//   (A) Each (IP, username) pair is independent — a rogue IP can only lock itself out.
+//   (B) Another IP always goes through the normal auth path and sees the same HTTP 401
+//       regardless of whether that username exists, so enumeration via lockout diff
+//       is impossible.
+// Progressive delay (200 ms × fail count, capped at 3 s) added after 3 failures to
+// slow online guessing without hard-locking legitimate users from their own IP.
 const _loginFails = new Map();   // key -> { fails, first, lockedUntil }
 const LOGIN_MAX_FAILS = 8, LOGIN_WINDOW_MS = 15 * 60 * 1000, LOGIN_LOCK_MS = 15 * 60 * 1000;
+const LOGIN_DELAY_AFTER = 3, LOGIN_DELAY_MS_PER_FAIL = 200, LOGIN_DELAY_MAX_MS = 3000;
 function loginLockSeconds(key) { const r = _loginFails.get(key); return (r && r.lockedUntil && r.lockedUntil > Date.now()) ? Math.ceil((r.lockedUntil - Date.now()) / 1000) : 0; }
+function loginDelayMs(key) { const r = _loginFails.get(key); if (!r || r.lockedUntil) return 0; return r.fails >= LOGIN_DELAY_AFTER ? Math.min(r.fails * LOGIN_DELAY_MS_PER_FAIL, LOGIN_DELAY_MAX_MS) : 0; }
 function recordLoginFail(key) { const now = Date.now(); let r = _loginFails.get(key); if (!r || now - r.first > LOGIN_WINDOW_MS) r = { fails: 0, first: now }; r.fails++; if (r.fails >= LOGIN_MAX_FAILS) r.lockedUntil = now + LOGIN_LOCK_MS; _loginFails.set(key, r); }
 function clearLoginFails(key) { _loginFails.delete(key); }
 
@@ -48,20 +58,21 @@ module.exports = (db) => {
     // rather than 401 (silent invalid creds).
     if (!lookup)   return res.status(400).json({ error: 'username cannot be blank' });
     if (!String(password).length) return res.status(400).json({ error: 'password cannot be blank' });
-    // v0.65.1 (F-L3) — throttle brute-force / credential-stuffing per username + IP.
-    // v0.65.2 — second key is "ipu:IP:username" (not "ip:IP") so a lockout on one
-    // account never bleeds over to other users sharing the same IP address.
+    // v0.90 — IP+username key only; see throttle comment above.
     const ip = req.ip || req.socket?.remoteAddress || 'unknown';
-    const lockKeys = [`u:${lookup.toLowerCase()}`, `ipu:${ip}:${lookup.toLowerCase()}`];
-    const lockedFor = lockKeys.map(loginLockSeconds).reduce((a, b) => Math.max(a, b), 0);
+    const ipuKey = `ipu:${ip}:${lookup.toLowerCase()}`;
+    const lockedFor = loginLockSeconds(ipuKey);
     if (lockedFor > 0) { res.set('Retry-After', String(lockedFor)); return res.status(429).json({ error: `too many attempts — try again in ${Math.ceil(lockedFor / 60)} min` }); }
+    // Progressive delay after repeated failures (only affects the attacker's own IP).
+    const delay = loginDelayMs(ipuKey);
+    if (delay > 0) await new Promise(r => setTimeout(r, delay));
     const u = db.prepare(`SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE`)
                 .get(lookup, lookup);
-    if (!u) { lockKeys.forEach(recordLoginFail); return res.status(401).json({ error: 'invalid username or password' }); }
+    if (!u) { recordLoginFail(ipuKey); return res.status(401).json({ error: 'invalid username or password' }); }
     if (u.status === 'disabled') return res.status(403).json({ error: 'account disabled — contact your administrator' });
     if (!u.password_hash) return res.status(401).json({ error: 'no password set on this account — ask an administrator to issue one' });
-    if (!(await verifyPassword(password, u.password_hash))) { lockKeys.forEach(recordLoginFail); return res.status(401).json({ error: 'invalid username or password' }); }
-    lockKeys.forEach(clearLoginFails);
+    if (!(await verifyPassword(password, u.password_hash))) { recordLoginFail(ipuKey); return res.status(401).json({ error: 'invalid username or password' }); }
+    clearLoginFails(ipuKey);
 
     const session = createSession(db, u.id, req.header('user-agent'));
     db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(new Date().toISOString(), u.id);
