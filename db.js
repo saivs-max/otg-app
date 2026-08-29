@@ -97,6 +97,9 @@ function ensureSchema(db) {
   migrateAddColumn(db, 'invoices', 'expensify_report_url', 'TEXT');
   migrateAddColumn(db, 'invoices', 'expensify_sent_at',    'TEXT');
   migrateAddColumn(db, 'invoices', 'expensify_sent_by',    'INTEGER');
+  // v0.97 — track last-modified time on invoices so the tech resubmit guard
+  // can detect content changes since the last AP send.
+  migrateAddColumn(db, 'invoices', 'updated_at', 'TEXT');
   // v0.23 — custom_rules CHECK constraint needs the new max_hours_per_10_carts
   // rule_type. SQLite doesn't support ALTER TABLE ... DROP CONSTRAINT, so we
   // detect the old constraint by trying to insert a sentinel value; if the

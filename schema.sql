@@ -107,7 +107,8 @@ CREATE TABLE IF NOT EXISTS invoices (
   extracted_text    TEXT,
   extracted_summary TEXT,
   extracted_at      TEXT,
-  created_at        TEXT    DEFAULT CURRENT_TIMESTAMP
+  created_at        TEXT    DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TEXT    DEFAULT CURRENT_TIMESTAMP   -- v0.97 — touched on any content change; drives resubmit detection
 );
 
 -- Ops Manager ↔ Technician team membership. A tech can belong to multiple

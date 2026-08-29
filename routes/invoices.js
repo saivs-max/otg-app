@@ -459,7 +459,9 @@ module.exports = (db) => {
     // total, which then made vendor-submit falsely reject "total required" and
     // silently corrupted already-approved vendor totals. (v0.72.1 bugfix)
     if (inv.invoice_type !== 'vendor') {
-      db.prepare("UPDATE invoices SET total = ? WHERE id = ?").run(+total.toFixed(2), invoiceId);
+      // v0.97 — also touch updated_at so the resubmit guard can detect content changes
+      db.prepare("UPDATE invoices SET total = ?, updated_at = ? WHERE id = ?")
+        .run(+total.toFixed(2), new Date().toISOString(), invoiceId);
     }
 
     // Attachments linked to this invoice or any of its expenses / time_entries / WOs
@@ -1678,24 +1680,35 @@ module.exports = (db) => {
     if (!perm.ok) return res.status(perm.status || 403).json({ error: perm.error });
     const inv = perm.inv;
 
-    // v0.89 (security — TC-SEC-001) — send-to-AP is MANAGER-ONLY.
-    // canActOnInvoice allows the invoice owner (technician) through, but a tech
-    // must never be able to self-submit to AP regardless of approval state.
-    // Segregation of duties: the person being paid cannot also authorize payment.
+    // v0.97 — role-aware send-to-AP.
+    // Techs can send their OWN invoice directly from draft (or any approved state).
+    // Managers still require approval before sending (preserves existing workflow).
     const me2 = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-    if (!me2 || me2.role === 'technician') {
-      return res.status(403).json({ error: 'only managers can send invoices to AP' });
-    }
+    const isTechOwner = me2?.role === 'technician' && inv.user_id === userId;
 
-    // v0.90 — approved_ops is sufficient to send to AP; approved_sr is also
-    // accepted (escalated path). Sr Mgr countersign is optional, not required.
-    // TC-SEC-001 segregation-of-duties is still enforced: tech can't self-submit
-    // (blocked above) and ops_by must be set (no ghost approvals).
-    if (!['approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'].includes(inv.status)) {
-      return res.status(409).json({ error: `invoice must be approved before sending to AP (current: ${inv.status})` });
-    }
-    if (!inv.approved_ops_by) {
-      return res.status(409).json({ error: 'Ops Manager approval is missing — invoice must be approved by an Ops Manager before sending to AP' });
+    if (isTechOwner) {
+      // Tech path: allowed from draft or any approved/sent state.
+      const techAllowed = ['draft', 'approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'];
+      if (!techAllowed.includes(inv.status)) {
+        return res.status(409).json({ error: `invoice cannot be sent in its current state (${inv.status})` });
+      }
+      // Duplicate guard: already sent with no changes → block.
+      // updated_at is reset to sent_to_ap_at on each send, so if they're equal
+      // (or updated_at is missing on older rows) nothing has changed since last send.
+      if (inv.status === 'sent_ap') {
+        const changedSinceSend = inv.updated_at && inv.sent_to_ap_at && inv.updated_at > inv.sent_to_ap_at;
+        if (!changedSinceSend) {
+          return res.status(409).json({ error: 'invoice already sent to AP with no changes — edit the invoice first or contact your manager' });
+        }
+      }
+    } else {
+      // Manager path (v0.90 / TC-SEC-001): must be approved, ops_by must be set.
+      if (!['approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'].includes(inv.status)) {
+        return res.status(409).json({ error: `invoice must be approved before sending to AP (current: ${inv.status})` });
+      }
+      if (!inv.approved_ops_by) {
+        return res.status(409).json({ error: 'Ops Manager approval is missing — invoice must be approved by an Ops Manager before sending to AP' });
+      }
     }
 
     const me = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(userId);
@@ -1753,13 +1766,18 @@ module.exports = (db) => {
     const notifStatus = mailResult.sent ? 'sent' : (mailResult.error ? 'failed' : 'logged');
     db.prepare("UPDATE notifications SET status = ? WHERE id = ?").run(notifStatus, notifId);
 
-    // Transition status
+    // Transition status.
+    // v0.97 — also set submitted_at (if not already set, for audit trail on the tech
+    // direct-send path) and reset updated_at = sent_to_ap_at so the resubmit guard
+    // knows the invoice is current as of this send.
     const now = new Date().toISOString();
     db.prepare(`
       UPDATE invoices
-      SET status = 'sent_ap', sent_to_ap_at = ?, sent_to_ap_by = ?, ap_email_to = ?
+      SET status = 'sent_ap', sent_to_ap_at = ?, sent_to_ap_by = ?, ap_email_to = ?,
+          submitted_at = COALESCE(submitted_at, ?),
+          updated_at   = ?
       WHERE id = ?
-    `).run(now, userId, apEmail, id);
+    `).run(now, userId, apEmail, now, now, id);
 
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: 'send_to_ap',
                    details: { ap_email: apEmail, attachment_id: attachmentId, pdf_bytes: pdfBuf.length,
@@ -1793,6 +1811,17 @@ module.exports = (db) => {
     const approvals = buildApprovalAuditTrail(db, inv);
     const subject = `[AP] Invoice ${inv.invoice_number} — ${tech?.name || 'tech'} — $${inv.total.toFixed(2)}`;
     const body = renderEmailBody({ invoice: computed.invoice, tech, sender: me, approvals });
+    // v0.97 — tech owners can send from draft directly; also detect resubmit.
+    const meRole = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+    const isTechOwner = meRole?.role === 'technician' && inv.user_id === userId;
+    const approvedStates = ['approved_ops', 'approved_sr', 'queued_ap'];
+    const canSend = approvedStates.includes(inv.status)
+      || (isTechOwner && inv.status === 'draft')
+      || (inv.status === 'sent_ap' && isTechOwner && inv.updated_at && inv.sent_to_ap_at && inv.updated_at > inv.sent_to_ap_at)
+      || (inv.status === 'sent_ap' && !isTechOwner); // managers can always resend
+    const isResubmit = inv.status === 'sent_ap'
+      && inv.updated_at && inv.sent_to_ap_at
+      && inv.updated_at > inv.sent_to_ap_at;
     res.json({
       recipient: apEmail,
       sender_name:  me?.name,
@@ -1803,8 +1832,8 @@ module.exports = (db) => {
       pdf_filename: `${inv.invoice_number || `invoice-${id}`}.pdf`,
       pdf_url: `/api/invoices/${id}/pdf`,
       already_sent: !!inv.sent_to_ap_at,
-      // Tell the UI whether this invoice is in a state that allows sending
-      can_send: ['approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'].includes(inv.status), // v0.90 — approved_ops sufficient; sent_ap allows resend
+      can_send: canSend,
+      is_resubmit: isResubmit,
       current_status: inv.status,
     });
   });
