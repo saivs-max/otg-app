@@ -611,7 +611,7 @@ module.exports = (db) => {
       meta: {
         period, period_label: periodLabel, period_start: periodStart,
         scope: me.role === 'ops_manager' ? 'team' : 'all',
-        scope_size: scopeIds ? scopeIds.length : null,
+        scope_size: availableTechs.length,  // v0.92 — scopeIds is always null (full-org view); count techs from availableTechs to avoid rendering 'null'
         tech_filter:      techFilter,
         store_filter:     storeFilter,
         work_type_filter: wtFilter,
