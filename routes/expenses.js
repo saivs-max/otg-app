@@ -297,6 +297,19 @@ module.exports = (db) => {
     subcategory  = subcategory  ?? e.subcategory;
     expense_date = expense_date ?? e.expense_date;
     description  = description  ?? e.description;
+    // v0.94 — expense_date must remain within the invoice's billing period once
+    // one is attached. Editing outside the period silently misplaces the line
+    // item on a period it doesn't belong to.
+    if (e.invoice_id && expense_date !== e.expense_date) {
+      const invPeriod = db.prepare(
+        "SELECT period_start, period_end FROM invoices WHERE id = ?"
+      ).get(e.invoice_id);
+      if (invPeriod && (expense_date < invPeriod.period_start || expense_date > invPeriod.period_end)) {
+        return res.status(400).json({
+          error: `expense_date ${expense_date} is outside the invoice billing period (${invPeriod.period_start} – ${invPeriod.period_end})`
+        });
+      }
+    }
     // v0.86 — allow reassigning an expense to a different work order only when
     // no invoice is attached yet (the invoice-attached guard above handles the
     // locked case).
@@ -342,6 +355,11 @@ module.exports = (db) => {
       if (!isFinite(amount) || amount < 0) return res.status(400).json({ error: 'amount must be a positive number' });
       quantity = quantity != null ? Number(quantity) : null;
       rate = rate != null ? Number(rate) : null;
+    }
+    // v0.94 — unified hard ceiling on edits (mirrors the POST path check).
+    // Covers the else branch above and the mileage/labor/drive computed amounts.
+    if (!isFinite(amount) || amount > MAX_EXPENSE_AMOUNT) {
+      return res.status(400).json({ error: `amount exceeds the per-expense maximum of $${MAX_EXPENSE_AMOUNT.toLocaleString()}` });
     }
     {
       const POL = getPolicy(db);
