@@ -221,9 +221,10 @@ module.exports = (db) => {
 
   // ===== Policy engine (manager-editable) =====
   // GET — returns the effective policy values (defaults + overrides).
+  // v0.75.1 — BUG: GET was unguarded; techs could read hourly rates + AP email.
+  //           Gate to manager roles same as PUT.
   router.get('/policy', (req, res) => {
-    const userId = Number(req.header('x-user-id'));
-    if (!userId) return res.status(401).json({ error: 'no user selected' });
+    if (!requireManager(req, res)) return;
     const { getPolicy } = require('../db');
     const pol = getPolicy(db);
     // Also tell the UI which values are explicitly overridden vs default.
