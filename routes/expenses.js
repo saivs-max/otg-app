@@ -304,7 +304,12 @@ module.exports = (db) => {
       const invPeriod = db.prepare(
         "SELECT period_start, period_end FROM invoices WHERE id = ?"
       ).get(e.invoice_id);
-      if (invPeriod && (expense_date < invPeriod.period_start || expense_date > invPeriod.period_end)) {
+      // v0.94 — orphaned invoice_id (FK present but record gone): block date
+      // change rather than silently bypassing the period guard.
+      if (!invPeriod) {
+        return res.status(409).json({ error: 'Cannot change expense_date: invoice record not found.' });
+      }
+      if (expense_date < invPeriod.period_start || expense_date > invPeriod.period_end) {
         return res.status(400).json({
           error: `expense_date ${expense_date} is outside the invoice billing period (${invPeriod.period_start} – ${invPeriod.period_end})`
         });
@@ -360,6 +365,16 @@ module.exports = (db) => {
     // Covers the else branch above and the mileage/labor/drive computed amounts.
     if (!isFinite(amount) || amount > MAX_EXPENSE_AMOUNT) {
       return res.status(400).json({ error: `amount exceeds the per-expense maximum of $${MAX_EXPENSE_AMOUNT.toLocaleString()}` });
+    }
+    // v0.94 — guard against implicit amount drift on computed categories
+    // (mileage/labor/drive): if the policy rate changed since the original entry,
+    // a non-financial-edit actor (e.g. ops_manager editing description only)
+    // would silently re-price the line. Block any net amount change for
+    // actors who can't touch financial fields.
+    if (!canEditFinancial && amount !== e.amount) {
+      return res.status(403).json({
+        error: 'ops_manager may not modify financial fields: amount (drift via rate recomputation)'
+      });
     }
     {
       const POL = getPolicy(db);
