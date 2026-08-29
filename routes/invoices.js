@@ -632,7 +632,7 @@ module.exports = (db) => {
     const r = db.prepare(`
       INSERT INTO work_orders
         (external_id, source_system, source_ticket_id, work_type, store_name, cart_count, status, assigned_user_id)
-      VALUES (?, ?, ?, 'maintenance', '(pulled from invoice — refine details)', 1, 'in_progress', ?)
+      VALUES (?, ?, ?, 'maintenance', NULL, 1, 'in_progress', ?)
     `).run(`${src}-MNT-${ticket_id}`, source_system, ticket_id, inv.user_id);
     const wo = db.prepare("SELECT * FROM work_orders WHERE id = ?").get(r.lastInsertRowid);
     logAudit(db, { entity_type: 'work_orders', entity_id: wo.id, user_id: userId,
@@ -1339,7 +1339,7 @@ module.exports = (db) => {
     const r = db.prepare(`
       INSERT INTO work_orders
         (external_id, source_system, source_ticket_id, work_type, store_name, cart_count, status, assigned_user_id)
-      VALUES (?, 'maintainx', ?, 'maintenance', '(added via week-supplement request — refine details)', 1, 'in_progress', ?)
+      VALUES (?, 'maintainx', ?, 'maintenance', NULL, 1, 'in_progress', ?)
     `).run(external_id, ticketDigits, techUserId);
     const created = db.prepare("SELECT * FROM work_orders WHERE id = ?").get(r.lastInsertRowid);
     logAudit(db, { entity_type: 'work_orders', entity_id: created.id, user_id: actorUserId,
