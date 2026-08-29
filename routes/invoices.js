@@ -26,10 +26,17 @@ module.exports = (db) => {
   function stripFlagsForTech(computed, userId) {
     const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
     if (me && (me.role === 'ops_manager' || me.role === 'sr_manager' || me.role === 'pm')) return computed;
+    // v0.97 — techs NEVER see policy violations. Strip line-level flags AND zero
+    // the summary flag_count / rule details, so no tech-facing surface (the
+    // "needs justification" alert, the top-of-page violation banner, or the
+    // submit justification sheet) can render. Flags stay fully computed and are
+    // enforced for MANAGERS at the Ops Mgr approval queue — nothing bypasses audit.
     if (computed && Array.isArray(computed.lines)) for (const l of computed.lines) l.flags = [];
-    // v0.88 — preserve flag_count so the frontend can show the justification
-    // field and block submit; line-level details stay stripped (tech doesn't
-    // see which rules fired, only that a note is required).
+    if (computed && computed.summary) {
+      computed.summary.flag_count = 0;
+      if ('flag_rules'   in computed.summary) computed.summary.flag_rules = [];
+      if ('flag_preview' in computed.summary) computed.summary.flag_preview = [];
+    }
     return computed;
   }
 
@@ -1254,9 +1261,11 @@ module.exports = (db) => {
     // shown to managers at approval, where they're reviewed and enforced.
     const submitter = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
     const submitterIsManager = !!submitter && ['ops_manager','sr_manager','pm'].includes(submitter.role);
-    // v0.88 — block-severity hard stop is manager-only (techs can't see rule
-    // details), but the justification-note gate now applies to everyone so
-    // flagged invoices can never bypass audit regardless of submitter role.
+    // v0.97 — ALL policy enforcement is manager-only. A field tech never sees a
+    // violation and is never blocked or asked to justify at submit; they submit
+    // freely and the invoice routes to the Ops Mgr, who reviews every flag at the
+    // approval queue. The block-severity hard stop AND the justification-note gate
+    // therefore apply only when a MANAGER submits (e.g. on a tech's behalf).
     if (submitterIsManager) {
       const blockingLines = computed.lines.filter(l => (l.flags || []).some(f => f.severity === 'block'));
       if (blockingLines.length) {
@@ -1265,12 +1274,12 @@ module.exports = (db) => {
           blocked_lines: blockingLines.map(l => ({ external_id: l.external_id, flags: l.flags.filter(f => f.severity === 'block') })),
         });
       }
-    }
-    if (computed.summary.flag_count > 0 && !(req.body.notes || '').trim()) {
-      return res.status(400).json({
-        error: 'Justification note is required before submitting this invoice.',
-        flagged_lines: computed.lines.filter(l => l.flags.length).map(l => ({ external_id: l.external_id, flags: l.flags })),
-      });
+      if (computed.summary.flag_count > 0 && !(req.body.notes || '').trim()) {
+        return res.status(400).json({
+          error: 'Justification note is required before submitting this invoice.',
+          flagged_lines: computed.lines.filter(l => l.flags.length).map(l => ({ external_id: l.external_id, flags: l.flags })),
+        });
+      }
     }
     // v0.44 — BUG-006 fix: race-safe transition. WHERE status = 'draft'
     // gates the update; changes() === 0 means another caller flipped it.
