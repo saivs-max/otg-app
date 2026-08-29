@@ -42,7 +42,7 @@ app.use((req, res, next) => {
     // App shell — allow short caching, but require revalidation so updates ship.
     res.set('Content-Security-Policy',
       "default-src 'self'; " +
-      "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdnjs.cloudflare.com; " +
+      "script-src 'self' https://unpkg.com https://cdnjs.cloudflare.com; " + // v0.87 — removed 'unsafe-inline' (never needed; closes XSS vector)
       "style-src 'self' 'unsafe-inline' https://unpkg.com; " +
       "img-src 'self' data: blob: https://*.tile.openstreetmap.org; " +
       "connect-src 'self'; " +
