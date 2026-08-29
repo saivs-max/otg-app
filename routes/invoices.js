@@ -1691,7 +1691,7 @@ module.exports = (db) => {
     // accepted (escalated path). Sr Mgr countersign is optional, not required.
     // TC-SEC-001 segregation-of-duties is still enforced: tech can't self-submit
     // (blocked above) and ops_by must be set (no ghost approvals).
-    if (!['approved_ops', 'approved_sr', 'queued_ap'].includes(inv.status)) {
+    if (!['approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'].includes(inv.status)) {
       return res.status(409).json({ error: `invoice must be approved before sending to AP (current: ${inv.status})` });
     }
     if (!inv.approved_ops_by) {
@@ -1804,7 +1804,7 @@ module.exports = (db) => {
       pdf_url: `/api/invoices/${id}/pdf`,
       already_sent: !!inv.sent_to_ap_at,
       // Tell the UI whether this invoice is in a state that allows sending
-      can_send: inv.status === 'approved_sr', // v0.87 — send-to-AP requires approved_sr; approved_ops alone is insufficient
+      can_send: ['approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'].includes(inv.status), // v0.90 — approved_ops sufficient; sent_ap allows resend
       current_status: inv.status,
     });
   });
