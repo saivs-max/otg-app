@@ -214,6 +214,14 @@ module.exports = (db) => {
     const u = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
     if (!u) return res.status(404).json({ error: 'user not found' });
     const { hourly_rate, home_address, home_phone, email, invoice_email } = req.body;
+    // v0.97 — technicians may only update home_address and home_phone via PATCH /api/me.
+    // hourly_rate, email, and invoice_email are privileged fields: non-technician roles
+    // (ops_manager, sr_manager, pm) may still update them here; technicians must go
+    // through /api/admin/users/:id (managed by their ops_manager).
+    const isTech = u.role === 'technician';
+    if (isTech && (hourly_rate != null || email !== undefined || invoice_email !== undefined)) {
+      return res.status(403).json({ error: 'technicians cannot update hourly_rate, email, or invoice_email via this endpoint' });
+    }
     // v0.89 — allow self-service email update with format + uniqueness validation.
     if (email !== undefined) {
       const valErr = validateUserFields({ email });
