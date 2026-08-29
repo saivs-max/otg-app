@@ -2320,7 +2320,11 @@ async function renderInvoice(root) {
   // working without duplicating the renderer.
   try {
     const r = await api('/invoices/current');
-    return renderInvoiceDetail(root, r.invoice.id);
+    // v0.95 — await so async errors from renderInvoiceDetail are caught by this
+    // try/catch; without await a rejection is unhandled and the page stays stuck
+    // at "Loading…" with no error message (same fix applied to the goto dispatcher
+    // in v0.87.1 for the invDetail view path).
+    return await renderInvoiceDetail(root, r.invoice.id);
   } catch (e) {
     root.innerHTML = `
       <div class="empty"><div class="big">📄</div>Couldn't load this week's invoice.<br/>${escapeHTML(e.message)}</div>
@@ -8673,11 +8677,12 @@ async function renderDashboardOverview(root) {
       ? (() => {
           // v0.94 — forward store + tech filter so CC tile responds to dashboard filters.
           // work_type is intentionally omitted (WO link is nullable on CC expenses).
-          const ccQs = new URLSearchParams();
+          // v0.95 — pass the selected dashboard period so the Corp Card widget
+          // shows the same time window as all other KPI tiles (not hardcoded MTD).
+          const ccQs = new URLSearchParams({ period });
           if (storeFilter) ccQs.set('store', storeFilter);
           if (techFilter)  ccQs.set('tech',  techFilter);
-          const ccQsStr = ccQs.toString();
-          return api(`/corp-card/summary${ccQsStr ? '?' + ccQsStr : ''}`).catch(() => null);
+          return api(`/corp-card/summary?${ccQs.toString()}`).catch(() => null);
         })()
       : Promise.resolve(null),
   ]);
@@ -8760,20 +8765,21 @@ async function renderDashboardOverview(root) {
     ${renderKpiTiles(r.summary)}
 
     ${ccSummary ? (() => {
-      // v0.60 — Corporate-card spend widget. Shows MTD/YTD/all-time totals
-      // and the top two categories, with a link to the full Corp Card tab.
+      // v0.60 — Corporate-card spend widget. Shows spend for the selected
+      // dashboard period (not hardcoded MTD) plus YTD/all-time as reference.
+      // v0.95 — period-aware: label and total now follow the dashboard filter.
       // Lives separately from tech invoice totals — never mixed in.
       const top = (ccSummary.by_category || []).slice(0, 3);
-      const mtdLabel = ccSummary.period?.label || '';
+      const ccPeriodLabel = ccSummary.period?.label || PERIODS.find(([k]) => k === period)?.[1] || 'MTD';
       return `
       <div class="card cc-widget" style="margin-top: 14px; padding: 14px 16px;">
         <div class="flex between" style="align-items: flex-start; gap: 12px;">
           <div style="flex: 1; min-width: 0;">
             <div style="font-size: 11px; color: var(--ic-green-deep); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700;">
-              💳 Corporate-card spend · MTD
+              💳 Corporate-card spend · ${escapeHTML(ccPeriodLabel)}
             </div>
             <div style="font-size: 28px; font-weight: 800; color: var(--ic-green-deep); margin-top: 2px;">
-              ${fmt$(ccSummary.totals.mtd)}
+              ${fmt$(ccSummary.totals.in_period)}
             </div>
             <div class="meta" style="margin-top: 2px;">
               YTD ${fmt$(ccSummary.totals.ytd)} · All-time ${fmt$(ccSummary.totals.all_time)} (${ccSummary.totals.all_time_count} charges)
