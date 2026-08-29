@@ -308,8 +308,32 @@ module.exports = (db) => {
     const mtdStart = `${yyyy}-${mm}-01`;
     const ytdStart = `${yyyy}-01-01`;
 
-    const from  = req.query.from  || mtdStart;
-    const to    = req.query.to    || today;
+    // v0.95 — support the dashboard period= shorthand so the Corp Card widget
+    // stays in sync with the selected period filter (MTD/Last 30d/Last 90d/etc.).
+    // If period= is given it overrides from=/to= params; unknown keys fall back
+    // to the from=/to= params or the MTD default.
+    const CC_PERIOD_LABELS = {
+      mtd: 'Month-to-date', last_30: 'Last 30 days', last_90: 'Last 90 days',
+      qtd: 'Quarter-to-date', ytd: 'Year-to-date', all: 'All time',
+    };
+    const periodKey = req.query.period ? String(req.query.period) : null;
+    let from, to;
+    if (periodKey) {
+      to = today;
+      switch (periodKey) {
+        case 'mtd':     from = mtdStart; break;
+        case 'last_30': { const d = new Date(now); d.setUTCDate(d.getUTCDate() - 30); from = d.toISOString().slice(0, 10); break; }
+        case 'last_90': { const d = new Date(now); d.setUTCDate(d.getUTCDate() - 90); from = d.toISOString().slice(0, 10); break; }
+        case 'qtd':     { const q = Math.floor(now.getUTCMonth() / 3) * 3; from = `${yyyy}-${String(q + 1).padStart(2, '0')}-01`; break; }
+        case 'ytd':     from = ytdStart; break;
+        case 'all':     from = '1970-01-01'; break;
+        default:        from = req.query.from || mtdStart; to = req.query.to || today; break;
+      }
+    } else {
+      from = req.query.from || mtdStart;
+      to   = req.query.to   || today;
+    }
+    const periodLabel = periodKey ? (CC_PERIOD_LABELS[periodKey] || `${from} → ${to}`) : `${from} → ${to}`;
     // v0.94 — optional store and tech filters forwarded from the dashboard.
     // work_type is NOT supported (corp_card_expenses.work_order_id is nullable
     // so filtering by work_type would silently drop unlinked charges).
@@ -373,7 +397,7 @@ module.exports = (db) => {
     `).all(...fp);
 
     res.json({
-      period: { from, to, label: `${from} → ${to}` },
+      period: { from, to, label: periodLabel },
       totals: {
         all_time:        +allTime.total.toFixed(2),
         all_time_count:  allTime.n,
