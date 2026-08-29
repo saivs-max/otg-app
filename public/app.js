@@ -11437,14 +11437,16 @@ async function renderInvoiceDetail(root, invoiceId) {
   // gets the "Send to AP" action only after Ops approval (see the send banner).
   $('#submitDraftBtn')?.addEventListener('click', async () => {
     const proxy = STATE.onBehalfOf && STATE.onBehalfOf === invoice.user_id;
-    const flags = (lines || []).flatMap(l => (l.flags || []).map(f => ({ ...f, wo: l.external_id, store: l.store_name })));
-    // v0.88 — for techs, line-level flags are stripped server-side but
-    // summary.flag_count is preserved; use it as fallback so the
-    // justification sheet still fires even when flags[] is empty.
-    const rawFlagCount = summary?.flag_count || 0;
-    if (flags.length > 0 || rawFlagCount > 0) {
-      openFlagSubmitSheet({ invoice, flags, flagCount: rawFlagCount || flags.length, proxy });
-      return;
+    // v0.97 — a field tech NEVER sees policy violations. The justification sheet
+    // is shown only when a MANAGER submits on a tech's behalf (proxy); a plain
+    // tech submits directly. (Server also zeroes flag_count for techs.)
+    if (proxy) {
+      const flags = (lines || []).flatMap(l => (l.flags || []).map(f => ({ ...f, wo: l.external_id, store: l.store_name })));
+      const rawFlagCount = summary?.flag_count || 0;
+      if (flags.length > 0 || rawFlagCount > 0) {
+        openFlagSubmitSheet({ invoice, flags, flagCount: rawFlagCount || flags.length, proxy });
+        return;
+      }
     }
     const promptText = proxy
       ? `Submit invoice on behalf of ${STATE.onBehalfOfName || 'tech'}?\n\nAdd an optional note:`
