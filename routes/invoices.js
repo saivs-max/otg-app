@@ -536,7 +536,9 @@ module.exports = (db) => {
         tools: +expenses.filter(e => e.category==='other' && e.subcategory==='Tools').reduce((a,e) => a + e.amount, 0).toFixed(2),
         other: +expenses.filter(e => e.category==='vendor' || (e.category==='other' && !['Meal','Tools'].includes(e.subcategory))).reduce((a,e) => a + e.amount, 0).toFixed(2),
         total: +total.toFixed(2),
-        flag_count: Object.values(byWO).reduce((a,w) => a + w.flags.length, 0),
+        flag_count:   Object.values(byWO).reduce((a,w) => a + w.flags.length, 0),
+        flag_rules:   [...new Set(Object.values(byWO).flatMap(w => w.flags.map(f => f.rule)))],
+        flag_preview: Object.values(byWO).flatMap(w => w.flags)[0]?.message ?? null,
         days_worked: byDateArr.length,
       },
     };

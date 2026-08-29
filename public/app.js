@@ -3487,7 +3487,11 @@ function renderInvoicePreviewPanel(p) {
       ${p.mileage > 0 ? row('Mileage', fmt$(p.mileage)) : ''}
       ${p.other > 0.005 ? row('Other expenses', fmt$(p.other)) : ''}
       ${row('Total', fmt$(p.total), true)}
-      ${p.flags > 0 ? `<div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:#fdecea;color:#c0392b;font-size:12px;font-weight:600;">⚠ ${p.flags} policy flag${p.flags === 1 ? '' : 's'} on this invoice</div>` : ''}
+      ${p.flags > 0 ? `<div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:#fdecea;color:#c0392b;font-size:12px;font-weight:600;">
+        ⚠ ${p.flags} policy flag${p.flags === 1 ? '' : 's'} on this invoice
+        ${p.flagRules?.length ? `<div style="font-weight:500;margin-top:4px;font-size:11px;">${p.flagRules.map(r => r.replace(/_/g,' ')).join(', ')}</div>` : ''}
+        ${p.flagPreview ? `<div style="font-weight:400;font-style:italic;margin-top:2px;font-size:11px;color:#a93226;">${escapeHTML(p.flagPreview)}</div>` : ''}
+      </div>` : ''}
       <div style="margin-top:10px;font-size:11px;color:var(--secondary-text);">Status: ${escapeHTML(labelForStatus(p.status))}</div>
     </div>`;
 }
@@ -11207,6 +11211,7 @@ async function renderInvoiceDetail(root, invoiceId) {
           ${renderInvoicePreviewPanel({
             total: grandTotal, labor: totalLabor, laborHours: summary.labor_hours || 0,
             mileage: totalMileage, other: totalOther, flags: summary.flag_count || 0,
+            flagRules: summary.flag_rules || [], flagPreview: summary.flag_preview || null,
             itemCount: (by_date || []).reduce((a, d) => a + (d.time_entries?.length || 0) + (d.drive_entries?.length || 0) + (d.expense_entries?.length || 0), 0),
             status: invoice.status,
           })}
