@@ -18,7 +18,8 @@ const router  = express.Router();
 // 'invoice_approved_for_ap') that predates this feature — surfacing them would
 // dump a backlog onto every tech's home screen. Extend this allowlist as more
 // notification kinds become banner-worthy.
-const BANNER_KINDS = ['invoice_rejected'];
+// v0.91 — added invoice_approved_for_ap: techs need to act (verify & send to AP).
+const BANNER_KINDS = ['invoice_rejected', 'invoice_approved_for_ap'];
 
 module.exports = (db) => {
   // Resolve the authenticated user. The auth middleware sets x-user-id from the

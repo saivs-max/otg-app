@@ -16,6 +16,7 @@ const express = require('express');
 const router  = express.Router();
 const { logAudit, sumHours, getPolicy } = require('../db');
 const rulesEvaluator = require('./rules');
+const { sendMail } = require('../lib/mailer');
 
 // v0.58 — Run the policy engine against every WO line on an invoice and
 // return the resulting flag count. Used to decorate queue rows so Ops Mgrs
@@ -83,15 +84,13 @@ function teamTechIds(db, managerUserId) {
     .all(managerUserId).map(r => r.tech_user_id);
 }
 
-// v0.67 — Ops approval is now the FINAL approval gate in the tech-labor flow.
+// v0.91 — Ops approval is now the FINAL approval gate in the tech-labor flow.
 // Once a tech-labor invoice clears approval (Ops approval in the normal path, or
 // a Sr Mgr countersign on an escalated invoice), the technician owns the last
-// step: verify the invoice and send it to Accounts Payable. We record that as a
-// notification row so it surfaces on the tech's Invoices screen and in the
-// (mocked) outbound-email log. We track the lifecycle only up to the AP
-// hand-off, not the downstream payment status. Best-effort: a notify failure
-// must never block the approval transaction.
-function notifyTechVerifyAndSend(db, { invoice, approverUserId }) {
+// step: verify the invoice and send it to Accounts Payable. We record an in-app
+// notification row AND send a real email so the tech is immediately informed.
+// Best-effort: a notify failure must never block the approval transaction.
+async function notifyTechVerifyAndSend(db, { invoice, approverUserId }) {
   try {
     const tech = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(invoice.user_id);
     if (!tech) return;
@@ -103,18 +102,22 @@ function notifyTechVerifyAndSend(db, { invoice, approverUserId }) {
       INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, status)
       VALUES ('invoice_approved_for_ap', ?, ?, ?, ?, ?, 'logged')
     `).run(invoice.id, approverUserId, tech.email || null, subject, body);
-    console.log(`🔔 [mock notify] To tech ${tech.email || tech.id} · ${subject}`);
+    if (tech.email) {
+      await sendMail({ to: tech.email, subject, text: body });
+    } else {
+      console.log(`🔔 [notify skipped — no email] tech id=${tech.id} · ${subject}`);
+    }
   } catch (e) {
     console.error('notifyTechVerifyAndSend failed:', e.message);
   }
 }
 
-// v0.71 — A rejected invoice silently reverted to draft, so the tech had no
+// v0.91 — A rejected invoice silently reverted to draft, so the tech had no
 // signal their work needs fixing. Record an in-app notification (kind
 // 'invoice_rejected') so it surfaces as a persistent banner on the tech's home
-// screen until they dismiss it. Best-effort: a notify failure must never block
-// the reject transaction.
-function notifyTechRejected(db, { invoice, rejectedByUserId, reason }) {
+// screen until they dismiss it, AND send a real email so the tech is immediately
+// informed. Best-effort: a notify failure must never block the reject transaction.
+async function notifyTechRejected(db, { invoice, rejectedByUserId, reason }) {
   try {
     const tech = db.prepare("SELECT id, name, email FROM users WHERE id = ?").get(invoice.user_id);
     if (!tech) return;
@@ -126,7 +129,11 @@ function notifyTechRejected(db, { invoice, rejectedByUserId, reason }) {
       INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, status)
       VALUES ('invoice_rejected', ?, ?, ?, ?, ?, 'logged')
     `).run(invoice.id, rejectedByUserId, tech.email || null, subject, body);
-    console.log(`🔔 [mock notify] To tech ${tech.email || tech.id} · ${subject}`);
+    if (tech.email) {
+      await sendMail({ to: tech.email, subject, text: body });
+    } else {
+      console.log(`🔔 [notify skipped — no email] tech id=${tech.id} · ${subject}`);
+    }
   } catch (e) {
     console.error('notifyTechRejected failed:', e.message);
   }
