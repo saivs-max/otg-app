@@ -1386,8 +1386,10 @@ function buildCostTrackerRows(db, req) {
     GROUP BY work_order_id
   `).all()) expenseByWo[r.wo] = (expenseByWo[r.wo] || 0) + r.amt;
 
-  // Which work orders have at least one line on an approved invoice? Only these
-  // (when also completed) contribute their computed actuals to the totals.
+  // Which work orders have at least one line on an approved invoice?
+  // v0.98 — WO completion status is irrelevant; invoice status is the sole gate.
+  // Any WO with an invoice in APPROVED (approved_ops/approved_sr/queued_ap/sent_ap)
+  // contributes its actuals to the totals.
   const approvedWoSet = new Set();
   for (const r of db.prepare(`
     SELECT DISTINCT work_order_id AS wo FROM time_entries
@@ -1439,11 +1441,11 @@ function buildCostTrackerRows(db, req) {
     const actualExpenses = hasExpenseOv ? +(+w.o_actual_expenses).toFixed(2) : computedExpenses;
     const tpCost         = has3pOv      ? +(+w.o_3p_cost).toFixed(2)         : 0;
 
-    // v0.67 — a row contributes to the totals only when COMPLETED + approved, or
-    // when a manager has typed an override. Otherwise it's surfaced as pending.
-    const isCompleted    = (w.status || 'open') === 'completed';
+    // v0.98 — invoice status is the sole gate for cost tracker totals.
+    // WO completion status is irrelevant — if the invoice is approved, it counts.
+    const isCompleted    = (w.status || 'open') === 'completed';  // still exposed for display
     const hasApprovedInv = approvedWoSet.has(w.wo_id);
-    const inTotals       = hasCostOverride || (isCompleted && hasApprovedInv);
+    const inTotals       = hasCostOverride || hasApprovedInv;
     const pendingApproval = !inTotals;
 
     // v0.62.3 — fall back to work_orders.assigned_user_id (and its name) when
