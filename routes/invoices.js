@@ -1804,7 +1804,7 @@ module.exports = (db) => {
       pdf_url: `/api/invoices/${id}/pdf`,
       already_sent: !!inv.sent_to_ap_at,
       // Tell the UI whether this invoice is in a state that allows sending
-      can_send: inv.status === 'approved_ops' || inv.status === 'approved_sr',
+      can_send: inv.status === 'approved_sr', // v0.87 — send-to-AP requires approved_sr; approved_ops alone is insufficient
       current_status: inv.status,
     });
   });
