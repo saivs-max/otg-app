@@ -2,6 +2,7 @@
 const express = require('express');
 const router  = express.Router();
 const { logAudit, sumHours, weekBounds } = require('../db');
+const { resolveProxy } = require('../lib/proxyAuth'); // v0.90
 const weekBoundsFor = (d) => weekBounds(new Date(d));
 
 // v0.87 — Normalize a client-supplied timestamp to an absolute instant. The app
@@ -78,18 +79,11 @@ module.exports = (db) => {
   router.get('/timeentries', (req, res) => {
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
-    // Honor x-on-behalf-of so a manager browsing a tech's invoice sees the
-    // tech's entries (used by the inline edit-time-entry sheet).
-    const onBehalf = Number(req.header('x-on-behalf-of'));
-    let effectiveUserId = userId;
-    if (onBehalf && onBehalf !== userId) {
-      const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-      const allowed = me && (
-        me.role === 'sr_manager' || me.role === 'pm' ||
-        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, onBehalf))
-      );
-      if (allowed) effectiveUserId = onBehalf;
-    }
+    // v0.90 — proxy validation (hard-reject on invalid; was previously a silent
+    // fallback that returned 200 for unauthorized proxy attempts).
+    const proxy = resolveProxy(db, userId, req.header('x-on-behalf-of'));
+    if (!proxy.ok) return res.status(proxy.status).json({ error: proxy.error });
+    const effectiveUserId = proxy.effectiveUserId;
     const rows = db.prepare(`
       SELECT t.*, w.external_id, w.source_system, w.work_type, w.store_name, w.cart_count
       FROM time_entries t JOIN work_orders w ON w.id = t.work_order_id
@@ -140,18 +134,10 @@ module.exports = (db) => {
     const mode = req.body.mode === 'drive' ? 'drive' : 'work';
     if (!work_order_id) return res.status(400).json({ error: 'work_order_id required' });
 
-    // Manager-on-behalf-of-tech (for mgr-uploaded invoices)
-    const onBehalf = Number(req.header('x-on-behalf-of'));
-    let effectiveUserId = userId;
-    if (onBehalf && onBehalf !== userId) {
-      const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-      const allowed = me && (
-        me.role === 'sr_manager' || me.role === 'pm' ||
-        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, onBehalf))
-      );
-      if (!allowed) return res.status(403).json({ error: 'cannot create on behalf of this tech' });
-      effectiveUserId = onBehalf;
-    }
+    // v0.90 — proxy validation via shared helper (same rules as GET and expenses).
+    const proxy = resolveProxy(db, userId, req.header('x-on-behalf-of'));
+    if (!proxy.ok) return res.status(proxy.status).json({ error: proxy.error });
+    const effectiveUserId = proxy.effectiveUserId;
 
     const wo = db.prepare("SELECT id FROM work_orders WHERE id = ?").get(Number(work_order_id));
     if (!wo) return res.status(404).json({ error: 'work order not found' });

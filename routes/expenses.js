@@ -2,6 +2,7 @@
 const express = require('express');
 const router  = express.Router();
 const { POLICY, getPolicy, logAudit, weekBounds } = require('../db');
+const { resolveProxy } = require('../lib/proxyAuth'); // v0.90
 const weekBoundsFor = (d) => weekBounds(new Date(d));
 
 // v0.54 — 'labor' and 'drive' added so techs can log labor/drive as expenses
@@ -66,18 +67,11 @@ module.exports = (db) => {
     const start_location = cleanLoc(req.body.start_location);
     const stop_location  = cleanLoc(req.body.stop_location);
 
-    // Allow managers to create expenses on behalf of a team tech (for mgr-uploaded invoices).
-    // Header: x-on-behalf-of: <tech_user_id>
-    const onBehalf = Number(req.header('x-on-behalf-of'));
-    if (onBehalf && onBehalf !== userId) {
-      const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-      const allowed = me && (
-        me.role === 'sr_manager' || me.role === 'pm' ||
-        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, onBehalf))
-      );
-      if (!allowed) return res.status(403).json({ error: 'cannot create on behalf of this tech' });
-    }
-    const effectiveUserId = onBehalf || userId;
+    // v0.90 — proxy validation: requester must be a manager, target must be a
+    // technician (not another manager), and self-proxy is blocked.
+    const proxy = resolveProxy(db, userId, req.header('x-on-behalf-of'));
+    if (!proxy.ok) return res.status(proxy.status).json({ error: proxy.error });
+    const effectiveUserId = proxy.effectiveUserId;
 
     if (!work_order_id || !category || !expense_date) {
       return res.status(400).json({ error: 'work_order_id, category, expense_date are required' });
