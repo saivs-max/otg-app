@@ -616,6 +616,9 @@ module.exports = (db) => {
   });
 
   // DELETE /api/timeentries/:id  → only on draft-invoice entries (or unattached)
+  // v0.88 — ops_manager is intentionally excluded: only the owning tech, sr_manager,
+  // or pm may delete time entries.  Ops managers have read/approve authority but must
+  // never erase technician work records (data-integrity / audit trail).
   router.delete('/timeentries/:id', (req, res) => {
     const userId = Number(req.header('x-user-id'));
     if (!userId) return res.status(401).json({ error: 'no user selected' });
@@ -624,10 +627,7 @@ module.exports = (db) => {
     if (!e) return res.status(404).json({ error: 'not found' });
     if (e.user_id !== userId) {
       const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-      const allowed = me && (
-        me.role === 'sr_manager' || me.role === 'pm' ||
-        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, e.user_id))
-      );
+      const allowed = me && (me.role === 'sr_manager' || me.role === 'pm');
       if (!allowed) return res.status(403).json({ error: 'not yours' });
     }
     if (!e.clock_out) return res.status(409).json({ error: 'cannot delete a running timer — clock out first' });
