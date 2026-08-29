@@ -10678,7 +10678,7 @@ async function renderInvoiceDetail(root, invoiceId) {
       <button class="btn btn-primary btn-block" id="submitDraftBtn" style="margin: 14px 0 6px;">
         ${isManagerProxy
           ? `Submit invoice on behalf of ${escapeHTML(STATE.onBehalfOfName || 'tech')}`
-          : '📧 Send to AP'}
+          : 'Review &amp; submit this invoice'}
       </button>
       <div class="section-title" style="margin-top: 20px;">Invoice preview</div>
     ` : ''}
@@ -10724,6 +10724,7 @@ async function renderInvoiceDetail(root, invoiceId) {
          find it. The existing card lower on the page still renders for the
          workflow context. -->
     ${readyToSendToAp(invoice) && (
+        invoice.user_id === me.id ||
         ['sr_manager','pm'].includes(me.role) ||
         (me.role === 'ops_manager' && isManagerView)
       ) ? `
@@ -11262,6 +11263,7 @@ async function renderInvoiceDetail(root, invoiceId) {
     ` : ''}
 
     ${readyToSendToAp(invoice) && (
+        invoice.user_id === me.id ||
         ['sr_manager','pm'].includes(me.role) ||
         (me.role === 'ops_manager' && isManagerView)
       ) ? `
@@ -11426,21 +11428,15 @@ async function renderInvoiceDetail(root, invoiceId) {
       t.textContent = t.textContent.replace(open ? '▾' : '▸', open ? '▸' : '▾');
     }
   }));
-  // v0.97 — Techs send directly to AP from draft; manager proxy still uses the
-  // approval flow (submit → Ops Mgr queue). The api() helper attaches the
-  // x-on-behalf-of header automatically when STATE.onBehalfOf is set.
-  // v0.58 — policy flags still fire the justification sheet for proxy submits.
+  // Same submit flow for techs + manager proxy mode. The api() helper attaches
+  // the x-on-behalf-of header automatically when STATE.onBehalfOf is set.
+  // v0.58 — when the policy engine has fired any flags, show a confirmation
+  // sheet listing every violation BEFORE the tech can submit, so they can
+  // either fix it or knowingly justify it.
+  // v0.97 — draft submit routes to Ops Mgr review (NOT straight to AP). The tech
+  // gets the "Send to AP" action only after Ops approval (see the send banner).
   $('#submitDraftBtn')?.addEventListener('click', async () => {
     const proxy = STATE.onBehalfOf && STATE.onBehalfOf === invoice.user_id;
-
-    if (!proxy) {
-      // Tech self-submit: go straight to the AP send sheet (backend handles
-      // draft→sent_ap in one step; no manager approval step required).
-      openSendToApSheet(invoice);
-      return;
-    }
-
-    // Manager proxy path — unchanged: flag check → submit → approval queue.
     const flags = (lines || []).flatMap(l => (l.flags || []).map(f => ({ ...f, wo: l.external_id, store: l.store_name })));
     // v0.88 — for techs, line-level flags are stripped server-side but
     // summary.flag_count is preserved; use it as fallback so the
@@ -11450,12 +11446,16 @@ async function renderInvoiceDetail(root, invoiceId) {
       openFlagSubmitSheet({ invoice, flags, flagCount: rawFlagCount || flags.length, proxy });
       return;
     }
-    const note = prompt(`Submit invoice on behalf of ${STATE.onBehalfOfName || 'tech'}?\n\nAdd an optional note:`, '') ?? null;
+    const promptText = proxy
+      ? `Submit invoice on behalf of ${STATE.onBehalfOfName || 'tech'}?\n\nAdd an optional note:`
+      : `Submit invoice ${invoice.invoice_number} ($${invoice.total.toFixed(2)})?\n\nAdd an optional note:`;
+    const note = prompt(promptText, '') ?? null;
     if (note === null) return; // user cancelled
     try {
       await api(`/invoices/${invoice.id}/submit`, { method: 'POST', body: { notes: note || undefined } });
-      toast('Submitted ✓ — now in your approval queue', 'ok');
-      STATE.onBehalfOf = null; STATE.onBehalfOfName = null; goto('queue');
+      toast(proxy ? 'Submitted ✓ — now in your approval queue' : 'Submitted ✓ — now awaiting Ops Mgr review', 'ok');
+      if (proxy) { STATE.onBehalfOf = null; STATE.onBehalfOfName = null; goto('queue'); }
+      else        goto('mine');
     } catch (e) { toast(e.message, 'err'); }
   });
 

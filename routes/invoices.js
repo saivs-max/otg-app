@@ -1680,34 +1680,27 @@ module.exports = (db) => {
     if (!perm.ok) return res.status(perm.status || 403).json({ error: perm.error });
     const inv = perm.inv;
 
-    // v0.97 — role-aware send-to-AP.
-    // Techs can send their OWN invoice directly from draft (or any approved state).
-    // Managers still require approval before sending (preserves existing workflow).
+    // v0.97 — Send-to-AP is available to the invoice OWNER (technician) as well as
+    // managers, but ONLY AFTER Ops Manager approval — for everyone. This keeps the
+    // TC-SEC-001 intent (nothing reaches AP without a manager sign-off; the approval
+    // IS the authorization) while letting the tech perform the final hand-off once
+    // their invoice is approved. canActOnInvoice already restricts this to the owner
+    // tech / their Ops Mgr / Sr Mgr / PM, so no cross-tech sends are possible.
     const me2 = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
     const isTechOwner = me2?.role === 'technician' && inv.user_id === userId;
 
-    if (isTechOwner) {
-      // Tech path: allowed from draft or any approved/sent state.
-      const techAllowed = ['draft', 'approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'];
-      if (!techAllowed.includes(inv.status)) {
-        return res.status(409).json({ error: `invoice cannot be sent in its current state (${inv.status})` });
-      }
-      // Duplicate guard: already sent with no changes → block.
-      // updated_at is reset to sent_to_ap_at on each send, so if they're equal
-      // (or updated_at is missing on older rows) nothing has changed since last send.
-      if (inv.status === 'sent_ap') {
-        const changedSinceSend = inv.updated_at && inv.sent_to_ap_at && inv.updated_at > inv.sent_to_ap_at;
-        if (!changedSinceSend) {
-          return res.status(409).json({ error: 'invoice already sent to AP with no changes — edit the invoice first or contact your manager' });
-        }
-      }
-    } else {
-      // Manager path (v0.90 / TC-SEC-001): must be approved, ops_by must be set.
-      if (!['approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'].includes(inv.status)) {
-        return res.status(409).json({ error: `invoice must be approved before sending to AP (current: ${inv.status})` });
-      }
-      if (!inv.approved_ops_by) {
-        return res.status(409).json({ error: 'Ops Manager approval is missing — invoice must be approved by an Ops Manager before sending to AP' });
+    if (!['approved_ops', 'approved_sr', 'queued_ap', 'sent_ap'].includes(inv.status)) {
+      return res.status(409).json({ error: `invoice must be approved by an Ops Manager before sending to AP (current: ${inv.status})` });
+    }
+    if (!inv.approved_ops_by) {
+      return res.status(409).json({ error: 'Ops Manager approval is missing — invoice must be approved by an Ops Manager before sending to AP' });
+    }
+    // Duplicate guard: a tech re-sending an unchanged sent_ap invoice is blocked
+    // (they must edit it → Resubmit). Managers may re-send for operational reasons.
+    if (inv.status === 'sent_ap' && isTechOwner) {
+      const changedSinceSend = inv.updated_at && inv.sent_to_ap_at && inv.updated_at > inv.sent_to_ap_at;
+      if (!changedSinceSend) {
+        return res.status(409).json({ error: 'invoice already sent to AP with no changes — edit the invoice first to resubmit' });
       }
     }
 
@@ -1811,17 +1804,16 @@ module.exports = (db) => {
     const approvals = buildApprovalAuditTrail(db, inv);
     const subject = `[AP] Invoice ${inv.invoice_number} — ${tech?.name || 'tech'} — $${inv.total.toFixed(2)}`;
     const body = renderEmailBody({ invoice: computed.invoice, tech, sender: me, approvals });
-    // v0.97 — tech owners can send from draft directly; also detect resubmit.
+    // v0.97 — Send-to-AP requires Ops approval for everyone; the owner tech may
+    // perform the hand-off (not just managers). Detect resubmit (edited after send).
     const meRole = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
     const isTechOwner = meRole?.role === 'technician' && inv.user_id === userId;
     const approvedStates = ['approved_ops', 'approved_sr', 'queued_ap'];
-    const canSend = approvedStates.includes(inv.status)
-      || (isTechOwner && inv.status === 'draft')
-      || (inv.status === 'sent_ap' && isTechOwner && inv.updated_at && inv.sent_to_ap_at && inv.updated_at > inv.sent_to_ap_at)
-      || (inv.status === 'sent_ap' && !isTechOwner); // managers can always resend
     const isResubmit = inv.status === 'sent_ap'
       && inv.updated_at && inv.sent_to_ap_at
       && inv.updated_at > inv.sent_to_ap_at;
+    const canSend = approvedStates.includes(inv.status)
+      || (inv.status === 'sent_ap' && (!isTechOwner || isResubmit)); // mgr may resend; tech only if changed
     res.json({
       recipient: apEmail,
       sender_name:  me?.name,
