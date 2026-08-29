@@ -8,6 +8,7 @@ const { importExtractedSummary } = require('../lib/pdfImporter');
 const { extractVendorPdf }       = require('../lib/vendorPdfExtractor');
 const { validateInvoice }        = require('../lib/invoiceValidation');
 const { generateInvoicePdf } = require('../lib/invoicePdf');
+const { sendMail }           = require('../lib/mailer'); // v0.90
 
 // v0.88 (TC-NEG-063) — strip CR/LF and all ASCII control chars from
 // user-supplied filenames before storing (prevents header injection on download).
@@ -1730,14 +1731,27 @@ module.exports = (db) => {
     `).run(userId, inv.id, storageName, originalName, pdfBuf.length, 'Auto-generated for AP submission');
     const attachmentId = attRow.lastInsertRowid;
 
-    // Log the outbound email (real sending is mocked in this dev build)
+    // v0.90 — send the real email via SMTP (lib/mailer.js).
+    // Notification row is inserted as 'logged' first so the audit trail is
+    // always complete; status is updated to 'sent' or 'failed' after the attempt.
     const subject = `[AP] Invoice ${inv.invoice_number} — ${tech?.name || 'tech'} — $${inv.total.toFixed(2)}`;
     const body = renderEmailBody({ invoice: computed.invoice, tech, sender: me, approvals });
-    db.prepare(`
+    const notifRow = db.prepare(`
       INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, attachment_id, status)
       VALUES ('invoice_to_ap', ?, ?, ?, ?, ?, ?, 'logged')
     `).run(inv.id, userId, apEmail, subject, body, attachmentId);
-    console.log(`📧 [mock email] To: ${apEmail} · Subject: ${subject} · Attached: ${originalName} (${pdfBuf.length} bytes)`);
+    const notifId = notifRow.lastInsertRowid;
+
+    const mailResult = await sendMail({
+      to:               apEmail,
+      subject,
+      text:             body,
+      attachmentBuffer: pdfBuf,
+      attachmentName:   originalName,
+    });
+    // 'sent' = delivered, 'failed' = SMTP attempted but errored, 'logged' = no SMTP configured (dev)
+    const notifStatus = mailResult.sent ? 'sent' : (mailResult.error ? 'failed' : 'logged');
+    db.prepare("UPDATE notifications SET status = ? WHERE id = ?").run(notifStatus, notifId);
 
     // Transition status
     const now = new Date().toISOString();
@@ -1748,12 +1762,14 @@ module.exports = (db) => {
     `).run(now, userId, apEmail, id);
 
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: 'send_to_ap',
-                   details: { ap_email: apEmail, attachment_id: attachmentId, pdf_bytes: pdfBuf.length } });
+                   details: { ap_email: apEmail, attachment_id: attachmentId, pdf_bytes: pdfBuf.length,
+                              email_sent: mailResult.sent, email_error: mailResult.error || null } });
 
     res.json({
       ok: true,
       invoice: { ...inv, status: 'sent_ap', sent_to_ap_at: now, sent_to_ap_by: userId, ap_email_to: apEmail },
-      notification: { recipient: apEmail, subject, attachment_id: attachmentId },
+      notification: { recipient: apEmail, subject, attachment_id: attachmentId,
+                      email_sent: mailResult.sent, email_error: mailResult.error || null },
       pdf_url: `/api/invoices/${id}/pdf`,
     });
   });

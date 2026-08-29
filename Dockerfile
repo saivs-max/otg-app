@@ -7,6 +7,14 @@ FROM node:22-slim
 WORKDIR /app
 
 ENV NODE_ENV=production
+# v0.90 — SMTP for Send-to-AP email. Set these secrets via `fly secrets set`.
+# When SMTP_HOST is absent the app falls back to log-only mode (no real email).
+# ENV SMTP_HOST=
+# ENV SMTP_PORT=587
+# ENV SMTP_SECURE=false
+# ENV SMTP_USER=
+# ENV SMTP_PASS=
+# ENV SMTP_FROM=Bread App <bread@instacart.com>
 
 # v0.74 — OCR for image-only / scanned vendor invoices. `tesseract-ocr` does the
 # OCR and `poppler-utils` (pdftoppm) rasterizes PDF pages to images first. These
