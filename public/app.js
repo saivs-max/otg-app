@@ -1529,6 +1529,9 @@ async function renderWoAdd(root) {
         };
         if (r._stub) {
           toast('⚠ Filled with stub data — no API key configured. Save your MaintainX/Freshdesk key in Settings → Integrations.', 'err');
+        } else if (r._fromLocalDb) {
+          // v0.97 — MaintainX returned 403 (WO not assigned to this API key); fell back to local record.
+          toast('⚠ Filled from local record (MaintainX API denied access — WO may not be assigned to you yet). Verify fields before saving.', 'err');
         } else {
           toast(`Pulled from ${r.source_system} ✓`, 'ok');
         }

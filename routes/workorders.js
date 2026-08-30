@@ -14,29 +14,12 @@ const VALID_SOURCES = new Set(['maintainx','freshdesk']);
 // v0.62 — VALID_TYPES is now dynamic; resolved from the work_types table at
 // validation time so admin-added types pass.
 
-// v0.89 — roles allowed to create / look up WOs. Technicians cannot create WOs
-// (PRD §4.2: WOs originate from MaintainX sync or manager creation only).
-const MGR_ROLES = new Set(['ops_manager','sr_manager','pm']);
-
 // Default MaintainX Organization ID for the Instacart/Caper tenant.
 // Used when nothing is configured in Settings or env. Override per-deploy by
 // setting maintainx_organization_id in Settings or MAINTAINX_ORG_ID in .env.
 const DEFAULT_MX_ORG_ID = '477835';
 
 module.exports = (db) => {
-
-  // v0.89 — returns the user record if they hold a manager role, otherwise
-  // writes a 403 response and returns null (caller must `return` on null).
-  function requireManager(req, res) {
-    const userId = Number(req.header('x-user-id'));
-    if (!userId) { res.status(401).json({ error: 'no user selected' }); return null; }
-    const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-    if (!me || !MGR_ROLES.has(me.role)) {
-      res.status(403).json({ error: 'manager role required' });
-      return null;
-    }
-    return me;
-  }
 
   // GET /api/workorders
   // By default returns work orders assigned to the current user, excluding
@@ -177,9 +160,6 @@ module.exports = (db) => {
   // v0.3 stubs the actual API call — replace stubFetchTicket() with a real
   // fetch() to the source system once API keys are configured.
   router.post('/workorders/parse-url', async (req, res) => {
-    // v0.89 — only managers may look up tickets (they are the only ones who can
-    // subsequently create a WO from the result).
-    if (!requireManager(req, res)) return;
     const url = (req.body.url || '').trim();
     if (!url) return res.status(400).json({ error: 'url required' });
 
@@ -215,6 +195,7 @@ module.exports = (db) => {
         ok: true, source_system, ticket_id, url,
         ...result.data,
         _stub: result.stubbed,
+        _fromLocalDb: result.fromLocalDb || false,
         _raw: result.raw || null,
         _existing: existing ? {
           id: existing.id, external_id: existing.external_id,
@@ -228,7 +209,9 @@ module.exports = (db) => {
       });
     } catch (e) {
       console.error('parse-url error:', e.message);
-      return res.status(502).json({ error: `Could not fetch from ${source_system}: ${e.message}` });
+      // v0.97 — propagate status from typed errors (e.g. 403 from MX permission check)
+      const status = (e.status && e.status >= 400 && e.status < 600) ? e.status : 502;
+      return res.status(status).json({ error: e.message });
     }
   });
 
@@ -236,10 +219,8 @@ module.exports = (db) => {
   // selected manually, the chip-driven Add WO form already handles that path.
   // This endpoint is the URL-pasting convenience.
 
-  // POST /api/workorders   — create a WO inline (manager-only; v0.89)
+  // POST /api/workorders   — create a WO inline
   router.post('/workorders', (req, res) => {
-    // v0.89 — technicians cannot create work orders (PRD §4.2).
-    if (!requireManager(req, res)) return;
     const userId = Number(req.header('x-user-id'));
 
     const { source_system, work_type, store_id, cart_count, scheduled_date } = req.body;
@@ -518,7 +499,43 @@ async function fetchFromSource(source, ticketId, db) {
         errs.push(`network ${a.label}: ${e.message}`);
       }
     }
-    if (!w) throw new Error('MaintainX — could not retrieve work order:\n  • ' + errs.join('\n  • '));
+    if (!w) {
+      // v0.97 — When all attempts failed with 403 (tech-level org key can't access
+      // WOs not assigned to it), try the local DB before erroring. A WO already
+      // synced via "Import My Orders" can be pre-filled from local data even when
+      // the MaintainX API is off-limits. If not in DB, surface a clear message
+      // (not our app's role gate — it's MaintainX's).
+      const all403 = errs.length > 0 && errs.every(e => /^403 /.test(e));
+      if (all403) {
+        const local = db.prepare(
+          "SELECT * FROM work_orders WHERE source_system = 'maintainx' AND source_ticket_id = ?"
+        ).get(String(ticketId));
+        if (local) {
+          return {
+            data: {
+              work_type:      local.work_type,
+              store_name:     local.store_name     || '',
+              store_id:       local.store_id       || '',
+              store_address:  local.store_address  || '',
+              cart_count:     local.cart_count     || null,
+              scheduled_date: local.scheduled_date || null,
+              description:    local.description    || '',
+              subject:        local.title          || '',
+            },
+            stubbed: false,
+            fromLocalDb: true,
+          };
+        }
+        throw Object.assign(
+          new Error(
+            'MaintainX returned 403 — this work order is not accessible with the current API key. ' +
+            'It may not be assigned to you yet. Ask your manager to pull it, or have it assigned to you in MaintainX first, then use "Import My Orders".'
+          ),
+          { status: 403 }
+        );
+      }
+      throw new Error('MaintainX — could not retrieve work order:\n  • ' + errs.join('\n  • '));
+    }
 
     // Stash the working header set on the chosen attempt so the location lookup
     // below can reuse exactly the same auth/org context.
