@@ -255,17 +255,17 @@ module.exports = (db) => {
     // --- ownership / cross-role access ---
     if (!isOwner && !isManagerActor) return res.status(403).json({ error: 'not yours' });
 
-    // --- v0.94 — ops_manager may not modify financial fields on others' expenses.
-    // Only the expense owner or a high manager (sr_manager / pm) may adjust
+    // --- v0.94 — financial-field edit permission: owner, any manager on the tech's
+    // team (ops_manager), or a high manager (sr_manager / pm) may adjust
     // amount, quantity, rate, expense_date, or work_order_id.
-    const canEditFinancial = isOwner || isHighManager;
+    const canEditFinancial = isOwner || isManagerActor;
     const FINANCIAL_FIELDS = ['amount', 'quantity', 'rate', 'expense_date', 'work_order_id'];
     if (!canEditFinancial) {
       const attempted = FINANCIAL_FIELDS.filter(f =>
         req.body[f] !== undefined && String(req.body[f]) !== String(e[f] ?? ''));
       if (attempted.length) {
         return res.status(403).json({
-          error: `ops_manager may not modify financial fields: ${attempted.join(', ')}`
+          error: `not authorized to modify financial fields: ${attempted.join(', ')}`
         });
       }
     }
@@ -373,7 +373,7 @@ module.exports = (db) => {
     // actors who can't touch financial fields.
     if (!canEditFinancial && amount !== e.amount) {
       return res.status(403).json({
-        error: 'ops_manager may not modify financial fields: amount (drift via rate recomputation)'
+        error: 'not authorized to modify financial fields: amount (drift via rate recomputation)'
       });
     }
     {
