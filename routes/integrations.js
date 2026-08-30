@@ -171,11 +171,13 @@ module.exports = (db) => {
   // GET /mx/locations?q=&parent_mx_id=
   // Returns all synced locations. Readable by ALL authenticated users so
   // technicians can pick a predefined location when creating a work order.
+  // v0.84 — SELECT is column-scoped (no lat/lng/internal timestamps) to limit
+  // exposure of sensitive store-site data to field staff.
   router.get('/mx/locations', (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     const q          = (req.query.q || '').trim();
     const parentId   = req.query.parent_mx_id || null;
-    let sql = 'SELECT * FROM mx_locations';
+    let sql = 'SELECT id, mx_id, name, parent_mx_id, address, city, state, zip, country FROM mx_locations';
     const params = [];
     const where = [];
     if (q)        { where.push('name LIKE ?'); params.push(`%${q}%`); }
@@ -190,12 +192,13 @@ module.exports = (db) => {
   // GET /mx/assets?location_mx_id=&q=&status=
   // Returns assets for a location (or all). Readable by ALL authenticated users
   // so technicians can pick predefined carts when creating a work order.
+  // v0.84 — SELECT is column-scoped (no internal timestamps) to limit exposure.
   router.get('/mx/assets', (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     const q          = (req.query.q || '').trim();
     const locationId = req.query.location_mx_id || null;
     const status     = req.query.status || null;
-    let sql = 'SELECT * FROM mx_assets';
+    let sql = 'SELECT id, mx_id, name, description, serial_number, model, manufacturer, category, status, location_mx_id FROM mx_assets';
     const params = [];
     const where = [];
     if (locationId) { where.push('location_mx_id = ?'); params.push(locationId); }
