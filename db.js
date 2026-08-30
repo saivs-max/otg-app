@@ -119,6 +119,7 @@ function ensureSchema(db) {
   // custom_rules so admin-added work types are accepted. Seed the four
   // originals so the dropdowns + existing rules keep working.
   migrateWorkTypeChecks(db);
+  migrateWorkOrderOnHoldStatus(db); // v0.99 — add on_hold to status CHECK
   seedDefaultWorkTypes(db);
   // v0.65.2 — the 'service' work type was renamed to 'maintenance'. Migrate any
   // existing data so nothing still references the old name.
@@ -325,6 +326,53 @@ function activeWorkTypes(db) {
     for (const r of rows) set.add(r.name);
   } catch (_) { /* table not yet migrated — fall back to defaults */ }
   return set;
+}
+
+// v0.99 — Add 'on_hold' to the work_orders status CHECK constraint.
+// Probe by inserting a sentinel row with status='on_hold'; if the CHECK rejects
+// it, rebuild the table with the updated constraint.
+function migrateWorkOrderOnHoldStatus(db) {
+  try {
+    db.exec('SAVEPOINT chk_wo_onhold;');
+    db.prepare(`INSERT INTO work_orders (external_id, source_system, work_type, store_name, status)
+                VALUES ('__chk_onhold__', 'maintainx', 'maintenance', 'chk', 'on_hold')`).run();
+    db.exec('ROLLBACK TO chk_wo_onhold; RELEASE chk_wo_onhold;');
+    // Probe succeeded — on_hold is already allowed, nothing to do.
+  } catch (e) {
+    db.exec('ROLLBACK TO chk_wo_onhold; RELEASE chk_wo_onhold;');
+    if (!String(e.message).includes('CHECK')) return; // unrelated error
+    console.log('[migrate] Rebuilding work_orders to add on_hold to status CHECK…');
+    const cols = db.prepare(`PRAGMA table_info(work_orders)`).all().map(c => c.name).join(', ');
+    db.exec(`
+      BEGIN;
+      CREATE TABLE work_orders_new (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        external_id       TEXT    UNIQUE NOT NULL,
+        source_system     TEXT    NOT NULL CHECK (source_system IN ('maintainx','freshdesk')),
+        source_ticket_id  TEXT,
+        title             TEXT,
+        work_type         TEXT    NOT NULL,
+        store_id          TEXT,
+        store_name        TEXT,
+        store_address     TEXT,
+        cart_count        INTEGER DEFAULT 0,
+        scheduled_date    TEXT,
+        description       TEXT,
+        status            TEXT    DEFAULT 'open' CHECK (status IN ('open','in_progress','completed','cancelled','on_hold')),
+        assigned_user_id  INTEGER REFERENCES users(id),
+        wo_number         INTEGER,
+        sub_wo_count      INTEGER,
+        priority          TEXT,
+        created_at        TEXT    DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO work_orders_new (${cols}) SELECT ${cols} FROM work_orders;
+      DROP TABLE work_orders;
+      ALTER TABLE work_orders_new RENAME TO work_orders;
+      CREATE INDEX IF NOT EXISTS idx_wo_assigned ON work_orders(assigned_user_id);
+      CREATE INDEX IF NOT EXISTS idx_wo_status   ON work_orders(status);
+      COMMIT;
+    `);
+  }
 }
 
 // SQLite can't ALTER TABLE ... DROP CONSTRAINT, so we rebuild both tables to

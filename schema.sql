@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS work_orders (
   cart_count        INTEGER DEFAULT 0,
   scheduled_date    TEXT,
   description       TEXT,
-  status            TEXT    DEFAULT 'open' CHECK (status IN ('open','in_progress','completed','cancelled')),
+  status            TEXT    DEFAULT 'open' CHECK (status IN ('open','in_progress','completed','cancelled','on_hold')),
   assigned_user_id  INTEGER REFERENCES users(id),
   created_at        TEXT    DEFAULT CURRENT_TIMESTAMP
 );

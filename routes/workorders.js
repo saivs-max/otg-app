@@ -445,24 +445,21 @@ async function fetchFromSource(source, ticketId, db) {
     if (!key) return { data: stubFetchTicket(source, ticketId), stubbed: true };
 
     const url = `https://api.getmaintainx.com/v1/workorders/${ticketId}`;
-    // v0.47 — MaintainX JWTs embed organizationId; sending an X-*-Organization-Id
-    // header that doesn't match MaintainX's expected scheme causes a 401
-    // "Invalid token" response. Use bearer only by default. We keep an
-    // optional fallback for older API plans that DO require an org header.
+    // v0.87 — MaintainX now requires x-organization-id on all API calls (org ID
+    // is no longer embedded in JWTs). Updated to match lib/maintainx/client.js.
+    // v0.47 note: wrong header names (X-MX-Organization-Id etc.) cause 403s, not
+    // 401s, under the new scheme — so use the exact header the client uses.
     const headersNoOrg   = { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' };
-    const headersWithOrg = { ...headersNoOrg };
-    if (orgId) {
-      headersWithOrg['X-MX-Organization-Id'] = String(orgId);
-      headersWithOrg['X-Organization-Id']    = String(orgId);
-      headersWithOrg['Organization-Id']      = String(orgId);
-    }
+    const headersWithOrg = {
+      ...headersNoOrg,
+      ...(orgId ? { 'x-organization-id': String(orgId) } : {}),
+    };
 
-    // Try bearer-only FIRST (the modern v1 path). Only fall back to the
-    // org-header variant if bearer-only somehow returned an empty body —
-    // this preserves back-compat with older customers without retriggering
-    // the "Invalid token" 401 we hit on JWT-bound tokens.
+    // Try with org-id header first (required by MaintainX v0.87+), fall back
+    // to bearer-only for tenants on older API plans.
     const attempts = orgId
-      ? [{ label: 'bearer only',         headers: headersNoOrg },
+      ? [{ label: 'with org-id header',   headers: headersWithOrg },
+         { label: 'bearer only',          headers: headersNoOrg },
          { label: 'with org headers',    headers: headersWithOrg }]
       : [{ label: 'no org headers',      headers: headersNoOrg }];
 
