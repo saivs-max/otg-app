@@ -458,10 +458,9 @@ async function fetchFromSource(source, ticketId, db) {
     // Try with org-id header first (required by MaintainX v0.87+), fall back
     // to bearer-only for tenants on older API plans.
     const attempts = orgId
-      ? [{ label: 'with org-id header',   headers: headersWithOrg },
-         { label: 'bearer only',          headers: headersNoOrg },
-         { label: 'with org headers',    headers: headersWithOrg }]
-      : [{ label: 'no org headers',      headers: headersNoOrg }];
+      ? [{ label: 'with org-id header', headers: headersWithOrg },
+         { label: 'bearer only',        headers: headersNoOrg }]
+      : [{ label: 'bearer only',        headers: headersNoOrg }];
 
     let w;
     let usedHeaders;
