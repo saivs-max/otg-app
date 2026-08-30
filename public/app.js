@@ -820,10 +820,15 @@ function stopClockInNudge() {
   _clockInNudgeTimer = null;
 }
 
+// v0.98 — internal placeholder set on WOs minted via the week-supplement
+// approval flow. Never surface it as a user-facing description.
+const INTERNAL_WO_PLACEHOLDER = '(added via week-supplement request -- refine details)';
+
 // Compact card used on home/lists. ID is the primary heading; title is the
 // secondary description line. Invoice and detail screens still surface both.
 function woCard(w) {
-  const title = w.title || w.description || w.store_name || '';
+  const desc = (w.description && w.description !== INTERNAL_WO_PLACEHOLDER) ? w.description : '';
+  const title = w.title || desc || w.store_name || '';
   return `
     <div class="card tap" data-wo="${w.id}" data-act="open-wo" style="padding: 16px;">
       <div class="flex between" style="gap: 12px; align-items: center;">
@@ -917,7 +922,26 @@ async function renderWoDetail(root, woId) {
     return s + Math.max(0, (ms - (t.break_minutes || 0) * 60000) / 3600000);
   }, 0);
 
+  // v0.98 — detect the internal placeholder and require the manager/tech to
+  // replace it with a real description before the WO can be worked on.
+  const needsDescUpdate = w.description === INTERNAL_WO_PLACEHOLDER;
+
   root.innerHTML = `
+    ${needsDescUpdate ? `
+    <div class="alert warn" id="woDescBanner" style="align-items:flex-start; gap:12px; margin-bottom:14px;">
+      <span class="ico">⚠️</span>
+      <div class="body" style="flex:1;">
+        <strong>Description required</strong>
+        <div style="font-size:13px; margin-top:4px; margin-bottom:10px; color:var(--ink-2);">
+          This work order was added via a supplement request and needs a real description.
+          Please fill it in before clocking in or logging expenses.
+        </div>
+        <textarea class="field" id="woDescInput" rows="2"
+          placeholder="e.g. Caper Cart deployment at Store #241 — 15 carts"
+          style="margin-bottom:8px; font-size:14px;"></textarea>
+        <button class="btn btn-primary btn-sm" id="woDescSaveBtn">Save description</button>
+      </div>
+    </div>` : ''}
     <div class="card">
       <div class="flex between" style="margin-bottom: 8px; align-items: flex-start;">
         <div style="flex: 1; min-width: 0;">
@@ -935,7 +959,7 @@ async function renderWoDetail(root, woId) {
       </div>
       ${w.scheduled_date ? `<div class="card-row"><span>Scheduled</span><span>${fmtDate(w.scheduled_date)}</span></div>` : ''}
       <div class="card-row"><span>Local reference</span><span class="amt" style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--muted);">${escapeHTML(w.external_id)}</span></div>
-      ${w.description ? `<div style="margin-top: 10px; padding: 10px 12px; background: #fafafa; border-radius: 8px; font-size: 14px; line-height: 1.5; white-space: pre-wrap;">${escapeHTML(w.description)}</div>` : ''}
+      ${w.description && !needsDescUpdate ? `<div style="margin-top: 10px; padding: 10px 12px; background: #fafafa; border-radius: 8px; font-size: 14px; line-height: 1.5; white-space: pre-wrap;">${escapeHTML(w.description)}</div>` : ''}
     </div>
 
     ${['ops_manager','sr_manager','pm'].includes(STATE.user?.role) ? `
@@ -1074,9 +1098,26 @@ async function renderWoDetail(root, woId) {
   // v0.63 — wire unplanned tag buttons (WO-level + per time-entry + per expense)
   wireUnplannedTagBtns(root, () => renderWoDetail(root, woId));
 
+  // v0.98 — mandatory description update for supplement-request placeholder WOs
+  $('#woDescSaveBtn')?.addEventListener('click', async () => {
+    const val = ($('#woDescInput')?.value || '').trim();
+    if (!val) { toast('Please enter a description before saving.', 'err'); return; }
+    try {
+      await api(`/workorders/${w.id}`, { method: 'PATCH', body: { description: val } });
+      toast('Description saved ✓', 'ok');
+      goto('woDetail', w.id);
+    } catch (e) { toast(e.message || 'Save failed', 'err'); }
+  });
+
   $$('#statusChips .chip').forEach(c => c.addEventListener('click', async () => {
     const newStatus = c.dataset.status;
     if (newStatus === w.status) return;
+    // v0.98 — block status changes until the internal placeholder is replaced
+    if (needsDescUpdate) {
+      toast('Please add a real description first (see the warning above).', 'err');
+      $('#woDescInput')?.focus();
+      return;
+    }
     try {
       await api(`/workorders/${w.id}`, { method: 'PATCH', body: { status: newStatus } });
       toast(`Status set to ${labelForWoStatus(newStatus)} ✓`, 'ok');
@@ -1084,7 +1125,15 @@ async function renderWoDetail(root, woId) {
     } catch (e) { toast(e.message, 'err'); }
   }));
   $('#mxSyncOneBtn')?.addEventListener('click', (e) => mxSyncOne(w.id, e.currentTarget));
-  $('#clockToWO').addEventListener('click', () => clockIn(w.id));
+  $('#clockToWO').addEventListener('click', () => {
+    // v0.98 — block clock-in until the internal placeholder is replaced
+    if (needsDescUpdate) {
+      toast('Please add a real description first (see the warning above).', 'err');
+      $('#woDescInput')?.focus();
+      return;
+    }
+    clockIn(w.id);
+  });
   $('#addExpToWO').addEventListener('click', () => {
     STATE._prefillWO = w.id;
     goto('add');
