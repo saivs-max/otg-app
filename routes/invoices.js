@@ -1719,6 +1719,10 @@ module.exports = (db) => {
     // Resolution order: explicit body → org policy → env override → safety net.
     const policy  = getPolicy(db);
     const apEmail = (req.body.ap_email || policy.AP_EMAIL || process.env.AP_EMAIL || 'ap@instacart.com').trim();
+    // v0.98 — the client sends its IANA timezone so the PDF renders entry times
+    // in the tech's local zone (matching the on-screen preview). Persisted below
+    // so every later re-generation of the PDF reproduces the same local times.
+    const clientTz = String(req.body.tz || inv.client_tz || '').trim() || null;
 
     // Build the PDF payload by reusing computeInvoice + tech profile + audit.
     const computed = computeInvoice(id);
@@ -1729,7 +1733,7 @@ module.exports = (db) => {
       pdfBuf = await generateInvoicePdf({
         invoice: computed.invoice, tech,
         lines: computed.lines, by_date: computed.by_date,
-        summary: computed.summary, approvals,
+        summary: computed.summary, approvals, tz: clientTz,
       });
     } catch (e) {
       return res.status(500).json({ error: `PDF generation failed: ${e.message}` });
@@ -1779,10 +1783,11 @@ module.exports = (db) => {
     db.prepare(`
       UPDATE invoices
       SET status = 'sent_ap', sent_to_ap_at = ?, sent_to_ap_by = ?, ap_email_to = ?,
+          client_tz = COALESCE(?, client_tz),
           submitted_at = COALESCE(submitted_at, ?),
           updated_at   = ?
       WHERE id = ?
-    `).run(now, userId, apEmail, now, now, id);
+    `).run(now, userId, apEmail, clientTz, now, now, id);
 
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: 'send_to_ap',
                    details: { ap_email: apEmail, attachment_id: attachmentId, pdf_bytes: pdfBuf.length,
@@ -1861,11 +1866,14 @@ module.exports = (db) => {
     const computed = computeInvoice(id);
     const tech = db.prepare("SELECT id, name, email, home_address, home_phone, invoice_email FROM users WHERE id = ?").get(inv.user_id);
     const approvals = buildApprovalAuditTrail(db, inv);
+    // v0.98 — render times in the invoice's captured timezone (or a ?tz= override
+    // for the pre-send preview) so the PDF matches the on-screen invoice.
+    const pdfTz = String(req.query.tz || inv.client_tz || '').trim() || null;
     try {
       const buf = await generateInvoicePdf({
         invoice: computed.invoice, tech,
         lines: computed.lines, by_date: computed.by_date,
-        summary: computed.summary, approvals,
+        summary: computed.summary, approvals, tz: pdfTz,
       });
       const filename = `${inv.invoice_number || `invoice-${id}`}.pdf`;
       res.setHeader('Content-Type', 'application/pdf');

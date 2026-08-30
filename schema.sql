@@ -83,6 +83,9 @@ CREATE TABLE IF NOT EXISTS invoices (
   sent_to_ap_at     TEXT,
   sent_to_ap_by     INTEGER REFERENCES users(id),
   ap_email_to       TEXT,
+  -- v0.98 — sender's IANA timezone captured at send time, so the AP PDF renders
+  -- entry times in the tech's local zone (matches the on-screen preview).
+  client_tz         TEXT,
   -- v0.32 — Ops Mgr can escalate a flagged invoice for Sr Mgr secondary approval.
   -- When `escalated_at` is set, Sr Mgr countersign becomes REQUIRED before the
   -- invoice can be sent to AP. Sr Mgr's queue surfaces escalated items first.

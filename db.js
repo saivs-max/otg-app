@@ -47,6 +47,10 @@ function ensureSchema(db) {
   migrateAddColumn(db, 'invoices', 'sent_to_ap_at',  'TEXT');
   migrateAddColumn(db, 'invoices', 'sent_to_ap_by',  'INTEGER');
   migrateAddColumn(db, 'invoices', 'ap_email_to',    'TEXT');
+  // v0.98 — capture the sender's IANA timezone at send-to-AP time so the
+  // generated PDF renders entry times/dates in the tech's local zone (matching
+  // the on-screen invoice preview), and reproduces them on every re-generation.
+  migrateAddColumn(db, 'invoices', 'client_tz',      'TEXT');
   // v0.32 — Ops Mgr escalation to Sr Mgr secondary approval.
   migrateAddColumn(db, 'invoices', 'escalated_at',    'TEXT');
   migrateAddColumn(db, 'invoices', 'escalated_by',    'INTEGER');

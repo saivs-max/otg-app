@@ -5351,7 +5351,10 @@ async function openSendToApSheet(invoice) {
         const originalLabel = btn.textContent.trim();
         btn.disabled = true; btn.textContent = 'Sending…';
         try {
-          const r = await api(`/invoices/${invoice.id}/send-to-ap`, { method: 'POST', body: { ap_email: apEmail } });
+          // v0.98 — send the browser's IANA timezone so the AP PDF renders entry
+          // times in the tech's local zone (matching this on-screen preview).
+          const clientTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (_) { return null; } })();
+          const r = await api(`/invoices/${invoice.id}/send-to-ap`, { method: 'POST', body: { ap_email: apEmail, tz: clientTz } });
           toast(`Sent to ${r.notification.recipient} ✓ — PDF generated`, 'ok');
           closeSheet();
           // v0.97 — re-fetch invoice from backend (actual saved state) then open the PDF
@@ -5384,9 +5387,14 @@ async function loadApPreview(wrap, preview, token) {
     if (openEl) openEl.innerHTML = '';
   };
   if (!preview || !preview.pdf_url) { showNone('No attachment available.'); return; }
+  // v0.98 — pass the browser timezone so the preview PDF renders entry times in
+  // the tech's local zone (before the tz is persisted on send).
+  const clientTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (_) { return null; } })();
+  const tzQ = clientTz ? `${preview.pdf_url.includes('?') ? '&' : '?'}tz=${encodeURIComponent(clientTz)}` : '';
+  const pdfUrlTz = preview.pdf_url + tzQ;
   try {
     const bearer = localStorage.getItem(STORAGE_TOKEN_KEY);
-    const res = await fetch(preview.pdf_url, {
+    const res = await fetch(pdfUrlTz, {
       headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
     });
     if (!res.ok) { showNone('No attachment available.'); return; }
@@ -5403,7 +5411,7 @@ async function loadApPreview(wrap, preview, token) {
       // Open-in-new-tab uses the tokened URL (top-level navigation isn't subject
       // to X-Frame-Options, and this avoids any blob: lifetime concerns).
       openEl.innerHTML =
-        `<a class="btn btn-ghost btn-sm" href="${preview.pdf_url}?token=${token}" target="_blank" rel="noopener">Open in new tab ↗</a>`;
+        `<a class="btn btn-ghost btn-sm" href="${preview.pdf_url}?token=${token}${tzQ ? '&' + tzQ.slice(1) : ''}" target="_blank" rel="noopener">Open in new tab ↗</a>`;
     }
   } catch (_e) {
     showNone('No attachment available.');
