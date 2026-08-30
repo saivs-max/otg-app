@@ -342,36 +342,49 @@ function migrateWorkOrderOnHoldStatus(db) {
     db.exec('ROLLBACK TO chk_wo_onhold; RELEASE chk_wo_onhold;');
     if (!String(e.message).includes('CHECK')) return; // unrelated error
     console.log('[migrate] Rebuilding work_orders to add on_hold to status CHECK…');
-    const cols = db.prepare(`PRAGMA table_info(work_orders)`).all().map(c => c.name).join(', ');
-    db.exec(`
-      BEGIN;
-      CREATE TABLE work_orders_new (
-        id                INTEGER PRIMARY KEY AUTOINCREMENT,
-        external_id       TEXT    UNIQUE NOT NULL,
-        source_system     TEXT    NOT NULL CHECK (source_system IN ('maintainx','freshdesk')),
-        source_ticket_id  TEXT,
-        title             TEXT,
-        work_type         TEXT    NOT NULL,
-        store_id          TEXT,
-        store_name        TEXT,
-        store_address     TEXT,
-        cart_count        INTEGER DEFAULT 0,
-        scheduled_date    TEXT,
-        description       TEXT,
-        status            TEXT    DEFAULT 'open' CHECK (status IN ('open','in_progress','completed','cancelled','on_hold')),
-        assigned_user_id  INTEGER REFERENCES users(id),
-        wo_number         INTEGER,
-        sub_wo_count      INTEGER,
-        priority          TEXT,
-        created_at        TEXT    DEFAULT CURRENT_TIMESTAMP
+
+    // v0.99.1 — Derive the new table DDL from the LIVE schema instead of a
+    // hardcoded column list. The previous hardcode omitted columns added later
+    // via migrateAddColumn (unplanned_tag/note/tagged_by/tagged_at/wasted), so
+    // the INSERT ... SELECT failed ("no column named unplanned_tag") and the app
+    // crashed on boot. Patching the stored CREATE statement in place keeps every
+    // existing column (and any future ones) automatically.
+    const origDdl = db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='work_orders'"
+    ).get().sql;
+
+    // Replace the status CHECK list with the same list plus 'on_hold'. Matches
+    // the status column's CHECK (...) clause specifically (anchored on the
+    // 'open' literal that only the status constraint contains).
+    const newDdl = origDdl
+      .replace(/\bwork_orders\b/, 'work_orders_new')
+      .replace(
+        /status([^,]*?)CHECK\s*\(\s*status\s+IN\s*\(([^)]*)\)\s*\)/i,
+        (full, mid, list) =>
+          list.includes("'on_hold'")
+            ? full
+            : `status${mid}CHECK (status IN (${list.trim()}, 'on_hold'))`
       );
-      INSERT INTO work_orders_new (${cols}) SELECT ${cols} FROM work_orders;
-      DROP TABLE work_orders;
-      ALTER TABLE work_orders_new RENAME TO work_orders;
-      CREATE INDEX IF NOT EXISTS idx_wo_assigned ON work_orders(assigned_user_id);
-      CREATE INDEX IF NOT EXISTS idx_wo_status   ON work_orders(status);
-      COMMIT;
-    `);
+
+    // Column set is identical between old and new tables, so copy by name.
+    const cols = db.prepare(`PRAGMA table_info(work_orders)`).all().map(c => c.name).join(', ');
+
+    db.exec('PRAGMA foreign_keys=OFF;');
+    db.exec('BEGIN;');
+    try {
+      db.exec(newDdl);
+      db.exec(`INSERT INTO work_orders_new (${cols}) SELECT ${cols} FROM work_orders;`);
+      db.exec('DROP TABLE work_orders;');
+      db.exec('ALTER TABLE work_orders_new RENAME TO work_orders;');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_wo_assigned ON work_orders(assigned_user_id);');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_wo_status   ON work_orders(status);');
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      db.exec('PRAGMA foreign_keys=ON;');
+      throw err;
+    }
+    db.exec('PRAGMA foreign_keys=ON;');
   }
 }
 
