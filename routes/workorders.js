@@ -14,6 +14,9 @@ const VALID_SOURCES = new Set(['maintainx','freshdesk']);
 // v0.62 — VALID_TYPES is now dynamic; resolved from the work_types table at
 // validation time so admin-added types pass.
 
+// v0.90 — roles that may patch any WO (vs. techs who are restricted to their own).
+const MGR_ROLES = new Set(['ops_manager','sr_manager','pm']);
+
 // Default MaintainX Organization ID for the Instacart/Caper tenant.
 // Used when nothing is configured in Settings or env. Override per-deploy by
 // setting maintainx_organization_id in Settings or MAINTAINX_ORG_ID in .env.
