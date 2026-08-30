@@ -304,6 +304,16 @@ module.exports = (db) => {
     // while paused; this guards direct API calls.
     if (e.break_started_at) return res.status(409).json({ error: 'Resume your break before switching modes.' });
 
+    // v0.96 — Reject "clock_out" passed as mode. Without this guard the body field
+    // is silently ignored, a new running timer opens, and any caller that loops on
+    // the response creates an infinite cascade of orphaned entries. switch-mode is
+    // for drive↔work transitions only; clocking out belongs on PATCH /timeentries/:id.
+    if (req.body.mode === 'clock_out') {
+      return res.status(400).json({
+        error: 'switch-mode is for drive↔work transitions only. To clock out, use PATCH /timeentries/:id (omit clock_out — the server stamps the time).',
+      });
+    }
+
     const newMode = e.mode === 'drive' ? 'work' : 'drive';
 
     // Drive-mode exclusivity also applies to switches — can't switch into Drive
