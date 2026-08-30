@@ -1751,8 +1751,8 @@ module.exports = (db) => {
     // v0.90 — send the real email via SMTP (lib/mailer.js).
     // Notification row is inserted as 'logged' first so the audit trail is
     // always complete; status is updated to 'sent' or 'failed' after the attempt.
-    const subject = `[AP] Invoice ${inv.invoice_number} — ${tech?.name || 'tech'} — $${inv.total.toFixed(2)}`;
-    const body = renderEmailBody({ invoice: computed.invoice, tech, sender: me, approvals });
+    const subject = `[AP] ${tech?.name || 'tech'} · ${fmtApPeriod(inv.period_start, inv.period_end)} · $${inv.total.toFixed(2)}`;
+    const { text: body, html: bodyHtml } = renderEmailBody({ invoice: computed.invoice, tech, sender: me, approvals, summary: computed.summary });
     const notifRow = db.prepare(`
       INSERT INTO notifications (kind, invoice_id, triggered_by, recipient, subject, body, attachment_id, status)
       VALUES ('invoice_to_ap', ?, ?, ?, ?, ?, ?, 'logged')
@@ -1763,6 +1763,7 @@ module.exports = (db) => {
       to:               apEmail,
       subject,
       text:             body,
+      html:             bodyHtml,
       attachmentBuffer: pdfBuf,
       attachmentName:   originalName,
     });
@@ -1813,8 +1814,8 @@ module.exports = (db) => {
     const tech = db.prepare("SELECT id, name, email, home_address, home_phone, invoice_email FROM users WHERE id = ?").get(inv.user_id);
     const computed = computeInvoice(id);
     const approvals = buildApprovalAuditTrail(db, inv);
-    const subject = `[AP] Invoice ${inv.invoice_number} — ${tech?.name || 'tech'} — $${inv.total.toFixed(2)}`;
-    const body = renderEmailBody({ invoice: computed.invoice, tech, sender: me, approvals });
+    const subject = `[AP] ${tech?.name || 'tech'} · ${fmtApPeriod(inv.period_start, inv.period_end)} · $${inv.total.toFixed(2)}`;
+    const { text: body } = renderEmailBody({ invoice: computed.invoice, tech, sender: me, approvals, summary: computed.summary });
     // v0.97 — Send-to-AP requires Ops approval for everyone; the owner tech may
     // perform the hand-off (not just managers). Detect resubmit (edited after send).
     const meRole = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
@@ -2494,18 +2495,102 @@ function buildApprovalAuditTrail(db, inv) {
   return out;
 }
 
-function renderEmailBody({ invoice, tech, sender }) {
-  // Keep this short and clean — the audit trail lives in the attached PDF as
-  // the formal record, so AP doesn't need the timestamps in the email body.
-  return [
+// v0.98 — Returns { text, html }. No invoice_number reference — AP has no context for it.
+function renderEmailBody({ invoice, tech, sender, summary }) {
+  const techName     = tech?.name  || '';
+  const senderName   = sender?.name || '';
+  const period       = fmtApPeriod(invoice.period_start, invoice.period_end);
+  const sentDate     = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const fmt$         = n => `$${Number(n || 0).toFixed(2)}`;
+
+  // ---- plain text ----
+  const breakdown = (summary ? [
+    ['Labor',            summary.labor_amount],
+    ['Mileage',          summary.mileage],
+    ['Tolls & Parking',  summary.tolls_parking],
+    ['Other expenses',   summary.other],
+  ].filter(([, v]) => (v || 0) > 0.005) : []);
+  const textLines = [
     `Hi AP team,`,
     ``,
-    `Please find attached invoice ${invoice.invoice_number} from ${tech?.name || ''} for the period ${invoice.period_start} → ${invoice.period_end}.`,
+    `Please process the attached invoice from ${techName}.`,
     ``,
-    `Total: $${invoice.total.toFixed(2)}`,
+    `Submission period: ${period}`,
+    ...breakdown.map(([k, v]) => `  ${k}: ${fmt$(v)}`),
+    `Total: ${fmt$(invoice.total)}`,
     ``,
-    `Sent by ${sender?.name || ''} via Caper CostWise.`,
-  ].join('\n');
+    `Sent by ${senderName} via Bread Field Cost Management on ${sentDate}.`,
+  ];
+  const text = textLines.join('\n');
+
+  // ---- HTML ----
+  const breakdownRowsHtml = breakdown.map(([k, v]) => `
+    <tr>
+      <td style="font-size:13px;color:#666;padding:4px 0;">${k}</td>
+      <td align="right" style="font-size:13px;color:#666;padding:4px 0;">${fmt$(v)}</td>
+    </tr>`).join('');
+  const totalRowHtml = `
+    <tr>
+      <td style="font-size:14px;font-weight:700;color:#111;padding:8px 0 0;border-top:1px solid #e8e6e1;">Total</td>
+      <td align="right" style="font-size:22px;font-weight:800;color:#F36D00;padding:8px 0 0;border-top:1px solid #e8e6e1;">${fmt$(invoice.total)}</td>
+    </tr>`;
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Invoice — ${techName}</title></head>
+<body style="margin:0;padding:0;background:#efede8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#efede8;padding:32px 12px;">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.10);max-width:560px;">
+  <tr>
+    <td style="background:#003D29;padding:22px 28px 20px;">
+      <span style="color:#F36D00;font-size:21px;font-weight:800;letter-spacing:-0.3px;">Bread</span>
+      <span style="color:rgba(255,255,255,.5);font-size:12px;margin-left:10px;">Field Cost Management</span>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:28px 28px 24px;">
+      <p style="margin:0 0 6px;font-size:14px;color:#888;">Hi AP team,</p>
+      <p style="margin:0 0 22px;font-size:16px;color:#111;line-height:1.5;">
+        Please process the attached invoice from
+        <strong style="color:#003D29;">${techName}</strong>.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#f7f5f1;border-radius:8px;margin-bottom:20px;">
+        <tr>
+          <td style="padding:16px 20px;">
+            <div style="font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:3px;">Submission period</div>
+            <div style="font-size:17px;font-weight:700;color:#003D29;">${period}</div>
+            <div style="font-size:11px;color:#bbb;margin-top:3px;">Submitted ${sentDate}</div>
+          </td>
+        </tr>
+      </table>
+      <table width="100%" cellpadding="0" cellspacing="0">
+        ${breakdownRowsHtml}
+        ${totalRowHtml}
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#f7f5f1;border-top:1px solid #e8e6e1;padding:14px 28px;">
+      <p style="margin:0;font-size:11px;color:#bbb;line-height:1.6;">
+        Sent by <strong style="color:#888;">${senderName}</strong> via Bread Field Cost Management · ${sentDate}<br>
+        Instacart Hardware Operations · This message and its attachment are confidential.
+      </p>
+    </td>
+  </tr>
+</table>
+</td></tr>
+</table>
+</body></html>`;
+
+  return { text, html };
+}
+
+function fmtApPeriod(start, end) {
+  const opts = { month: 'short', day: 'numeric' };
+  const s = start ? new Date(start + 'T12:00:00').toLocaleDateString('en-US', opts) : '';
+  const e = end   ? new Date(end   + 'T12:00:00').toLocaleDateString('en-US', { ...opts, year: 'numeric' }) : '';
+  return e ? `${s} – ${e}` : s;
 }
 
 // v0.73 — Upsert a vendor into the master list. The name column is UNIQUE
