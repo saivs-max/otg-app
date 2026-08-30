@@ -399,12 +399,6 @@ async function boot() {
   if (STATE.user.must_change_password) {
     return openChangePasswordSheet({ forced: true });
   }
-  // v0.99 — Technicians must have a home address + phone on file (they print on
-  // every invoice). Force the (non-dismissable, no-skip) profile sheet on login
-  // until both are set, so a tech can't reach the app without them.
-  if (!isMgr && (!STATE.user.home_address || !STATE.user.home_phone)) {
-    return openProfileSetupSheet(() => goto('home'));
-  }
   // Default landing varies by role
   goto(isMgr ? 'dashboard' : 'home');
 }
@@ -5145,49 +5139,46 @@ total = Σ projected_spend(1..4)</pre>
 }
 
 // ---- CHANGE PASSWORD SHEET (v0.35) ----
-// v0.99 — Mandatory on first login (and re-shown on every login until complete).
-// A technician's home address + phone are REQUIRED — they print on every invoice
-// they submit, so we no longer allow skipping. Non-dismissable, no skip button.
-// (invoice_email is manager-controlled per PATCH /me policy, so it's not collected
-// here.) `onDone` fires only after a successful save.
+// v0.96 — Shown to technicians after they set their password on first login.
+// Prompts for home address, phone, and invoice email so invoices aren't blank.
+// `onDone` is called when the tech saves or explicitly skips.
 function openProfileSetupSheet(onDone) {
-  const reqMark = '<span style="color:var(--err-fg,#c0392b);font-weight:700;">*</span>';
   showSheet(`
     <h3>Complete your invoice profile</h3>
-    <p class="help">Your home address and phone number are <strong>required</strong> — they appear on every invoice you submit. You can update them anytime in Settings.</p>
-    <span class="label">Home address ${reqMark}</span>
+    <p class="help">These details appear on your formal invoice. You can update them anytime in Settings.</p>
+    <span class="label">Home address</span>
     <input class="field" id="psAddr" placeholder="24 Mayflower Drive, Sicklerville, NJ 08081" value="${escapeHTML(STATE.user.home_address || '')}" />
-    <span class="label">Phone ${reqMark}</span>
+    <span class="label">Phone</span>
     <input class="field" id="psPhone" placeholder="856-725-2298" value="${escapeHTML(STATE.user.home_phone || '')}" />
-    <div id="psErr" class="alert err hidden" style="margin: 4px 0 12px;">
-      <span class="ico">!</span><div class="body" id="psErrMsg"></div>
-    </div>
+    <span class="label">Invoice email <span class="meta">(optional — if different from your login email)</span></span>
+    <input class="field" id="psInvEmail" type="email" maxlength="254" placeholder="payments@example.com" value="${escapeHTML(STATE.user.invoice_email || '')}" />
     <div class="actions">
-      <button class="btn btn-primary btn-block" id="psSave">Save &amp; continue</button>
+      <button class="btn btn-ghost" id="psSkip">Skip for now</button>
+      <button class="btn btn-primary" id="psSave">Save &amp; continue</button>
     </div>
   `, {
     dismissable: false,
     onMount: (wrap) => {
       const finish = () => { closeSheet(); if (onDone) onDone(); };
-      const showErr = (m) => { $('#psErrMsg', wrap).textContent = m; $('#psErr', wrap).classList.remove('hidden'); };
+      $('#psSkip', wrap).addEventListener('click', finish);
       $('#psSave', wrap).addEventListener('click', async () => {
-        $('#psErr', wrap).classList.add('hidden');
-        const addr  = $('#psAddr', wrap).value.trim();
-        const phone = $('#psPhone', wrap).value.trim();
-        if (!addr)  return showErr('Home address is required — it appears on your invoices.');
-        if (!phone) return showErr('Phone number is required — it appears on your invoices.');
-        if (phone.replace(/\D/g, '').length < 7) return showErr('Enter a valid phone number.');
+        const invEmail = $('#psInvEmail', wrap).value.trim();
+        if (invEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(invEmail)) {
+          toast('Invoice email must be a valid email address', 'err');
+          return;
+        }
         const btn = $('#psSave', wrap); btn.disabled = true; btn.textContent = 'Saving…';
         try {
           const updated = await api('/me', { method: 'PATCH', body: {
-            home_address: addr,
-            home_phone:   phone,
+            home_address:  $('#psAddr', wrap).value.trim(),
+            home_phone:    $('#psPhone', wrap).value.trim(),
+            invoice_email: invEmail,
           }});
           STATE.user = { ...STATE.user, ...updated };
           toast('Profile saved ✓', 'ok');
           finish();
         } catch (e) {
-          showErr(e.message);
+          toast(e.message, 'err');
           btn.disabled = false; btn.textContent = 'Save & continue';
         }
       });
@@ -9872,13 +9863,12 @@ async function renderSettings(root) {
       <span class="label">Full name</span>
       <input class="field" id="profName" value="${escapeHTML(STATE.user.name || '')}" disabled />
       <span class="label">Login email</span>
-      <input class="field" id="profEmail" type="email" maxlength="254" value="${escapeHTML(STATE.user.email || '')}" ${isManager ? '' : 'disabled'} />
-      <span class="label">Invoice email <span class="meta">(${isManager ? 'optional — shown on invoice instead of login email' : 'managed by your manager'})</span></span>
-      <input class="field" id="profInvoiceEmail" type="email" maxlength="254" placeholder="payments@example.com" value="${escapeHTML(STATE.user.invoice_email || '')}" ${isManager ? '' : 'disabled'} />
-      ${isManager ? '' : '<p class="help" style="margin:-4px 0 10px;">Login &amp; invoice email are set by your manager. Update your address or phone below.</p>'}
-      <span class="label">Home address ${isManager ? '' : '<span style="color:var(--err-fg,#c0392b);font-weight:700;">*</span>'}</span>
+      <input class="field" id="profEmail" type="email" maxlength="254" value="${escapeHTML(STATE.user.email || '')}" />
+      <span class="label">Invoice email <span class="meta">(optional — shown on invoice instead of login email)</span></span>
+      <input class="field" id="profInvoiceEmail" type="email" maxlength="254" placeholder="payments@example.com" value="${escapeHTML(STATE.user.invoice_email || '')}" />
+      <span class="label">Home address</span>
       <input class="field" id="profAddr" placeholder="24 Mayflower Drive, Sicklerville, NJ 08081" value="${escapeHTML(STATE.user.home_address || '')}" />
-      <span class="label">Phone ${isManager ? '' : '<span style="color:var(--err-fg,#c0392b);font-weight:700;">*</span>'}</span>
+      <span class="label">Phone</span>
       <input class="field" id="profPhone" placeholder="856-725-2298" value="${escapeHTML(STATE.user.home_phone || '')}" />
       <button class="btn btn-primary btn-block" id="profSave">Save profile</button>
       <button class="btn btn-ghost btn-block" id="profChangePwd" style="margin-top: 8px;">🔒 Change password</button>
@@ -9967,20 +9957,12 @@ async function renderSettings(root) {
       toast('Invoice email must be a valid email address', 'err');
       return;
     }
-    const addrVal  = $('#profAddr').value.trim();
-    const phoneVal = $('#profPhone').value.trim();
-    // v0.99 — home address + phone are required for technicians (invoice header).
-    if (!isManager) {
-      if (!addrVal)  { toast('Home address is required — it appears on your invoices', 'err'); return; }
-      if (!phoneVal) { toast('Phone number is required — it appears on your invoices', 'err'); return; }
-    }
     try {
       const updated = await api('/me', { method: 'PATCH', body: {
-        // Technicians can't change login/invoice email (manager-controlled); omit
-        // those keys so the save isn't rejected. Managers send the full set.
-        ...(isManager ? { email: emailVal, invoice_email: invEmailVal } : {}),
-        home_address:  addrVal,
-        home_phone:    phoneVal,
+        email:         emailVal,
+        invoice_email: invEmailVal,
+        home_address:  $('#profAddr').value.trim(),
+        home_phone:    $('#profPhone').value.trim(),
       }});
       STATE.user = { ...STATE.user, ...updated };
       toast('Profile saved ✓', 'ok');
