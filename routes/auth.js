@@ -219,11 +219,26 @@ module.exports = (db) => {
     // (ops_manager, sr_manager, pm) may still update them here; technicians must go
     // through /api/admin/users/:id (managed by their ops_manager).
     const isTech = u.role === 'technician';
-    if (isTech && (hourly_rate != null || email !== undefined || invoice_email !== undefined)) {
-      return res.status(403).json({ error: 'technicians cannot update hourly_rate, email, or invoice_email via this endpoint' });
+    const norm = v => (v == null ? '' : String(v).trim());
+    if (isTech) {
+      // v0.99 — Reject only actual CHANGES to privileged fields; tolerate the
+      // client re-sending unchanged values (the profile + Settings forms post the
+      // whole object). Previously any presence of these keys 403'd, which blocked
+      // technicians from saving their home address / phone at all.
+      const changingRate     = hourly_rate != null && Number(hourly_rate) !== Number(u.hourly_rate);
+      const changingEmail    = email !== undefined && norm(email).toLowerCase() !== norm(u.email).toLowerCase();
+      const changingInvEmail = invoice_email !== undefined && norm(invoice_email) !== norm(u.invoice_email);
+      if (changingRate || changingEmail || changingInvEmail) {
+        return res.status(403).json({ error: 'technicians can only update home address and phone here — hourly rate, login email, and invoice email are managed by your manager' });
+      }
+      // Home address + phone are REQUIRED for technicians (they print on every
+      // invoice); refuse to blank either once the field is provided.
+      if (home_address !== undefined && !norm(home_address)) return res.status(400).json({ error: 'Home address is required — it appears on your invoices.' });
+      if (home_phone   !== undefined && !norm(home_phone))   return res.status(400).json({ error: 'Phone number is required — it appears on your invoices.' });
     }
     // v0.89 — allow self-service email update with format + uniqueness validation.
-    if (email !== undefined) {
+    // Privileged fields are applied for non-technicians only (techs are gated above).
+    if (email !== undefined && !isTech) {
       const valErr = validateUserFields({ email });
       if (valErr) return res.status(400).json({ error: valErr });
       const trimmed = String(email).trim().toLowerCase();
@@ -233,7 +248,7 @@ module.exports = (db) => {
       logAudit(db, { entity_type: 'users', entity_id: userId, user_id: userId, action: 'email_change',
                      details: { from: u.email, to: trimmed } });
     }
-    if (hourly_rate != null) {
+    if (hourly_rate != null && !isTech) {
       const r = Number(hourly_rate);
       if (!isFinite(r) || r < 0 || r > 500) {
         return res.status(400).json({ error: 'hourly_rate must be a number between 0 and 500' });
@@ -249,7 +264,7 @@ module.exports = (db) => {
       db.prepare("UPDATE users SET home_phone = ? WHERE id = ?").run(home_phone || null, userId);
     }
     // v0.96 — invoice_email: separate email shown on invoice (not a login credential, no uniqueness check)
-    if (invoice_email !== undefined) {
+    if (invoice_email !== undefined && !isTech) {
       if (invoice_email) {
         const valErr = validateUserFields({ email: invoice_email });
         if (valErr) return res.status(400).json({ error: `Invoice email: ${valErr}` });
