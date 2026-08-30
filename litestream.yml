@@ -1,0 +1,17 @@
+# Litestream — continuous SQLite replication to Fly Tigris object storage.
+# Tigris credentials are injected automatically as Fly secrets when you run:
+#   fly storage create
+# Then set the bucket name: fly secrets set LITESTREAM_BUCKET=<name from above>
+# See bin/start.sh for restore-on-boot and replica-exec startup.
+
+dbs:
+  - path: /app/data/otg.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: otg.db
+        region: auto
+        endpoint: ${AWS_ENDPOINT_URL_S3}
+        access-key-id: ${AWS_ACCESS_KEY_ID}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY}
+        sync-interval: 1s

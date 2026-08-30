@@ -22,8 +22,15 @@ ENV NODE_ENV=production
 # stays pure-JS. If this layer is dropped, OCR degrades gracefully to "scanned —
 # enter manually" rather than breaking uploads.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr \
+    && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr curl \
     && rm -rf /var/lib/apt/lists/*
+
+# v0.91 — Install litestream for continuous SQLite replication to Cloudflare R2.
+# Credentials (LITESTREAM_ACCESS_KEY_ID, LITESTREAM_SECRET_ACCESS_KEY,
+# LITESTREAM_BUCKET, CLOUDFLARE_ACCOUNT_ID) are set as Fly secrets.
+ARG LITESTREAM_VERSION=0.3.13
+RUN curl -sSL "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz" \
+    | tar -C /usr/local/bin -xz
 
 # Install dependencies first for better layer caching.
 # All Node deps are pure-JS (no native addons), so no build toolchain is needed.
@@ -35,7 +42,10 @@ RUN npm ci --omit=dev
 # build step required.
 COPY . .
 
+RUN chmod +x bin/start.sh
+
 EXPOSE 3000
 
-# Run node directly so it is PID 1 and receives SIGTERM on deploys/restarts.
-CMD ["node", "--experimental-sqlite", "--no-warnings=ExperimentalWarning", "server.js"]
+# litestream is PID 1; it wraps Node and handles SIGTERM on deploys/restarts.
+# On first boot it restores the DB from R2 if a replica exists (see bin/start.sh).
+CMD ["/app/bin/start.sh"]
