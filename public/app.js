@@ -9927,6 +9927,9 @@ function renderForecastCard(items, total) {
 async function renderSettings(root) {
   const me = STATE.user;
   const isManager = ['ops_manager','sr_manager','pm'].includes(me.role);
+  // v1.01 — a technician's login email is manager-managed (self-service is limited to
+  // invoice email, address and phone), so the login-email field is read-only for them.
+  const isTech = me.role === 'technician';
   // Policy + custom rules moved to their own bottom-bar tab in v0.20.
   // v0.91 — only managers need integration credentials; skip the fetch for technicians.
   const s = isManager ? await api('/settings/integrations') : null;
@@ -9943,8 +9946,8 @@ async function renderSettings(root) {
       <p class="help" style="margin: 0 0 12px;">Used as the bill-from header on your formal invoice.</p>
       <span class="label">Full name</span>
       <input class="field" id="profName" value="${escapeHTML(STATE.user.name || '')}" disabled />
-      <span class="label">Login email</span>
-      <input class="field" id="profEmail" type="email" maxlength="254" value="${escapeHTML(STATE.user.email || '')}" />
+      <span class="label">Login email${isTech ? ' <span class="meta">(managed by your Ops Manager)</span>' : ''}</span>
+      <input class="field" id="profEmail" type="email" maxlength="254" value="${escapeHTML(STATE.user.email || '')}" ${isTech ? 'disabled' : ''} />
       <span class="label">Invoice email <span class="meta">(optional — shown on invoice instead of login email)</span></span>
       <input class="field" id="profInvoiceEmail" type="email" maxlength="254" placeholder="payments@example.com" value="${escapeHTML(STATE.user.invoice_email || '')}" />
       <span class="label">Home address</span>
@@ -10027,24 +10030,29 @@ async function renderSettings(root) {
 
   $('#profSave')?.addEventListener('click', async () => {
     // v0.89 — validate email format before submitting
-    const emailVal = $('#profEmail').value.trim();
-    if (!emailVal) { toast('Email is required', 'err'); return; }
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(emailVal)) {
-      toast('Please enter a valid email address (e.g. name@company.com)', 'err');
-      return;
-    }
     const invEmailVal = $('#profInvoiceEmail').value.trim();
     if (invEmailVal && !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(invEmailVal)) {
       toast('Invoice email must be a valid email address', 'err');
       return;
     }
+    const body = {
+      invoice_email: invEmailVal,
+      home_address:  $('#profAddr').value.trim(),
+      home_phone:    $('#profPhone').value.trim(),
+    };
+    // v1.01 — login email is manager-managed for technicians; only validate + send it
+    // for roles allowed to change it (sending it as a tech would 403 the whole save).
+    if (!isTech) {
+      const emailVal = $('#profEmail').value.trim();
+      if (!emailVal) { toast('Email is required', 'err'); return; }
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(emailVal)) {
+        toast('Please enter a valid email address (e.g. name@company.com)', 'err');
+        return;
+      }
+      body.email = emailVal;
+    }
     try {
-      const updated = await api('/me', { method: 'PATCH', body: {
-        email:         emailVal,
-        invoice_email: invEmailVal,
-        home_address:  $('#profAddr').value.trim(),
-        home_phone:    $('#profPhone').value.trim(),
-      }});
+      const updated = await api('/me', { method: 'PATCH', body });
       STATE.user = { ...STATE.user, ...updated };
       toast('Profile saved ✓', 'ok');
     } catch (e) { toast(e.message, 'err'); }
