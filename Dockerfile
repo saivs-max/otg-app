@@ -21,8 +21,13 @@ ENV NODE_ENV=production
 # are the only system packages we shell out to (see lib/ocr.js); everything else
 # stays pure-JS. If this layer is dropped, OCR degrades gracefully to "scanned —
 # enter manually" rather than breaking uploads.
+# v0.91.3 — ca-certificates is REQUIRED: the litestream download below uses curl
+# over HTTPS, and with --no-install-recommends the `curl` package's recommended
+# ca-certificates dep is skipped, leaving no /etc/ssl/certs/ca-certificates.crt.
+# Without it curl fails with "(77) error setting certificate file" and the build
+# dies at the litestream layer. Install it explicitly.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr curl \
+    && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # v0.91 — Install litestream for continuous SQLite replication to Cloudflare R2.
