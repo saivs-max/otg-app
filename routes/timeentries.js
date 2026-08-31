@@ -279,6 +279,11 @@ module.exports = (db) => {
       db.exec('COMMIT');
     } catch (err) {
       db.exec('ROLLBACK');
+      // v1.02 — DB-level uq_active_timer_per_wo fires if two requests somehow
+      // race past the app-level dupe check above (e.g. concurrent processes).
+      if (err && err.message && err.message.includes('UNIQUE constraint failed')) {
+        return res.status(409).json({ error: 'You already have a running timer on this work order.' });
+      }
       throw err;
     }
 

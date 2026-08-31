@@ -199,6 +199,12 @@ CREATE TABLE IF NOT EXISTS time_entries (
 CREATE INDEX IF NOT EXISTS idx_time_user    ON time_entries(user_id);
 CREATE INDEX IF NOT EXISTS idx_time_invoice ON time_entries(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_time_open    ON time_entries(user_id, clock_out);
+-- v1.02 — DB-level guarantee: at most one running (clock_out IS NULL) timer per user+WO.
+-- The transaction in POST /timeentries already guards this; the partial UNIQUE index
+-- is the ultimate backstop that survives concurrent processes, future code paths, etc.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_timer_per_wo
+  ON time_entries (user_id, work_order_id)
+  WHERE clock_out IS NULL;
 
 CREATE TABLE IF NOT EXISTS expenses (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -578,4 +584,24 @@ CREATE TABLE IF NOT EXISTS mx_assets (
 );
 CREATE INDEX IF NOT EXISTS idx_mx_assets_location ON mx_assets(location_mx_id);
 CREATE INDEX IF NOT EXISTS idx_mx_assets_status   ON mx_assets(status);
+
+-- v1.00 — Work-order ↔ cart (MaintainX asset) links. Replaces the fragile
+-- "Carts: …" free-text note in work_orders.description with a real association
+-- so linked carts survive re-sync, pre-select in the WO form, and display on the
+-- WO detail. asset_name is a denormalized snapshot so a link still renders even
+-- if the asset later leaves the catalog. source records how the link was made:
+--   'manual'      — the tech selected the cart in the WO form
+--   'mx_link'     — MaintainX linked the asset to the work order
+--   'description' — a cart identifier named in the WO title/description matched
+CREATE TABLE IF NOT EXISTS work_order_assets (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_order_id  INTEGER NOT NULL REFERENCES work_orders(id) ON DELETE CASCADE,
+  asset_mx_id    TEXT    NOT NULL,                  -- FK to mx_assets.mx_id
+  asset_name     TEXT,                              -- snapshot of the asset name at link time
+  source         TEXT    NOT NULL DEFAULT 'manual', -- 'manual' | 'mx_link' | 'description'
+  created_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(work_order_id, asset_mx_id)
+);
+CREATE INDEX IF NOT EXISTS idx_woa_wo    ON work_order_assets(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_woa_asset ON work_order_assets(asset_mx_id);
 

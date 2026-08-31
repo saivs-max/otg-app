@@ -206,6 +206,15 @@ function ensureSchema(db) {
   // v0.83 — MaintainX catalog: locations + assets. Tables are created by
   // schema.sql above (CREATE TABLE IF NOT EXISTS); no column migrations needed.
   // Nothing to do here — the tables exist on first boot via schema.sql.
+
+  // v1.02 — partial UNIQUE index: at most one running timer per (user, WO).
+  // schema.sql carries this for fresh DBs; create it idempotently here so
+  // existing prod volumes get the constraint on next boot.
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_active_timer_per_wo
+      ON time_entries (user_id, work_order_id)
+      WHERE clock_out IS NULL`);
+  } catch (_) { /* partial-index unsupported on very old SQLite — non-fatal */ }
 }
 
 // v0.63 — Unplanned tagging. Tags are stored as a JSON array so one item can

@@ -1751,6 +1751,11 @@ async function renderWoAdd(root) {
   bind();
 }
 
+// v1.02 — module-level guard for the clock-in POST. Survives across multiple
+// sheet opens (e.g. a double-tap on the WO card calls clockIn() twice, giving
+// each onMount closure its own local flag — this module-level one covers all).
+let _clockInFlight = false;
+
 async function clockIn(work_order_id) {
   // Ask the tech: drive or work? Then capture GPS and start the timer.
   showSheet(`
@@ -1768,24 +1773,24 @@ async function clockIn(work_order_id) {
   `, {
     onMount: (wrap) => {
       $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
-      // v0.94 — guard against rapid double-tap: flag + immediate button disable
-      // prevent a queued second click from firing a duplicate POST.
-      let _starting = false;
+      // v1.02 — use module-level _clockInFlight (replaces v0.94 closure-local
+      // _starting). Module-level covers a double-tap on the WO card that calls
+      // clockIn() twice; finally{} resets so a failed request allows a retry.
       const start = async (mode) => {
-        if (_starting) return;
-        _starting = true;
+        if (_clockInFlight) return;
+        _clockInFlight = true;
         const workBtn  = $('#modeWork',  wrap);
         const driveBtn = $('#modeDrive', wrap);
         if (workBtn)  workBtn.disabled  = true;
         if (driveBtn) driveBtn.disabled = true;
         closeSheet();
         toast('Getting your location…');
-        const gps = await getGPS();
         try {
+          const gps = await getGPS();
           await api('/timeentries', { method: 'POST', body: { work_order_id, mode, gps } });
           toast(gps ? `Clocked in · ${mode === 'drive' ? 'drive' : 'work'} · location captured ✓` : `Clocked in (no GPS) ✓`, 'ok');
           goto('timer');
-        } catch (e) { toast(e.message, 'err'); }
+        } catch (e) { toast(e.message, 'err'); } finally { _clockInFlight = false; }
       };
       $('#modeWork',  wrap).addEventListener('click', () => start('work'));
       $('#modeDrive', wrap).addEventListener('click', () => start('drive'));
