@@ -46,6 +46,7 @@ app.use((req, res, next) => {
       "style-src 'self' 'unsafe-inline' https://unpkg.com; " +
       "img-src 'self' data: blob: https://*.tile.openstreetmap.org; " +
       "connect-src 'self'; " +
+      "frame-src 'self' blob:; " + // v1.02 — allow blob: iframes for the AP attachment preview
       "frame-ancestors 'none'");
   }
   next();
