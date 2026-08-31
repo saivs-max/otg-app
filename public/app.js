@@ -7731,7 +7731,7 @@ function openCorpCardAddSheet(categories, workorders, techs, onSaved, editing = 
 
     <span class="label">Work order (optional — links to store)</span>
     <input class="field" id="ccWoSearch" placeholder="🔎 Search by ID, store, type…" style="margin-bottom:6px;" />
-    <select class="field" id="ccWo" size="${Math.min(5, Math.max(2, openWos.length || 2))}">
+    <select class="field" id="ccWo" size="${Math.min(5, Math.max(2, openWos.length || 2))}" style="-webkit-appearance:auto;appearance:auto;padding:0;overflow-x:hidden;">
       <option value="">— No work order / store linkage —</option>
       ${woFiltered().map(w => `<option value="${w.id}" ${String(sel.work_order_id) === String(w.id) ? 'selected' : ''}>${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})</option>`).join('')}
     </select>
