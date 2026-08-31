@@ -191,6 +191,16 @@ button, input, select, textarea { font-size: inherit; }
 }
 .field:focus { outline: none; border-color: var(--ic-green); box-shadow: 0 0 0 3px rgba(67,176,42,0.15); }
 
+/* v0.89 — WO custom listbox (wrapping text + expand-on-select) */
+.wo-listbox { width:100%; border:1.5px solid var(--line); border-radius:12px; overflow-y:auto; max-height:220px; margin-bottom:14px; background:#fff; font-family:inherit; }
+.wo-opt { padding:10px 14px; cursor:pointer; border-bottom:1px solid var(--line); font-size:14px; line-height:1.4; color:var(--ink); user-select:none; -webkit-user-select:none; }
+.wo-opt:last-child { border-bottom:none; }
+.wo-opt:hover { background:var(--ic-cream); }
+.wo-opt.selected { background:#f0f9ec; border-left:3px solid var(--ic-green); padding-left:11px; }
+.wo-opt-main { font-weight:600; }
+.wo-opt-detail { font-size:12px; color:var(--ink-2); margin-top:3px; display:none; }
+.wo-opt.selected .wo-opt-detail { display:block; }
+
 /* ==== Badges & alerts ==== */
 .badge {
   display: inline-flex; align-items: center; gap: 6px;

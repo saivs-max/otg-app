@@ -865,6 +865,36 @@ document.addEventListener('click', (e) => {
 function labelForWoStatus(s) {
   return ({ in_progress: 'In progress', open: 'Open', completed: 'Done', cancelled: 'Cancelled', on_hold: 'On Hold' }[s] || s);
 }
+// v0.89 — shared custom WO listbox renderer. Replaces <select size="N"> so option
+// text wraps fully and the selected item expands to show work-type + cart detail.
+// listEl: container div; wos: WO array; curId: currently selected id (string);
+// onSelect(id): called with the new id string on each pick.
+// opts.includeBlank: prepend a "no work order" option (corp-card sheet).
+function buildWoListbox(listEl, wos, curId, onSelect, { includeBlank = false } = {}) {
+  if (!listEl) return;
+  const items = [];
+  if (includeBlank) items.push({ id: '', label: '— No work order / store linkage —', detail: '' });
+  wos.forEach(w => {
+    const status = (w.status && w.status !== 'open' && w.status !== 'in_progress') ? labelForWoStatus(w.status) : '';
+    const detail = [workTypeLabel(w.work_type), w.cart_count ? w.cart_count + ' carts' : '', status].filter(Boolean).join(' · ');
+    items.push({ id: String(w.id), label: escapeHTML(woLabel(w)) + ' — ' + escapeHTML(w.store_name || ''), detail });
+  });
+  listEl.dataset.woid = String(curId);
+  listEl.innerHTML = items.map(item => `
+    <div class="wo-opt${String(curId) === item.id ? ' selected' : ''}" data-woid="${escapeHTML(item.id)}">
+      <div class="wo-opt-main">${item.label || '— No work order / store linkage —'}</div>
+      ${item.detail ? `<div class="wo-opt-detail">${escapeHTML(item.detail)}</div>` : ''}
+    </div>`).join('');
+  listEl.querySelectorAll('.wo-opt').forEach(opt => {
+    opt.addEventListener('click', () => {
+      listEl.querySelectorAll('.wo-opt').forEach(o => o.classList.remove('selected'));
+      opt.classList.add('selected');
+      listEl.dataset.woid = opt.dataset.woid;
+      opt.scrollIntoView({ block: 'nearest' });
+      onSelect(opt.dataset.woid);
+    });
+  });
+}
 function labelForStatus(s) {
   // Single source of truth for invoice-status labels — used everywhere so the
   // same state never shows a different (or raw enum) label across screens.
@@ -2053,12 +2083,7 @@ async function renderAdd(root) {
 
       <span class="label">Work Order</span>
       <input class="field" id="woSearch" placeholder="🔎 Search by ID, store, type…" style="margin-bottom:6px;" value="${escapeHTML(selected.wo_search || '')}" />
-      <select class="field" id="woSel" size="${Math.min(5, Math.max(2, open.length))}">
-        ${open.filter(w => !selected.wo_search ||
-                          (w.external_id + ' ' + (w.store_name||'') + ' ' + (w.work_type||'') + ' ' + (w.description||''))
-                            .toLowerCase().includes(selected.wo_search.toLowerCase()))
-              .map(woOption).join('')}
-      </select>
+      <div class="wo-listbox" id="woSel"></div>
       ${w ? `<div class="help" style="margin-top:-8px">${sourceLabel(w.source_system)} · ${workTypeLabel(w.work_type)} · ${w.cart_count} carts · ${escapeHTML(w.description || '')}</div>` : ''}
 
       <span class="label">Date</span>
@@ -2323,18 +2348,21 @@ async function renderAdd(root) {
     $$('#subChips .chip').forEach(c => c.addEventListener('click', () => {
       selected.subcategory = c.dataset.sub; rerender();
     }));
+    function woSelFiltered() {
+      const q = (selected.wo_search || '').toLowerCase();
+      return q ? open.filter(w => (w.external_id + ' ' + (w.store_name||'') + ' ' + (w.work_type||'') + ' ' + (w.description||'')).toLowerCase().includes(q)) : open;
+    }
+    function initWoListbox() {
+      buildWoListbox($('#woSel'), woSelFiltered(), String(selected.work_order_id || ''), id => {
+        selected.work_order_id = id;
+        rerender();
+        if (id) fetchWoTime(id);
+      });
+    }
+    initWoListbox();
     $('#woSearch')?.addEventListener('input', e => {
       selected.wo_search = e.target.value;
-      const q = selected.wo_search.toLowerCase();
-      const filtered = q ? open.filter(w => (w.external_id + ' ' + w.store_name + ' ' + w.work_type + ' ' + (w.description || '')).toLowerCase().includes(q)) : open;
-      $('#woSel').innerHTML = filtered.map(woOption).join('');
-    });
-    $('#woSel').addEventListener('change', e => {
-      selected.work_order_id = e.target.value;
-      rerender();
-      // v0.88 — pre-fetch time entries so the labor/drive warning panel is
-      // ready immediately when the tech switches to that category.
-      if (selected.work_order_id) fetchWoTime(selected.work_order_id);
+      initWoListbox();
     });
     $('#dateInp').addEventListener('change', e => { selected.expense_date = e.target.value; });
     // Wire the receipt picker (lives in #recBlock)
@@ -3340,9 +3368,7 @@ async function openManualTimeSheet(opts = {}) {
 
     <span class="label">Work order</span>
     <input class="field" id="mtWOSearch" placeholder="🔎 Search by ID, store, type…" style="margin-bottom:6px;" />
-    <select class="field" id="mtWO" size="${Math.min(5, Math.max(2, open.length))}">
-      ${open.map(w => woOpt(w, '')).join('')}
-    </select>
+    <div class="wo-listbox" id="mtWO"></div>
     <div class="help" id="mtWONoMatch" style="display:none; margin-top:-8px; color: var(--muted);">No work orders match — clear the search to see all.</div>
 
     <span class="label">Date</span>
@@ -3385,27 +3411,26 @@ async function openManualTimeSheet(opts = {}) {
   `, {
     onMount: (wrap) => {
       $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
-      // v0.87 — WO search (mirrors the expense form): filter the <select> as the
-      // tech types so they can find a specific work order instead of scrolling a
-      // long preselected list.
-      const woSel = $('#mtWO', wrap);
-      let curWo = woSel.value;                         // preserve pick across filtering
-      woSel.addEventListener('change', () => { curWo = woSel.value; });
+      // v0.89 — custom WO listbox replaces <select>: text wraps, selected row expands.
+      let curWo = '';
+      const mtWOEl = $('#mtWO', wrap);
+      function initMtWO(wos) {
+        buildWoListbox(mtWOEl, wos, curWo, id => { curWo = id; });
+        const none = $('#mtWONoMatch', wrap);
+        if (none) none.style.display = wos.length ? 'none' : 'block';
+      }
+      initMtWO(open);
       $('#mtWOSearch', wrap)?.addEventListener('input', (e) => {
         const q = e.target.value.trim().toLowerCase();
         const matches = q
           ? open.filter(w => (`${w.external_id} ${w.store_name || ''} ${w.work_type || ''} ${w.description || ''} ${woLabel(w)}`)
                               .toLowerCase().includes(q))
           : open;
-        woSel.innerHTML = matches.map(w => woOpt(w, curWo)).join('');
-        // Keep the hidden <select> value in sync if the old pick was filtered out.
-        if (!matches.some(w => String(w.id) === String(curWo))) curWo = woSel.value;
-        const none = $('#mtWONoMatch', wrap);
-        if (none) none.style.display = matches.length ? 'none' : 'block';
+        initMtWO(matches);
       });
       const mtSaveBtn = $('#mtSave', wrap); // v0.87 — double-submit guard
       mtSaveBtn.addEventListener('click', () => submitOnce(mtSaveBtn, async () => {
-        const wo_id = Number($('#mtWO', wrap).value);
+        const wo_id = Number(curWo);
         const date  = $('#mtDate', wrap).value;
         const start = $('#mtStart', wrap).value;
         const end   = $('#mtEnd', wrap).value;
@@ -7731,10 +7756,7 @@ function openCorpCardAddSheet(categories, workorders, techs, onSaved, editing = 
 
     <span class="label">Work order (optional — links to store)</span>
     <input class="field" id="ccWoSearch" placeholder="🔎 Search by ID, store, type…" style="margin-bottom:6px;" />
-    <select class="field" id="ccWo" size="${Math.min(5, Math.max(2, openWos.length || 2))}" style="-webkit-appearance:auto;appearance:auto;padding:0;overflow-x:hidden;">
-      <option value="">— No work order / store linkage —</option>
-      ${woFiltered().map(w => `<option value="${w.id}" ${String(sel.work_order_id) === String(w.id) ? 'selected' : ''}>${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})</option>`).join('')}
-    </select>
+    <div class="wo-listbox" id="ccWo"></div>
 
     <span class="label">Description</span>
     <input class="field" id="ccDesc" placeholder="e.g., Marriott Edgewater — 2 nights" value="${escapeHTML(sel.description || '')}" />
@@ -7746,13 +7768,14 @@ function openCorpCardAddSheet(categories, workorders, techs, onSaved, editing = 
   `, {
     onMount: (wrap) => {
       $('[data-act="sheet-close"]', wrap).addEventListener('click', closeSheet);
+      // v0.89 — custom WO listbox; sel.work_order_id is the live source of truth.
+      function initCcWo() {
+        buildWoListbox($('#ccWo', wrap), woFiltered(), String(sel.work_order_id || ''), id => { sel.work_order_id = id; }, { includeBlank: true });
+      }
+      initCcWo();
       $('#ccWoSearch', wrap).addEventListener('input', e => {
         sel.wo_search = e.target.value;
-        const list = woFiltered();
-        $('#ccWo', wrap).innerHTML = `
-          <option value="">— No work order / store linkage —</option>
-          ${list.map(w => `<option value="${w.id}">${escapeHTML(w.external_id)} — ${escapeHTML(w.store_name || '')} (${workTypeLabel(w.work_type)})</option>`).join('')}
-        `;
+        initCcWo();
       });
       $('#ccSave', wrap).addEventListener('click', async () => {
         const body = {
@@ -7762,7 +7785,7 @@ function openCorpCardAddSheet(categories, workorders, techs, onSaved, editing = 
           description:  $('#ccDesc', wrap).value || null,
         };
         const tech = $('#ccTech', wrap).value;
-        const wo   = $('#ccWo',   wrap).value;
+        const wo   = sel.work_order_id;
         body.on_behalf_of_user_id = tech ? Number(tech) : null;
         body.work_order_id        = wo   ? Number(wo)   : null;
 
