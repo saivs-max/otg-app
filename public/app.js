@@ -957,6 +957,15 @@ async function renderWoDetail(root, woId) {
       <div class="card-row" style="margin-top: 10px;">
         <span>Carts</span><span class="amt">${w.cart_count || 0}</span>
       </div>
+      ${(w.linked_assets && w.linked_assets.length) ? `
+      <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;">
+        ${w.linked_assets.map(a => `
+          <span class="chip" style="font-size:11px; padding:3px 8px; ${a.status === 'INACTIVE' || a.status === 'ARCHIVED' ? 'opacity:.55;' : ''}"
+            title="${escapeHTML(a.serial_number || a.asset_mx_id)}${a.source === 'description' ? ' · matched from description' : (a.source === 'mx_link' ? ' · linked in MaintainX' : '')}">
+            🛒 ${escapeHTML(a.name || a.asset_mx_id)}
+          </span>
+        `).join('')}
+      </div>` : ''}
       ${w.scheduled_date ? `<div class="card-row"><span>Scheduled</span><span>${fmtDate(w.scheduled_date)}</span></div>` : ''}
       <div class="card-row"><span>Local reference</span><span class="amt" style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--muted);">${escapeHTML(w.external_id)}</span></div>
       ${w.description && !needsDescUpdate ? `<div style="margin-top: 10px; padding: 10px 12px; background: #fafafa; border-radius: 8px; font-size: 14px; line-height: 1.5; white-space: pre-wrap;">${escapeHTML(w.description)}</div>` : ''}
@@ -1533,10 +1542,14 @@ async function renderWoAdd(root) {
           // v0.97 — MaintainX returned 403 (WO not assigned to this API key); fell back to local record.
           toast('⚠ Filled from local record (MaintainX API denied access — WO may not be assigned to you yet). Verify fields before saving.', 'err');
         } else {
-          toast(`Pulled from ${r.source_system} ✓`, 'ok');
+          // v1.00 — surface MaintainX logged hours in the pull confirmation.
+          const hrsNote = (r._mx_hours != null && r._mx_hours > 0) ? ` · ${r._mx_hours}h logged in MaintainX` : '';
+          toast(`Pulled from ${r.source_system} ✓${hrsNote}`, 'ok');
         }
         rerender();
         // v0.83 — Auto-select location + carts if linked in the MX WO.
+        // v1.00 — pre-select carts from BOTH the MX-linked assets and any carts
+        // named in the description (server matched them to this location).
         if (r._mx_location_id && mxLocs.length) {
           const _pullLoc = mxLocs.find(l => l.mx_id === String(r._mx_location_id));
           if (_pullLoc) {
@@ -1546,10 +1559,14 @@ async function renderWoAdd(root) {
             form.store_address = [_pullLoc.address, _pullLoc.city, _pullLoc.state, _pullLoc.zip].filter(Boolean).join(', ');
             rerender();
             await loadCartsForLocation(_pullLoc.mx_id);
-            if (r._mx_asset_ids && r._mx_asset_ids.length && mxCarts.length) {
-              const preIds = r._mx_asset_ids.map(String);
+            const preIds = [...new Set([...(r._mx_asset_ids || []), ...(r._desc_asset_ids || [])].map(String))];
+            if (preIds.length && mxCarts.length) {
               selectedCarts = mxCarts.filter(a => preIds.includes(a.mx_id)).map(a => a.mx_id);
-              if (selectedCarts.length) rerender();
+              if (selectedCarts.length) {
+                syncCartUI();
+                rerender();
+                toast(`${selectedCarts.length} cart${selectedCarts.length !== 1 ? 's' : ''} pre-selected from the work order`, 'ok');
+              }
             }
           }
         }
@@ -1650,14 +1667,12 @@ async function renderWoAdd(root) {
       form.cart_count     = $('#carts').value;
       form.scheduled_date = $('#sched').value;
       form.description    = $('#desc').value;
-      // Append selected cart names to description so they're recorded on the WO.
-      if (selectedCarts.length) {
-        const names    = selectedCarts.map(id => mxCarts.find(a => a.mx_id === id)?.name || id);
-        const cartNote = 'Carts: ' + names.join(', ');
-        form.description = form.description ? form.description + '\n' + cartNote : cartNote;
-        // Also update cart_count to match selection if tech left it at default
-        if (!form.cart_count || Number(form.cart_count) === 0)
-          form.cart_count = selectedCarts.length;
+      // v1.00 — carts are persisted as real WO↔asset links (work_order_assets),
+      // not a free-text note. Send the selected asset ids; default the cart_count
+      // to the selection when the tech left it blank/zero.
+      form.linked_asset_mx_ids = selectedCarts.slice();
+      if (selectedCarts.length && (!form.cart_count || Number(form.cart_count) === 0)) {
+        form.cart_count = selectedCarts.length;
       }
     };
 
@@ -1670,6 +1685,20 @@ async function renderWoAdd(root) {
       try {
         const wo = await api('/workorders', { method: 'POST', body: form });
         toast(`Added ${woLabel(wo)} ✓`, 'ok');
+        // v1.00 — auto-sync MaintainX time entries now that the WO exists (the
+        // pull is a preview with no WO row, so entries can only attach on save).
+        // Best-effort: never block the create flow if the sync fails.
+        if (wo.source_system === 'maintainx') {
+          try {
+            // fromCreate: pin the sync to this row and keep the fields + carts
+            // the tech just confirmed — only pull the MaintainX time entries.
+            const s = await api(`/workorders/${wo.id}/sync-maintainx`, { method: 'POST', body: { fromCreate: true } });
+            const mins = s?.result?.labor?.minutes;
+            if (mins > 0) toast(`Synced ${Math.round((mins / 60) * 10) / 10}h from MaintainX ✓`, 'ok');
+          } catch (se) {
+            toast(`Saved, but MaintainX time sync failed: ${se.message}`, 'err');
+          }
+        }
         if (confirm(`Clock in to ${woLabel(wo)} now?`)) {
           await clockIn(wo.id);
         } else {
@@ -10597,7 +10626,8 @@ async function renderInvoiceDetail(root, invoiceId) {
     api(`/invoices/${invoiceId}/notices`).catch(() => []),   // v0.64.3 — manager edit notices
     api(`/invoices/${invoiceId}/addition-requests`).catch(() => []),   // v0.68 — add-WO requests
   ]);
-  const { invoice, lines, summary, by_date = [], extracted = null, extracted_at = null, tech_user = null } = r;
+  const { invoice, lines, summary, by_date = [], extracted = null, extracted_at = null, tech_user = null,
+          contact_email = 'ap@instacart.com' } = r; // v0.99 — company AP/contact email
   const me = STATE.user;
   const isManagerProxy = STATE.onBehalfOf && STATE.onBehalfOf === invoice.user_id;
   const isManagerView  = ['ops_manager','sr_manager','pm'].includes(me.role) && invoice.user_id !== me.id;
@@ -11051,7 +11081,7 @@ async function renderInvoiceDetail(root, invoiceId) {
       <div class="inv-footer">
         <div>Payable in USD to <strong>${escapeHTML(billFrom.name)}</strong></div>
         <div style="font-size: 11px; color: var(--muted); margin-top: 4px;">If you have any questions concerning this invoice, use the following contact information:</div>
-        <div style="margin-top: 4px;"><strong>Email:</strong> ${escapeHTML(billFrom.invoice_email || billFrom.email)}${billFrom.home_phone ? ` · <strong>Mobile:</strong> ${escapeHTML(billFrom.home_phone)}` : ''}</div>
+        <div style="margin-top: 4px;"><strong>Email:</strong> <a href="mailto:${escapeHTML(contact_email)}" style="color: inherit;">${escapeHTML(contact_email)}</a>${billFrom.home_phone ? ` · <strong>Mobile:</strong> ${escapeHTML(billFrom.home_phone)}` : ''}</div>
       </div>
     </div>
 
