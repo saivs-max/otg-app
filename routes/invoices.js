@@ -294,13 +294,17 @@ module.exports = (db) => {
 
     for (const t of times) {
       const w = ensureWO(t.external_id, t);
-      const hrs = sumHours([t]);
+      // v0.98.1 — round per-entry hours to 2dp before accumulating so the
+      // server's WO total equals sum(displayed_amount per entry). Without this,
+      // raw float hours × rate can round differently at the WO level than the
+      // client's per-entry display (t.hours × rate), producing a mismatch.
+      const hrs = +sumHours([t]).toFixed(2);
       w.labor_hours += hrs;
       w.labor_amount += hrs * rate;
     }
     for (const t of driveTimes) {
       const w = ensureWO(t.external_id, t);
-      const hrs = sumHours([t]);
+      const hrs = +sumHours([t]).toFixed(2); // v0.98.1 — same rounding for drive
       w.drive_hours += hrs;
       w.drive_amount += hrs * rate;
     }
@@ -381,14 +385,14 @@ module.exports = (db) => {
     }
     for (const t of times) {
       const day = bucket(t.clock_in);
-      const hrs = sumHours([t]);
+      const hrs = +sumHours([t]).toFixed(2); // v0.98.1 — round per-entry (matches byWO + client display)
       day.labor_hours  += hrs;
       day.labor_amount += hrs * rate;
       day.work_orders.add(t.external_id);
       day.time_entries.push({
         id: t.id, external_id: t.external_id, wo_number: t.wo_number || null,
         source_system: t.source_system, store_name: t.store_name, work_type: t.work_type,
-        clock_in: t.clock_in, clock_out: t.clock_out, hours: +hrs.toFixed(2), notes: t.notes,
+        clock_in: t.clock_in, clock_out: t.clock_out, hours: hrs, notes: t.notes,
         mode: 'work', source: t.source || null,
         // v0.64 — surfaced for the review UI only; never rendered on the AP PDF.
         unplanned_tag: t.unplanned_tag, unplanned_note: t.unplanned_note, unplanned_wasted: t.unplanned_wasted,
@@ -396,14 +400,14 @@ module.exports = (db) => {
     }
     for (const t of driveTimes) {
       const day = bucket(t.clock_in);
-      const hrs = sumHours([t]);
+      const hrs = +sumHours([t]).toFixed(2); // v0.98.1
       day.drive_hours  += hrs;
       day.drive_amount += hrs * rate;   // v0.55 — drive is billable
       day.work_orders.add(t.external_id);
       day.drive_entries.push({
         id: t.id, external_id: t.external_id, wo_number: t.wo_number || null,
         source_system: t.source_system, store_name: t.store_name, work_type: t.work_type,
-        clock_in: t.clock_in, clock_out: t.clock_out, hours: +hrs.toFixed(2), notes: t.notes,
+        clock_in: t.clock_in, clock_out: t.clock_out, hours: hrs, notes: t.notes,
         mode: 'drive',
         unplanned_tag: t.unplanned_tag, unplanned_note: t.unplanned_note, unplanned_wasted: t.unplanned_wasted,
       });
@@ -544,13 +548,29 @@ module.exports = (db) => {
     };
   }
 
-  // GET /api/invoices/current  → current-week draft (creates if needed)
+  // GET /api/invoices/current  → current-week active invoice (creates draft if needed)
+  // v0.99 — previously this always returned a draft (creating one if absent), which
+  // caused Expected-pay to show $0 immediately after the tech submitted: the old
+  // draft was locked, a new empty draft was auto-created, and THAT $0 draft was
+  // returned. Now we first look for any active (non-rejected) invoice for the
+  // current week; only if none exists do we create a new draft.
   router.get('/invoices/current', (req, res) => {
     // v0.67.1 — technician-only: a "current draft" is a self-invoice (payee =
     // caller). Managers/PMs are approvers, not payees, and have no own draft.
     const me = requireSelfInvoiceTech(req, res); if (!me) return;
     const userId = me.id;
-    const inv = ensureCurrentDraft(userId);
+    const { start } = weekBounds(new Date());
+    // Return the first active (non-rejected, non-deleted) invoice for this week,
+    // prioritising the draft so time-entry creation still works as before.
+    const ACTIVE_STATUSES = [
+      'draft','submitted','in_review','approved_ops','approved_sr','queued_ap','sent_ap'
+    ];
+    const existing = db.prepare(
+      `SELECT * FROM invoices WHERE user_id = ? AND period_start = ?
+         AND status IN (${ACTIVE_STATUSES.map(() => '?').join(',')})
+       ORDER BY CASE status WHEN 'draft' THEN 0 ELSE 1 END, id DESC LIMIT 1`
+    ).get(userId, start, ...ACTIVE_STATUSES);
+    const inv = existing || ensureCurrentDraft(userId);
     res.json(stripFlagsForTech(computeInvoice(inv.id), userId));
   });
 
@@ -1203,6 +1223,9 @@ module.exports = (db) => {
     // header showed the manager's name instead of the tech's).
     const tech = db.prepare("SELECT id, name, email, home_address, home_phone, invoice_email, worker_type, hourly_rate FROM users WHERE id = ?").get(inv.user_id);
     computed.tech_user = tech || null;
+    // v0.99 — surface the company contact email so the HTML preview can show it
+    // in the footer. Never expose the tech's own email for this purpose.
+    computed.contact_email = getPolicy(db).AP_EMAIL || process.env.AP_EMAIL || 'ap@instacart.com';
     // If the invoice was uploaded as a PDF, surface the extracted summary so
     // the UI can render the side-by-side "extracted vs computed" panel.
     const ext = db.prepare("SELECT extracted_summary, extracted_at FROM invoices WHERE id = ?").get(id);
@@ -1734,6 +1757,9 @@ module.exports = (db) => {
         invoice: computed.invoice, tech,
         lines: computed.lines, by_date: computed.by_date,
         summary: computed.summary, approvals, tz: clientTz,
+        // v0.99 — company contact email for the invoice footer; sourced from
+        // trusted policy/env so a user can never inject their own address here.
+        contactEmail: policy.AP_EMAIL || process.env.AP_EMAIL || 'ap@instacart.com',
       });
     } catch (e) {
       return res.status(500).json({ error: `PDF generation failed: ${e.message}` });
@@ -1763,8 +1789,20 @@ module.exports = (db) => {
     `).run(inv.id, userId, apEmail, subject, body, attachmentId);
     const notifId = notifRow.lastInsertRowid;
 
+    // v0.90.1 — CC: tech + their ops manager(s) + fixed stakeholder address.
+    const ALWAYS_CC = 'sai.vs@instacart.com';
+    const techEmail = (tech?.invoice_email || tech?.email || '').trim();
+    const opsMgrEmails = db.prepare(`
+      SELECT u.email FROM manager_team mt
+      JOIN users u ON u.id = mt.manager_user_id
+      WHERE mt.tech_user_id = ? AND u.email IS NOT NULL AND u.email != ''
+    `).all(inv.user_id).map(r => r.email.trim());
+    const ccList = [...new Set([techEmail, ...opsMgrEmails, ALWAYS_CC])]
+      .filter(e => e && e !== apEmail);
+
     const mailResult = await sendMail({
       to:               apEmail,
+      cc:               ccList.length ? ccList : undefined,
       subject,
       text:             body,
       html:             bodyHtml,
@@ -1790,7 +1828,7 @@ module.exports = (db) => {
     `).run(now, userId, apEmail, clientTz, now, now, id);
 
     logAudit(db, { entity_type: 'invoices', entity_id: id, user_id: userId, action: 'send_to_ap',
-                   details: { ap_email: apEmail, attachment_id: attachmentId, pdf_bytes: pdfBuf.length,
+                   details: { ap_email: apEmail, cc: ccList, attachment_id: attachmentId, pdf_bytes: pdfBuf.length,
                               email_sent: mailResult.sent, email_error: mailResult.error || null } });
 
     res.json({
@@ -1874,6 +1912,8 @@ module.exports = (db) => {
         invoice: computed.invoice, tech,
         lines: computed.lines, by_date: computed.by_date,
         summary: computed.summary, approvals, tz: pdfTz,
+        // v0.99 — company contact email for the invoice footer (trusted config only).
+        contactEmail: (getPolicy(db).AP_EMAIL || process.env.AP_EMAIL || 'ap@instacart.com'),
       });
       const filename = `${inv.invoice_number || `invoice-${id}`}.pdf`;
       res.setHeader('Content-Type', 'application/pdf');
