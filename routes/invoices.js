@@ -49,11 +49,8 @@ module.exports = (db) => {
     const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
     if (!me) return { ok: false, error: 'no user selected', status: 401 };
     if (me.role === 'sr_manager' || me.role === 'pm') return { ok: true, inv };
-    if (me.role === 'ops_manager') {
-      const inTeam = db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?")
-                       .get(userId, inv.user_id);
-      if (inTeam) return { ok: true, inv };
-    }
+    // v0.100 — ops_manager has org-wide invoice visibility (same as sr_manager/pm).
+    if (me.role === 'ops_manager') return { ok: true, inv };
     return { ok: false, error: 'not allowed on this invoice', status: 403 };
   }
 
@@ -1235,9 +1232,9 @@ module.exports = (db) => {
     if (!inv) return res.status(404).json({ error: 'not found' });
     if (inv.user_id !== userId) {
       const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
+      // v0.100 — ops_manager has org-wide invoice visibility.
       const allowed = me && (
-        me.role === 'sr_manager' || me.role === 'pm' ||
-        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, inv.user_id))
+        me.role === 'sr_manager' || me.role === 'pm' || me.role === 'ops_manager'
       );
       if (!allowed) return res.status(403).json({ error: 'not yours' });
     }
@@ -1273,8 +1270,8 @@ module.exports = (db) => {
     if (!inv) return res.status(404).json({ error: 'not found' });
     if (inv.user_id !== userId) {
       const me = db.prepare("SELECT role FROM users WHERE id = ?").get(userId);
-      const ok = me && (me.role === 'sr_manager' || me.role === 'pm' ||
-        (me.role === 'ops_manager' && db.prepare("SELECT 1 FROM manager_team WHERE manager_user_id = ? AND tech_user_id = ?").get(userId, inv.user_id)));
+      // v0.100 — ops_manager has org-wide invoice visibility.
+      const ok = me && (me.role === 'sr_manager' || me.role === 'pm' || me.role === 'ops_manager');
       if (!ok) return res.status(403).json({ error: 'not yours' });
     }
     const rows = db.prepare(`
