@@ -571,6 +571,31 @@ module.exports = (db) => {
        ORDER BY CASE status WHEN 'draft' THEN 0 ELSE 1 END, id DESC LIMIT 1`
     ).get(userId, start, ...ACTIVE_STATUSES);
     const inv = existing || ensureCurrentDraft(userId);
+    // v1.03 — restore the orphan-sweep that v0.99 unintentionally dropped.
+    // Before v0.99 this route ALWAYS called ensureCurrentDraft(), whose
+    // ensureDraftForWeek() sweeps in-range, clocked-out, unattached time/expense
+    // rows onto the week's draft. v0.99 began returning an already-existing draft
+    // directly (to stop shadowing a submitted invoice with a fresh $0 draft), but
+    // that skipped the sweep. Timer entries (live clock-in + PATCH clock-out never
+    // set invoice_id) are only ever attached by this sweep, so once a draft already
+    // existed they stayed invoice_id=NULL: invisible on the invoice yet still
+    // tripping the overlap guard — the tech couldn't see or edit their own logged
+    // time. Re-run the sweep whenever the resolved invoice is a draft (never for a
+    // submitted/approved one, preserving the v0.99 fix). Also self-heals rows that
+    // stranded while the bug was live. Uses the invoice's own period bounds.
+    if (inv.status === 'draft') {
+      db.prepare(`
+        UPDATE time_entries SET invoice_id = ?
+        WHERE user_id = ? AND invoice_id IS NULL
+          AND date(clock_in) BETWEEN ? AND ?
+          AND clock_out IS NOT NULL
+      `).run(inv.id, userId, inv.period_start, inv.period_end);
+      db.prepare(`
+        UPDATE expenses SET invoice_id = ?
+        WHERE user_id = ? AND invoice_id IS NULL
+          AND date(expense_date) BETWEEN ? AND ?
+      `).run(inv.id, userId, inv.period_start, inv.period_end);
+    }
     res.json(stripFlagsForTech(computeInvoice(inv.id), userId));
   });
 

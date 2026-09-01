@@ -37,6 +37,20 @@ plan, no commit before review.
    touching auth, money, or data). Check correctness, regressions, tests, and
    security against the plan and the PRD's §6 acceptance criteria. Only after
    review passes is the change ready to commit/deploy.
+   - **Blast-radius / invariant check (required for any change to a shared path).**
+     Before editing a shared read/write path — anything many callers depend on
+     (`GET /invoices/current`, `computeInvoice`, `buildCostTrackerRows`,
+     `ensureSchema`, `weekBounds`, the sweep in `ensureDraftForWeek`, etc.) — write
+     one line naming **the invariant the existing code guarantees that callers rely
+     on**, and confirm the change preserves it. Example that would have caught the
+     v1.03 regression: *"opening the invoice always sweeps this week's loose
+     time/expense rows onto the draft"* — a refactor that returned an existing draft
+     without re-sweeping silently broke it. If you can't name the invariant, you
+     don't yet understand the blast radius — go back to Research.
+   - **One commit = one concern.** A commit's diff must match its message. If a
+     change "while you're in there" touches an unrelated path (e.g. a rounding fix
+     that also restructures `/invoices/current`), it belongs on its own branch with
+     its own review — bundling hides regressions from review and from `git blame`.
 
 **Rigor scales with size.** Full chain (a subagent per phase) for features and
 non-trivial fixes. Trivial one-liners/chores may use a fast-path (research + fix
@@ -69,6 +83,10 @@ drifts. When unsure, run the full chain.
 - The sandbox generally can't push (git auth is on the Mac) and git writes to `.git`
   may hit EPERM/lock issues — prepare the isolated branch/patch here, but run the
   final `commit`/`push`/PR from the Mac.
+- **Claude must always follow this convention.** Before touching any file, cut the
+  branch. After writing code, provide the exact `git checkout -b <branch>`, `git add`,
+  `git commit`, and `git push` commands for the user to run — never commit directly
+  to `main` and never skip the branch step.
 
 ## Runtime
 - Node + `node:sqlite` → needs flags `--experimental-sqlite --no-warnings=ExperimentalWarning`
