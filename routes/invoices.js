@@ -1891,6 +1891,14 @@ module.exports = (db) => {
       && inv.updated_at > inv.sent_to_ap_at;
     const canSend = approvedStates.includes(inv.status)
       || (inv.status === 'sent_ap' && (!isTechOwner || isResubmit)); // mgr may resend; tech only if changed
+    // v0.99 — Only surface pdf_url when the invoice actually has an uploaded
+    // attachment. The on-demand PDF endpoint always exists but the preview
+    // section should be suppressed (and "Open in new tab" hidden) when there
+    // is nothing to preview. Resubmits naturally have attachment_count > 0
+    // because the first send stored the PDF as an attachment row.
+    const { attachment_count } = db.prepare(
+      "SELECT COUNT(*) AS attachment_count FROM attachments WHERE invoice_id = ?"
+    ).get(id);
     res.json({
       recipient: apEmail,
       sender_name:  me?.name,
@@ -1899,7 +1907,7 @@ module.exports = (db) => {
       body,
       approvals,
       pdf_filename: `${inv.invoice_number || `invoice-${id}`}.pdf`,
-      pdf_url: `/api/invoices/${id}/pdf`,
+      pdf_url: attachment_count > 0 ? `/api/invoices/${id}/pdf` : null,
       already_sent: !!inv.sent_to_ap_at,
       can_send: canSend,
       is_resubmit: isResubmit,

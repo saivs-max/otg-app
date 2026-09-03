@@ -5411,7 +5411,12 @@ async function openSendToApSheet(invoice) {
            "breadapp.fly.dev refused to connect." Fetching the PDF as a blob
            gives a clean success/failure signal, so the preview + "Open in new
            tab" appear only when a document is actually available; otherwise a
-           clear "No attachment available." message is shown. -->
+           clear "No attachment available." message is shown.
+           v0.99 — The entire section is only rendered when preview.pdf_url
+           exists; when there is no attachment we skip the section header and
+           loading state entirely and show a plain message so users never see
+           a broken frame or the "refused to connect" error. -->
+      ${preview.pdf_url ? `
       <div class="pdf-preview">
         <div class="pdf-preview-head">
           <strong>📄 Attachment preview</strong>
@@ -5421,6 +5426,9 @@ async function openSendToApSheet(invoice) {
           <p class="help" style="text-align: center; margin: 14px 0;">Loading preview…</p>
         </div>
       </div>
+      ` : `
+      <p class="help" style="text-align: center; margin: 14px 0; color: var(--muted);">📎 No attachment available.</p>
+      `}
 
       ${!preview.can_send ? `
         <div class="alert warn" style="margin-top: 12px;">
@@ -5496,6 +5504,11 @@ async function loadApPreview(wrap, preview, token) {
     bodyEl.innerHTML =
       `<p class="help" style="text-align: center; margin: 16px 0; color: var(--muted);">📎 ${escapeHTML(msg)}</p>`;
     if (openEl) openEl.innerHTML = '';
+    // v0.99 — hide the entire .pdf-preview container (heading + body) so the
+    // "📄 Attachment preview" heading never shows without content. Defense-in-
+    // depth: catches any fetch failure even if pdf_url is accidentally non-null.
+    const container = wrap.querySelector('.pdf-preview');
+    if (container) container.style.display = 'none';
   };
   if (!preview || !preview.pdf_url) { showNone('No attachment available.'); return; }
   // v0.98 — pass the browser timezone so the preview PDF renders entry times in
