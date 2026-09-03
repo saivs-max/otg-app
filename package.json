@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node --experimental-sqlite --no-warnings=ExperimentalWarning --env-file-if-exists=.env server.js",
     "test:invoices": "node test/invoice-accuracy/run-accuracy.js",
+    "test:invoice-roundtrip": "node test/invoice-accuracy/app-roundtrip.js",
     "test:localdate": "TZ=America/Los_Angeles node test/local-date-consistency/run.js",
     "test:maintainx": "node --experimental-sqlite --no-warnings=ExperimentalWarning test/maintainx-sync/run.js && node --experimental-sqlite --no-warnings=ExperimentalWarning test/maintainx-sync/http-smoke.js",
     "test:break": "node --experimental-sqlite --no-warnings=ExperimentalWarning test/break-workflow/http-smoke.js",
@@ -27,6 +28,7 @@
   },
   "dependencies": {
     "csv-parse": "^5.5.6",
+    "escape-html": "^1.0.3",
     "express": "^4.21.0",
     "nodemailer": "^9.0.6",
     "pdf-parse": "^1.1.1",

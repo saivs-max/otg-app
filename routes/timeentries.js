@@ -1,6 +1,7 @@
 // Clock in / clock out endpoints.
-const express = require('express');
-const router  = express.Router();
+const express    = require('express');
+const router     = express.Router();
+const escapeHtml = require('escape-html'); // v0.96 — sanitize notes before storage (stored XSS, same class as Bug #9)
 const { logAudit, sumHours, weekBounds } = require('../db');
 const { resolveProxy } = require('../lib/proxyAuth'); // v0.90
 const weekBoundsFor = (d) => weekBounds(new Date(d));
@@ -200,7 +201,7 @@ module.exports = (db) => {
         INSERT INTO time_entries (user_id, work_order_id, clock_in, clock_out, break_minutes, notes, mode)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(effectiveUserId, Number(work_order_id), ci.toISOString(), co.toISOString(),
-             Number(break_minutes) || 0, notes || null, mode);
+             Number(break_minutes) || 0, notes ? escapeHtml(String(notes)) : null, mode); // v0.96 — escape on write
       const newId = r.lastInsertRowid;
       // v0.92 — never strand the entry: get-or-create a DRAFT covering ciDate
       // (mints a supplemental draft when the week's invoice is already
@@ -455,7 +456,7 @@ module.exports = (db) => {
     }
 
     const breaks = req.body.break_minutes != null ? Number(req.body.break_minutes) : e.break_minutes;
-    const notes  = req.body.notes ?? e.notes;
+    const notes  = req.body.notes != null ? escapeHtml(String(req.body.notes)) : e.notes; // v0.96 — escape on write
 
     // Branch A: still running → this PATCH is a clock-out.
     // v0.94 — block silent field hijacking on running timers.
