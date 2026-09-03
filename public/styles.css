@@ -101,7 +101,12 @@ button, input, select, textarea { font-size: inherit; }
 }
 
 /* ==== App shell ==== */
-.app { min-height: 100vh; padding-bottom: var(--tabbar-h); }
+.app {
+  min-height: 100vh;
+  min-height: 100dvh;                /* v1.04 — dynamic vh; no phantom space under mobile browser chrome */
+  padding-bottom: var(--tabbar-h);   /* fallback for env()-unaware browsers (today's behavior) */
+  padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)); /* v1.04 — reserve fixed-tabbar height + iOS/Android safe area so the last card is never hidden behind the nav */
+}
 .app-header {
   position: sticky; top: 0; z-index: 5;
   height: var(--header-h);
@@ -116,7 +121,11 @@ button, input, select, textarea { font-size: inherit; }
   display: flex; align-items: center; justify-content: center;
 }
 .hdr-btn:active { background: rgba(255,255,255,0.24); }
-.view { padding: 16px 14px 28px; min-height: calc(100vh - var(--header-h) - var(--tabbar-h)); }
+.view {
+  padding: 16px 14px 28px;
+  min-height: calc(100vh - var(--header-h) - var(--tabbar-h));
+  min-height: calc(100dvh - var(--header-h) - var(--tabbar-h)); /* v1.04 — dvh pair (28px bottom padding is the clearance cushion above the .app reservation) */
+}
 
 /* ==== Bottom tab bar ==== */
 .tabbar {
@@ -255,8 +264,11 @@ button, input, select, textarea { font-size: inherit; }
   position: fixed; inset: 0; background: rgba(0,0,0,0.40);
   /* v0.89 — raised from 50 to 200 so the sheet always appears above in-page
      dropdowns such as the cart picker panel (z-index:100) on the WO Add form.
-     Previously the open cart dropdown would render on top of the clock-in sheet. */
-  z-index: 200; display: flex; align-items: flex-end; justify-content: center;
+     Previously the open cart dropdown would render on top of the clock-in sheet.
+     v0.95 — raised from 200 to 1000 so the sheet appears above Leaflet's map
+     panes (tile: 200, overlay: 400, shadow: 500, marker: 600, popup: 700),
+     which were bleeding through the backdrop. */
+  z-index: 1000; display: flex; align-items: flex-end; justify-content: center;
 }
 .sheet {
   background: #fff; width: 100%; max-width: 480px;
